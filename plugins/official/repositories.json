@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "owner": "neko233-com",
+  "repositories": [
+    { "id": "ihub-plugin-ocr", "path": "plugins/official/ihub-plugin-ocr", "url": "https://github.com/neko233-com/ihub-plugin-ocr" },
+    { "id": "ihub-plugin-translate", "path": "plugins/official/ihub-plugin-translate", "url": "https://github.com/neko233-com/ihub-plugin-translate" },
+    { "id": "ihub-plugin-colorpick", "path": "plugins/official/ihub-plugin-colorpick", "url": "https://github.com/neko233-com/ihub-plugin-colorpick" },
+    { "id": "ihub-plugin-clipboard", "path": "plugins/official/ihub-plugin-clipboard", "url": "https://github.com/neko233-com/ihub-plugin-clipboard" },
+    { "id": "ihub-plugin-screenshot", "path": "plugins/official/ihub-plugin-screenshot", "url": "https://github.com/neko233-com/ihub-plugin-screenshot" },
+    { "id": "ihub-plugin-json-tools", "path": "plugins/official/ihub-plugin-json-tools", "url": "https://github.com/neko233-com/ihub-plugin-json-tools" },
+    { "id": "ihub-plugin-base-converter", "path": "plugins/official/ihub-plugin-base-converter", "url": "https://github.com/neko233-com/ihub-plugin-base-converter" },
+    { "id": "ihub-plugin-quick-note", "path": "plugins/official/ihub-plugin-quick-note", "url": "https://github.com/neko233-com/ihub-plugin-quick-note" }
+  ]
+}

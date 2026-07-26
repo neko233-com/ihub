@@ -1,0 +1,26 @@
+{
+  "$schema": "https://ihub.dev/schemas/plugin-manifest-v1.json",
+  "schemaVersion": 1,
+  "id": "ihub-plugin-quick-note",
+  "name": "Quick Note",
+  "version": "0.1.0",
+  "description": "Capture small notes instantly and retrieve them through full-text launcher search.",
+  "author": "iHub",
+  "license": "MIT",
+  "repository": "https://github.com/neko233-com/ihub-plugin-quick-note",
+  "engines": { "ihub": ">=0.1.0", "api": "^1.0.0" },
+  "entry": { "frontend": "dist/index.html" },
+  "activationEvents": ["onStartup", "onCommand:new-note", "onSearch"],
+  "contributes": {
+    "commands": [
+      { "id": "new-note", "title": "Create quick note", "keywords": ["note", "memo", "quick"] }
+    ],
+    "searchProviders": [
+      { "id": "quick-notes", "title": "Quick notes", "trigger": "note ", "priority": 25 }
+    ]
+  },
+  "permissions": {
+    "filesystem": { "read": ["plugin-data"], "write": ["plugin-data"] }
+  },
+  "update": { "channel": "stable", "autoUpdate": true }
+}

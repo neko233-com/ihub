@@ -1,0 +1,140 @@
+{
+  "$schema": "./registry.schema.json",
+  "schemaVersion": 1,
+  "name": "iHub Official Plugins",
+  "homepage": "https://github.com/neko233-com/ihub",
+  "source": {
+    "repository": "https://github.com/neko233-com/ihub",
+    "path": "plugins/registry.json"
+  },
+  "packages": [
+    {
+      "id": "ihub-plugin-ocr",
+      "name": "OCR",
+      "description": "Recognize text from screenshots, images, and selected files with a local native engine.",
+      "icon": "icons/ocr.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-ocr",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["filesystem.read", "clipboard.write", "nativeApi"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-translate",
+      "name": "Translate",
+      "description": "Translate selected text with configurable providers and clipboard-friendly actions.",
+      "icon": "icons/translate.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-translate",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["network", "clipboard.read", "clipboard.write"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-colorpick",
+      "name": "Color Picker",
+      "description": "Pick screen colors and copy HEX, RGB, HSL, or CSS values.",
+      "icon": "icons/colorpick.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-colorpick",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.write", "globalShortcut", "nativeApi"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-clipboard",
+      "name": "Clipboard History",
+      "description": "Search, pin, and reuse clipboard history from the launcher.",
+      "icon": "icons/clipboard.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-clipboard",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.read", "clipboard.write", "filesystem.write"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-screenshot",
+      "name": "Screenshot",
+      "description": "Capture, annotate, copy, or save a region of the current screen.",
+      "icon": "icons/screenshot.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-screenshot",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["filesystem.write", "clipboard.write", "globalShortcut", "nativeApi"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-json-tools",
+      "name": "JSON Tools",
+      "description": "Format, validate, query, convert, and copy JSON without leaving the launcher.",
+      "icon": "icons/json.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-json-tools",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.read", "clipboard.write", "filesystem.read", "filesystem.write"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-base-converter",
+      "name": "Base Converter",
+      "description": "Convert values between binary, octal, decimal, hexadecimal, and encoded text.",
+      "icon": "icons/base-converter.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-base-converter",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.read", "clipboard.write"],
+      "status": "bootstrap"
+    },
+    {
+      "id": "ihub-plugin-quick-note",
+      "name": "Quick Note",
+      "description": "Capture small notes instantly and retrieve them through full-text launcher search.",
+      "icon": "icons/quick-note.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-quick-note",
+        "defaultRef": "main",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "main" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["filesystem.read", "filesystem.write"],
+      "status": "bootstrap"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://ihub.dev/schemas/plugin-manifest-v1.json",
+  "schemaVersion": 1,
+  "id": "ihub-plugin-ocr",
+  "name": "OCR",
+  "version": "0.1.0",
+  "description": "Recognize text from screenshots, images, and selected files using a local native engine.",
+  "author": "iHub",
+  "license": "MIT",
+  "repository": "https://github.com/neko233-com/ihub-plugin-ocr",
+  "engines": { "ihub": ">=0.1.0", "api": "^1.0.0" },
+  "entry": { "frontend": "dist/index.html" },
+  "backend": {
+    "protocol": "jsonl-rpc-v1",
+    "restart": "on-failure",
+    "binaries": [
+      { "target": "windows-x86_64", "path": "bin/windows-x86_64/ocr-worker.exe" },
+      { "target": "windows-aarch64", "path": "bin/windows-aarch64/ocr-worker.exe" },
+      { "target": "darwin-x86_64", "path": "bin/darwin-x86_64/ocr-worker" },
+      { "target": "darwin-aarch64", "path": "bin/darwin-aarch64/ocr-worker" }
+    ]
+  },
+  "activationEvents": ["onCommand:recognize-image", "onFile:png", "onFile:jpg", "onFile:jpeg", "onFile:pdf"],
+  "contributes": {
+    "commands": [
+      { "id": "recognize-image", "title": "Recognize text from image", "keywords": ["ocr", "image", "text"] }
+    ],
+    "searchProviders": [
+      { "id": "ocr-actions", "title": "OCR", "trigger": "ocr ", "priority": 30 }
+    ]
+  },
+  "permissions": {
+    "filesystem": { "read": ["user-selected"] },
+    "clipboard": { "write": true },
+    "notifications": true,
+    "nativeApi": true
+  },
+  "update": { "channel": "stable", "autoUpdate": true }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@ihub/plugin-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK and manifest contract for iHub plugins.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./manifest": {
+      "types": "./dist/manifest.d.ts",
+      "default": "./dist/manifest.js"
+    },
+    "./manifest.schema.json": "./manifest.schema.json"
+  },
+  "files": [
+    "dist",
+    "manifest.schema.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

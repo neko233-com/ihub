@@ -1,0 +1,28 @@
+[package]
+name = "ihub"
+version = "0.1.0"
+description = "A fast, extensible desktop command hub"
+authors = ["iHub contributors"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "ihub_core"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arboard = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fuzzy-matcher = "0.3"
+ignore = "0.4"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"

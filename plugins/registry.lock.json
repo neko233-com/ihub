@@ -1,0 +1,81 @@
+{
+  "$schema": "./registry.lock.schema.json",
+  "schemaVersion": 1,
+  "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
+  "lockState": "bootstrap",
+  "generatedAt": null,
+  "packages": [
+    {
+      "id": "ihub-plugin-ocr",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-ocr", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "filesystem": { "read": ["user-selected"] }, "clipboard": { "write": true }, "nativeApi": true },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-translate",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-translate", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "network": { "allow": ["provider-configured"] }, "clipboard": { "read": true, "write": true } },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-colorpick",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-colorpick", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "clipboard": { "write": true }, "globalShortcut": true, "nativeApi": true },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-clipboard",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-clipboard", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "clipboard": { "read": true, "write": true }, "filesystem": { "write": ["plugin-data"] } },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-screenshot",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-screenshot", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "filesystem": { "write": ["user-selected"] }, "clipboard": { "write": true }, "globalShortcut": true, "nativeApi": true },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-json-tools",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-json-tools", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "clipboard": { "read": true, "write": true }, "filesystem": { "read": ["user-selected"], "write": ["user-selected"] } },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-base-converter",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-base-converter", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "clipboard": { "read": true, "write": true } },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    },
+    {
+      "id": "ihub-plugin-quick-note",
+      "source": { "url": "https://github.com/neko233-com/ihub-plugin-quick-note", "requestedRef": "main" },
+      "resolved": { "commit": null, "version": null },
+      "integrity": { "manifestSha256": null, "artifacts": [] },
+      "permissions": { "filesystem": { "read": ["plugin-data"], "write": ["plugin-data"] } },
+      "verified": false,
+      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+    }
+  ]
+}

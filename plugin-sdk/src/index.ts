@@ -1,0 +1,33 @@
+export { MANIFEST_SCHEMA_VERSION, assertValidManifest, validateManifest } from "./manifest.js";
+export type { ManifestIssue, ManifestValidationResult } from "./manifest.js";
+export { bootstrapPlugin, createDevelopmentBridge, getHostBridge, hasIHubHost } from "./runtime.js";
+export type {
+  BootstrapOptions,
+  CommandDefinition,
+  CommandHandler,
+  CommandInvocation,
+  CommandResult,
+  DevelopmentBridge,
+  Disposable,
+  HostBridge,
+  HostRequest,
+  InjectedHostApi,
+  Json,
+  JsonPrimitive,
+  NotificationOptions,
+  PluginBinary,
+  PluginContributions,
+  PluginContext,
+  PluginManifest,
+  PluginPermissions,
+  PluginSettingDefinition,
+  PluginTarget,
+  QuickActionDefinition,
+  SearchHandler,
+  SearchProviderDefinition,
+  SearchRequest,
+  SearchResult,
+  SpawnOptions,
+  SpawnResult,
+  Unlisten,
+} from "./types.js";

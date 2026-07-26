@@ -1,0 +1,56 @@
+{
+  "$schema": "../../plugin-sdk/manifest.schema.json",
+  "schemaVersion": 1,
+  "id": "ihub-plugin-hello",
+  "name": "Hello iHub",
+  "version": "0.1.0",
+  "description": "A minimal TypeScript/Vite iHub plugin with a command, search provider, and setting.",
+  "author": "iHub",
+  "license": "MIT",
+  "engines": {
+    "ihub": ">=0.1.0",
+    "api": "^1.0.0"
+  },
+  "entry": {
+    "frontend": "dist/index.html"
+  },
+  "activationEvents": ["onCommand:hello", "onSearch"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "hello",
+        "title": "Say hello",
+        "subtitle": "Show a greeting from the Hello plugin",
+        "keywords": ["hello", "hi", "example"],
+        "icon": "public/icon.svg"
+      }
+    ],
+    "searchProviders": [
+      {
+        "id": "hello-search",
+        "title": "Hello examples",
+        "trigger": "hello ",
+        "priority": 20
+      }
+    ],
+    "settings": [
+      {
+        "key": "displayName",
+        "title": "Greeting name",
+        "description": "The name used by the greeting command.",
+        "type": "string",
+        "default": "iHub user"
+      }
+    ]
+  },
+  "permissions": {
+    "clipboard": {
+      "write": true
+    },
+    "notifications": true
+  },
+  "update": {
+    "channel": "stable",
+    "autoUpdate": true
+  }
+}

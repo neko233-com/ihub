@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ihub.dev/schemas/plugin-manifest-v1.json",
+  "title": "iHub Plugin Manifest",
+  "description": "Manifest contract for a frontend TypeScript plugin with an optional native binary backend.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "version", "engines", "entry", "permissions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+      "description": "Stable lowercase kebab-case package id."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "version": {
+      "type": "string",
+      "pattern": "^v?(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "description": { "type": "string", "maxLength": 500 },
+    "author": { "type": "string", "maxLength": 200 },
+    "license": { "type": "string", "maxLength": 100 },
+    "homepage": { "type": "string", "format": "uri" },
+    "repository": { "type": "string", "format": "uri" },
+    "engines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ihub", "api"],
+      "properties": {
+        "ihub": { "type": "string", "minLength": 1 },
+        "api": { "type": "string", "minLength": 1 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frontend"],
+      "properties": {
+        "frontend": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "binaries"],
+      "properties": {
+        "protocol": { "const": "jsonl-rpc-v1" },
+        "restart": { "enum": ["never", "on-failure", "always"] },
+        "binaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target", "path"],
+            "properties": {
+              "target": {
+                "enum": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"]
+              },
+              "path": { "$ref": "#/$defs/relativePath" },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "activationEvents": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(onStartup|onSearch|onCommand:[a-z0-9][a-z0-9-]{1,62}|onFile:[A-Za-z0-9.+-]+)$"
+      }
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/command" }
+        },
+        "searchProviders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/searchProvider" }
+        },
+        "settings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/setting" }
+        },
+        "quickActions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/quickAction" }
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "$ref": "#/$defs/pathScopeList" },
+            "write": { "$ref": "#/$defs/pathScopeList" }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "clipboard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "type": "boolean" },
+            "write": { "type": "boolean" }
+          }
+        },
+        "process": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "spawn": { "type": "boolean" },
+            "allow": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "shell": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "openExternal": { "type": "boolean" },
+            "openPath": { "type": "boolean" }
+          }
+        },
+        "globalShortcut": { "type": "boolean" },
+        "notifications": { "type": "boolean" },
+        "nativeApi": { "type": "boolean" }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "enum": ["stable", "beta"] },
+        "autoUpdate": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "pathScopeList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "subtitle": { "type": "string" },
+        "keywords": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "icon": { "$ref": "#/$defs/relativePath" },
+        "shortcut": { "type": "string" }
+      }
+    },
+    "searchProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "trigger": { "type": "string" },
+        "priority": { "type": "number" }
+      }
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "type"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9._-]{0,127}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "type": { "enum": ["string", "number", "boolean", "select", "textarea"] },
+        "default": {},
+        "secret": { "type": "boolean" },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "value"],
+            "properties": {
+              "label": { "type": "string" },
+              "value": { "type": ["string", "number", "boolean"] }
+            }
+          }
+        }
+      }
+    },
+    "quickAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "when": { "type": "string" }
+      }
+    }
+  }
+}

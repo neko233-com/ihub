@@ -1,0 +1,26 @@
+{
+  "$schema": "https://ihub.dev/schemas/plugin-manifest-v1.json",
+  "schemaVersion": 1,
+  "id": "ihub-plugin-base-converter",
+  "name": "Base Converter",
+  "version": "0.1.0",
+  "description": "Convert values between binary, octal, decimal, hexadecimal, and encoded text.",
+  "author": "iHub",
+  "license": "MIT",
+  "repository": "https://github.com/neko233-com/ihub-plugin-base-converter",
+  "engines": { "ihub": ">=0.1.0", "api": "^1.0.0" },
+  "entry": { "frontend": "dist/index.html" },
+  "activationEvents": ["onCommand:convert-base", "onSearch"],
+  "contributes": {
+    "commands": [
+      { "id": "convert-base", "title": "Convert number base", "keywords": ["binary", "decimal", "hex", "base64"] }
+    ],
+    "searchProviders": [
+      { "id": "base-converter", "title": "Base converter", "trigger": "base ", "priority": 15 }
+    ]
+  },
+  "permissions": {
+    "clipboard": { "read": true, "write": true }
+  },
+  "update": { "channel": "stable", "autoUpdate": true }
+}

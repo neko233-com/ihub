@@ -1,0 +1,25 @@
+# Keep source files portable across Windows and macOS.
+* text=auto eol=lf
+
+# Scripts are most convenient with the native Windows line ending there.
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
+# Do not attempt line-ending conversion for binary assets or release outputs.
+*.ico binary
+*.icns binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg binary
+*.dmg binary
+*.msi binary
+*.exe binary
+*.dll binary
+*.pdb binary

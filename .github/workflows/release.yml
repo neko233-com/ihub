@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing or new tag to release (for example, v0.1.0)
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a pre-release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release_tag.outputs.value }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate tag, versions, and updater configuration
+        id: release_tag
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          package_version="$(node -p "require('./package.json').version")"
+
+          if [[ "$tag" != "v${package_version}" ]]; then
+            echo "Release tag ($tag) must equal v${package_version}." >&2
+            exit 1
+          fi
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const tauriConfig = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+
+          if (tauriConfig.version !== packageJson.version) {
+            throw new Error(`package.json (${packageJson.version}) and tauri.conf.json (${tauriConfig.version}) differ`);
+          }
+
+          const publicKey = tauriConfig?.plugins?.updater?.pubkey;
+          if (!publicKey || publicKey.includes('REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY')) {
+            throw new Error('Configure the Tauri updater public key before creating a release.');
+          }
+          NODE
+
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+
+  build_and_upload:
+    name: ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64 installers
+            runner: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --bundles nsis,msi
+          - name: macOS Apple Silicon DMG
+            runner: macos-latest
+            rust-target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
+          - name: macOS Intel DMG
+            runner: macos-latest
+            rust-target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and upload Tauri artifacts
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for signed in-app updates. Store only the private key in
+          # GitHub Actions secrets; the matching public key belongs in Tauri config.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Optional macOS Developer ID / notarization credentials. See
+          # docs/RELEASE.md before enabling a public macOS release.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: iHub ${{ needs.prepare.outputs.tag }}
+          releaseCommitish: ${{ github.sha }}
+          releaseBody: "iHub desktop release. Verify installers with SHA256SUMS.txt."
+          releaseDraft: true
+          prerelease: ${{ inputs.prerelease || false }}
+          generateReleaseNotes: true
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
+          # These predictable names are consumed by scripts/install.ps1 and
+          # scripts/install.sh. The action also uses them in latest.json.
+          releaseAssetNamePattern: ihub_[version]_[platform]_[arch][_setup][ext]
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+          retryAttempts: 3
+
+  checksums_and_publish:
+    name: Publish checksums
+    needs: [prepare, build_and_upload]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets \
+            --clobber
+
+      - name: Generate SHA-256 manifest
+        shell: pwsh
+        run: ./scripts/generate-checksums.ps1 -InputDirectory release-assets
+
+      - name: Upload SHA-256 manifest and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release-assets/SHA256SUMS.txt
+          gh release upload "$RELEASE_TAG" release-assets/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ihub.dev/schemas/plugin-registry-lock-v1.json",
+  "title": "iHub plugin registry lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "registry", "lockState", "generatedAt", "packages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "registry": { "type": "string", "format": "uri" },
+    "lockState": { "enum": ["bootstrap", "resolved"] },
+    "generatedAt": { "type": ["string", "null"], "format": "date-time" },
+    "packages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/package" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "resolved", "integrity", "permissions", "verified"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "requestedRef"],
+          "properties": {
+            "url": { "type": "string", "format": "uri" },
+            "requestedRef": { "type": "string", "minLength": 1 }
+          }
+        },
+        "resolved": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commit", "version"],
+          "properties": {
+            "commit": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40,64}$" },
+            "version": { "type": ["string", "null"] }
+          }
+        },
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifestSha256", "artifacts"],
+          "properties": {
+            "manifestSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["target", "path", "sha256"],
+                "properties": {
+                  "target": { "type": "string" },
+                  "path": { "type": "string" },
+                  "sha256": { "$ref": "#/$defs/sha256" }
+                }
+              }
+            }
+          }
+        },
+        "permissions": { "type": "object" },
+        "verified": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}
