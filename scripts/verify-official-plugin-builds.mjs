@@ -98,10 +98,15 @@ function run(cwd, command, argumentsList) {
 
 function runPnpm(cwd, argumentsList) {
   if (process.platform !== "win32") {
-    run(cwd, "corepack", ["pnpm", ...argumentsList]);
+    run(cwd, "corepack", ["pnpm", "--ignore-workspace", ...argumentsList]);
     return;
   }
-  const commandTokens = ["corepack", "pnpm", ...argumentsList];
+  const commandTokens = [
+    "corepack",
+    "pnpm",
+    "--ignore-workspace",
+    ...argumentsList,
+  ];
   if (
     commandTokens.some(
       (token) => !/^[A-Za-z0-9:=._-]+$/.test(token),
