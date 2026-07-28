@@ -75,7 +75,7 @@ bash ./scripts/dev.sh --install-latest
 bash ./scripts/dev.sh --watch-install
 ```
 
-两种 watch 模式只监测当前工作树中 Git 已跟踪或未被忽略的**已保存路径**，用路径、文件长度与最后修改时间的元数据做快速快照；它是防抖触发器，不替代安装包签名验证。独立嵌套插件 Git 仓库只作为目录边界，不会在根项目 watcher 中递归扫描。每次变更经过一次稳定轮询后，才会复用各自的安全打包/安装流程。Windows 会按精确安装目标路径获取有界的全局命名互斥，`-Package`、`-InstallLatest` 与多个 watcher 因而不能同时清理／构建／安装同一个 NSIS 产物；锁超时只会让 watcher 在下次轮询重试。它们永不 fetch、pull、reset、checkout、clean、启动 iHub 或结束任何进程。运行中的 iHub 只会使 watcher 等待；构建失败会保留当前已安装版本，并等待下一次保存的源码变更再尝试。watcher 不会把本机开发产物伪装成 GitHub Release 更新。
+两种 watch 模式只监测当前工作树中 Git 已跟踪或未被忽略的**已保存路径**，用路径、文件长度与最后修改时间的元数据做快速快照；它是防抖触发器，不替代安装包签名验证。独立嵌套插件 Git 仓库只作为目录边界，不会在根项目 watcher 中递归扫描。每次变更经过一次稳定轮询后，才会复用各自的安全打包/安装流程。Windows 会按精确安装目标路径获取有界的全局命名互斥，`-Package`、`-InstallLatest` 与多个 watcher 因而不能同时清理／构建／安装同一个 NSIS 产物；锁超时只会让 watcher 在下次轮询重试。它们永不 fetch、pull、reset、checkout、clean、启动 iHub 或结束任何进程。运行中的 iHub 只会使 watcher 等待；构建失败会保留当前已安装版本，并按 30 秒、2 分钟、5 分钟做三次有界自动重试；持续失败后才等待下一次保存的源码变更，避免无限编译循环。持久 Windows watcher 还会把失败命令最近的有界输出写入状态文件，便于诊断无可见控制台的后台构建。watcher 不会把本机开发产物伪装成 GitHub Release 更新。
 
 本机流程会拒绝缺失本次构建 `.sig` 的包，绝不会静默降级为未签名包；它验证的是本次构建是否产出成对的 updater artifact，不是对 GitHub Release、`latest.json` 或已安装旧版本更新链路的端到端验收。Tauri 的 updater 私钥密码是**可选**的：没有密码的私钥也能签名，只有加密私钥才需要密码。
 

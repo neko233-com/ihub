@@ -87,6 +87,58 @@ function Invoke-External {
         [string[]]$CommandArguments = @()
     )
 
+    # A scheduled task has no visible console. Preserve a bounded tail of
+    # native output in the watcher status when a command fails so a persistent
+    # install cannot become an opaque "exit 1" loop. Output is captured only
+    # for the explicit background watcher; normal interactive commands keep
+    # their live streaming behavior.
+    if ($WatchInstall -and -not [string]::IsNullOrWhiteSpace($WatchStatusPath)) {
+        # Windows PowerShell wraps redirected native stderr lines as
+        # ErrorRecord objects. With the script's fail-fast preference those
+        # informational lines (for example pnpm's `$ tsc -b`) would otherwise
+        # terminate the watcher before the native exit code can be inspected.
+        $recentLines = [Collections.Generic.Queue[string]]::new()
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $Executable @CommandArguments 2>&1 | ForEach-Object {
+                $line = [string]$_
+                Write-Host $line
+                $trimmedLine = $line.Trim()
+                if (-not [string]::IsNullOrWhiteSpace($trimmedLine)) {
+                    # Bound both dimensions of the in-memory diagnostic tail:
+                    # at most 24 lines and at most 1,000 retained characters
+                    # from any one native output record.
+                    if ($trimmedLine.Length -gt 1000) {
+                        $trimmedLine = $trimmedLine.Substring($trimmedLine.Length - 1000)
+                    }
+                    $recentLines.Enqueue($trimmedLine)
+                    while ($recentLines.Count -gt 24) {
+                        [void]$recentLines.Dequeue()
+                    }
+                }
+            }
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($exitCode -ne 0) {
+            $recentOutput = (@($recentLines.ToArray()) -join ' | ')
+            if ($recentOutput.Length -gt 3500) {
+                $recentOutput = $recentOutput.Substring($recentOutput.Length - 3500)
+            }
+            $suffix = if ([string]::IsNullOrWhiteSpace($recentOutput)) {
+                ''
+            }
+            else {
+                " Recent output: $recentOutput"
+            }
+            throw "Command failed (${exitCode}): $Executable $($CommandArguments -join ' ').$suffix"
+        }
+        return
+    }
+
     & $Executable @CommandArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed ($LASTEXITCODE): $Executable $($CommandArguments -join ' ')"
@@ -1469,6 +1521,9 @@ function Invoke-DevelopmentInstallWatch {
     $stableObservations = 0
     $lastInstalledFingerprint = $null
     $lastFailedFingerprint = $null
+    $failedAttemptCount = 0
+    $failedRetryAt = [DateTime]::MinValue
+    $automaticRetryDelaysSeconds = @(30, 120, 300)
     $lastBlockedPidSet = $null
     $lastBlockedMutexName = $null
 
@@ -1487,6 +1542,8 @@ function Invoke-DevelopmentInstallWatch {
             $lastObservedFingerprint = $fingerprint
             $stableObservations = 0
             $lastFailedFingerprint = $null
+            $failedAttemptCount = 0
+            $failedRetryAt = [DateTime]::MinValue
             # A new source snapshot deserves one fresh, explicit wait message
             # even when the same installed iHub PID is still running. This is
             # observability only: WatchInstall continues to never stop it.
@@ -1496,7 +1553,16 @@ function Invoke-DevelopmentInstallWatch {
             Write-Host "Detected saved source change ($($fingerprint.Substring(0, 12))); waiting for one stable poll before packaging."
         }
 
-        if ($fingerprint -ne $lastInstalledFingerprint -and $stableObservations -ge 1 -and $fingerprint -ne $lastFailedFingerprint) {
+        $failedRetryIsDue = (
+            $fingerprint -eq $lastFailedFingerprint -and
+            $failedAttemptCount -le $automaticRetryDelaysSeconds.Count -and
+            [DateTime]::UtcNow -ge $failedRetryAt
+        )
+        if (
+            $fingerprint -ne $lastInstalledFingerprint -and
+            $stableObservations -ge 1 -and
+            ($fingerprint -ne $lastFailedFingerprint -or $failedRetryIsDue)
+        ) {
             $descriptor = Get-CurrentNsisPackageDescriptor -RepositoryRoot $RepositoryRoot
             $target = Get-ExactInstalledTarget -Descriptor $descriptor
             $processState = Get-ExactInstalledIHubProcessState -ExecutablePath $target.ExecutablePath
@@ -1528,6 +1594,8 @@ function Invoke-DevelopmentInstallWatch {
                     $lastSuccessAt = [string]$installResult.InstalledAt
                     $lastError = $null
                     $lastFailedFingerprint = $null
+                    $failedAttemptCount = 0
+                    $failedRetryAt = [DateTime]::MinValue
                     $lastBlockedMutexName = $null
                     Write-DevelopmentInstallWatchStatus -StatusPath $WatchStatusPath -RepositoryRoot $RepositoryRoot -State 'healthy' -Message "Installed and verified saved source snapshot $($fingerprint.Substring(0, 12))." -InstalledFingerprint $installedBinaryFingerprint -LastSuccessAt $lastSuccessAt -LastError $null
                     Write-Host "WatchInstall completed for source snapshot $($fingerprint.Substring(0, 12))."
@@ -1559,9 +1627,20 @@ function Invoke-DevelopmentInstallWatch {
                         }
                         else {
                             $lastFailedFingerprint = $fingerprint
+                            $failedAttemptCount++
                             $lastError = $_.Exception.Message
-                            Write-DevelopmentInstallWatchStatus -StatusPath $WatchStatusPath -RepositoryRoot $RepositoryRoot -State 'failed' -Message "Install failed for saved source snapshot $($fingerprint.Substring(0, 12)); another source save is required before retry." -InstalledFingerprint $installedBinaryFingerprint -LastSuccessAt $lastSuccessAt -LastError $lastError
-                            Write-Warning "WatchInstall failed for source snapshot $($fingerprint.Substring(0, 12)): $($_.Exception.Message) Save another source change after fixing the problem to retry."
+                            if ($failedAttemptCount -le $automaticRetryDelaysSeconds.Count) {
+                                $delaySeconds = $automaticRetryDelaysSeconds[$failedAttemptCount - 1]
+                                $failedRetryAt = [DateTime]::UtcNow.AddSeconds($delaySeconds)
+                                $retryAtText = $failedRetryAt.ToString('o')
+                                Write-DevelopmentInstallWatchStatus -StatusPath $WatchStatusPath -RepositoryRoot $RepositoryRoot -State 'retrying' -Message "Install attempt $failedAttemptCount failed for saved source snapshot $($fingerprint.Substring(0, 12)); retrying at $retryAtText." -InstalledFingerprint $installedBinaryFingerprint -LastSuccessAt $lastSuccessAt -LastError $lastError
+                                Write-Warning "WatchInstall attempt $failedAttemptCount failed for source snapshot $($fingerprint.Substring(0, 12)): $($_.Exception.Message) It will retry automatically in $delaySeconds second(s)."
+                            }
+                            else {
+                                $failedRetryAt = [DateTime]::MaxValue
+                                Write-DevelopmentInstallWatchStatus -StatusPath $WatchStatusPath -RepositoryRoot $RepositoryRoot -State 'failed' -Message "Install failed $failedAttemptCount times for saved source snapshot $($fingerprint.Substring(0, 12)); the bounded automatic retry limit was reached and another source save is required." -InstalledFingerprint $installedBinaryFingerprint -LastSuccessAt $lastSuccessAt -LastError $lastError
+                                Write-Warning "WatchInstall failed $failedAttemptCount times for source snapshot $($fingerprint.Substring(0, 12)): $($_.Exception.Message) The bounded automatic retry limit was reached; save another source change after fixing the problem."
+                            }
                         }
                     }
                 }

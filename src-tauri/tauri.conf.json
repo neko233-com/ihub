@@ -5,8 +5,8 @@
   "version": "0.1.0",
   "identifier": "com.neko233.ihub",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "corepack pnpm dev",
+    "beforeBuildCommand": "corepack pnpm build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
