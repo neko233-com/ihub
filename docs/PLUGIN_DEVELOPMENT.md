@@ -1,46 +1,26 @@
 # iHub 插件开发指南（v1）
 
-iHub 插件是一个可发布的目录：前端使用 TypeScript（推荐 Vite），可选一个或多个 Windows/macOS 原生二进制后端。前端通过 `@ihub/plugin-sdk` 调用宿主能力；原生后端通过标准输入/输出的 JSON Lines RPC 工作。
+iHub 插件是一个可发布的目录：前端使用 TypeScript（推荐 Vite），可选一个或多个 Windows/macOS 原生二进制后端。前端在正常路径中通过 iHub 的 iframe `postMessage` Bridge 调用宿主能力（可使用生成器自带的 bridge，也可在 SDK 发布后迁移）；原生后端通过标准输入/输出的 JSON Lines RPC 工作。
 
 这套机制刻意支持 OCR、FFmpeg、系统自动化等原生能力。它**不是沙箱机制**：安装包含二进制的插件等同于运行本机代码。请先阅读本文的[安全与信任](#安全与信任无沙箱)章节。
 
 ## 五分钟开始
 
-先在 **iHub 主仓库的 `examples/` 下**复制模板。模板中的 `file:../../plugin-sdk` 依赖和 Vite alias 都故意指回主仓 SDK；复制到这个位置可以直接工作。
+### 用 iHub 创建独立插件项目（推荐）
 
-```powershell
-Set-Location <iHub 主仓库根目录>
-Copy-Item -Recurse examples/ihub-plugin-hello examples/ihub-plugin-my-feature
-Set-Location examples/ihub-plugin-my-feature
-pnpm install
-pnpm dev
-```
+在桌面端安装并打开官方 **Plugin Developer Tools**（或使用内置的 **工具 → 开发者 → 创建插件项目**），先通过系统选择器选择一个已存在的父目录，再输入小写 kebab-case ID（例如 `ihub-plugin-my-feature`）。官方插件只把系统签发的短期、不透明目录授权交给宿主；页面不会提交任意路径。iHub 会在该父目录下创建同名子目录，原子预占目标路径；如果目录或同名文件已存在，操作会失败且绝不覆盖已有内容。
 
-模板是纯 TypeScript + Vite，没有 React 运行时依赖。浏览器中运行 `pnpm dev` 时，模板显式把 `createDevelopmentBridge()` 传给 SDK。
+生成的工程默认是可立即构建、链接的 TypeScript + Vite 前端插件，包含 `plugin.json`、无外部 SDK 依赖的 `src/ihub-bridge.ts`、`worker/` 原生样例、Windows/macOS 构建脚本、`docs/JSONL_RPC.md`、`docs/ENABLE_NATIVE_WORKER.md`、`public/icon.svg`、`vite.config.ts`、`package.json`、`scripts/verify-plugin.mjs` 和 README。前端 bridge 复现 iHub 的 iframe `postMessage` 契约，因此在 SDK 尚未发布到 npm 时也能直接 `pnpm install`、`pnpm dev` 和 `pnpm build`；之后可自行迁移到已发布的官方 SDK。`pnpm build` 最后只读检查 `plugin.json`、`dist/` 入口和已显式声明的本机工件路径，不安装依赖、不启动开发服务器、不执行插件代码或原生 worker。`plugin.json` 不会预先声明不存在的二进制；需要原生能力时，开发者必须先产出并验证当前平台的 worker，再显式添加其声明。创建器不会自动执行安装、构建或其他脚本。
 
-当前 MVP **没有**“加载本地插件目录”或热重载入口；浏览器预览也不等于在 iHub 中运行。若要验证当前宿主桥，请先构建插件、提交到可访问的 Git 仓库，再通过下文的 [GitHub 直装](#github-直装与去中心化分发) 导入该构建产物。导入的是一个 Git 快照，不会监听本地文件变更。
+要在 iHub 中调试，先执行一次 `pnpm build`，就可以在 **插件中心 → 开发者 → 链接本地插件** 输入该项目的**绝对目录**。创建成功后，该开发者页会自动填入刚创建的目录；“打开项目文件夹”仍是开发者明确点击后才会调用 Finder/Explorer 的便利操作，不会运行终端命令或项目文件。要测试原生命令，再用 `scripts/build-worker.ps1`（Windows）或 `sh scripts/build-worker.sh`（macOS）构建当前平台的 Rust worker，并只把真实存在的 `bin/<target>/` 工件添加到清单；`docs/JSONL_RPC.md` 说明一行请求、一行响应的 `jsonl-rpc-v1` 约定。iHub 只保存经规范化后的路径，不复制、不改写项目文件；每次打开前端时，它只为该插件实际 `entry.frontend` 所在的已构建目录创建一条新的独立 loopback 资源租约，不会扩大 Tauri `asset:` 访问范围。每次重新构建后，关闭并重新打开插件前端即可读取新的 `dist/` 输出。这个开发链接不是文件监视器或 HMR：已打开的 iframe 不会自行刷新，且本地插件与安装快照同 ID 时会暂时优先使用本地项目；解除链接后会恢复原有安装快照。
 
-### 将模板放入独立仓库
+### 从主仓示例开始
 
-独立仓库不能继续使用模板里的相对 `file:../../plugin-sdk` 依赖和 `vite.config.ts` 中指向 `../../plugin-sdk/src/index.ts` 的 alias。开发期可使用全局链接：
+新项目优先使用桌面端的“创建插件项目”：它生成的 bridge 已随项目拷贝，不依赖未发布的 npm 包，也可以直接移动到独立 GitHub 仓库。`examples/ihub-plugin-hello` 保留为 SDK 兼容示例，适合在主仓内阅读和验证；不要把其中的 `file:../../plugin-sdk` 依赖原样带到独立仓库。
 
-1. 在独立插件仓库中，先从 `package.json` 删除 `@ihub/plugin-sdk` 的 `file:../../plugin-sdk` 依赖，并删除 `vite.config.ts` 的 `resolve.alias["@ihub/plugin-sdk"]`；这样 Vite 会从 `node_modules` 解析已构建的 SDK。
-2. 在 iHub 主仓库根目录构建并注册 SDK：
+浏览器中的 `pnpm dev` 只验证页面自身，不等于在 iHub 中运行。开发期请使用上面的“链接本地插件”入口验证宿主 Bridge；它要求绝对目录、验证清单及包内相对路径，并拒绝把 iHub 托管插件目录再次链接为源码。GitHub 直装仍导入构建产物的 Git 快照，不会监听本地文件变更。
 
-   ```powershell
-   pnpm --dir plugin-sdk build
-   pnpm --dir plugin-sdk link --global
-   ```
-
-3. 回到独立插件仓库，安装其余开发依赖，再连接全局 SDK：
-
-   ```powershell
-   pnpm install
-   pnpm link --global @ihub/plugin-sdk
-   pnpm dev
-   ```
-
-全局链接只适合本地开发，不会写成可复现的发布依赖；每次会重建 `node_modules` 的 `pnpm install` 后，都应重新执行最后一条 `pnpm link --global @ihub/plugin-sdk`。SDK 发布到 npm 后，应改为在 `package.json` 中声明发布版本（例如 `"@ihub/plugin-sdk": "^1.0.0"`），移除全局链接，并重新执行 `pnpm install`。
+生成器故意**不**在 `.gitignore` 中忽略 `dist/`。GitHub 导入只读取所选 ref 已提交的文件，不会运行 `pnpm install`、`pnpm build`、CI 配置或 worker 构建脚本；可导入的发布提交必须包含实际的 `dist/` 输出、根目录 `plugin.json` 和每个清单已声明的 `bin/<target>/` 工件。
 
 发布包的最小结构：
 
@@ -58,6 +38,7 @@ ihub-plugin-my-feature/
 ```
 
 构建后保留 `plugin.json` 于包根目录；不要把它仅放进 `dist/`。
+同样不要把用于分发的 `dist/` 或已声明的 `bin/` 工件忽略掉；本地 `node_modules/`、未提交的产物和 CI 临时文件不会随 Git 快照导入。
 
 ## `plugin.json`
 
@@ -76,12 +57,14 @@ ihub-plugin-my-feature/
 | `schemaVersion` | 是 | 固定为 `1`。 |
 | `id` | 是 | 稳定的小写 kebab-case 包 ID；发布后不要改。 |
 | `engines.ihub` / `engines.api` | 是 | 宿主及 API 兼容范围。 |
-| `entry.frontend` | 是 | 包内前端入口，例如 `dist/index.html`。 |
+| `entry.frontend` | 是 | 包内前端入口，例如 `dist/index.html`；入口必须位于 `plugin.json` 所在目录的专用子目录，不能使用根目录 `index.html`。 |
 | `contributes` | 否 | 命令、搜索提供器、设置和快捷动作的静态声明。 |
 | `activationEvents` | 否 | `onStartup`、`onSearch`、`onCommand:<id>` 或 `onFile:<ext>`。 |
 | `permissions` | 是 | 前端 Bridge 的能力请求；空对象也必须明确写出。完整安装确认将在生产分发流程中加入。 |
 | `backend` | 否 | 与前端配套的原生二进制及其平台目标。 |
-| `update` | 否 | 声明稳定/测试通道和自动更新偏好；当前 MVP 不执行插件自动更新。 |
+| `update` | 否 | 声明稳定/测试通道和自动检查偏好。插件中心打开时、以及保持打开期间每 30 分钟，会对已启用、带完整 SHA-256 运行文件记录的 immutable source lock、`stable` 且来自官方 `neko233-com` HTTPS GitHub 命名空间的 `autoUpdate: true` 插件做有界只读检查；它不是全局后台任务，且绝不会后台下载、替换或启动候选代码。 |
+
+`update.autoUpdate: true` 的名称不代表静默升级授权：它只允许上面的官方来源**发现**新 commit。用户仍要在插件中心选择“应用更新”并确认；宿主会再次确认 ref 仍指向已审阅 commit，并拒绝任何权限、原生二进制或命令执行声明变化。要接受这类信任面变化，必须卸载受管快照并通过 GitHub 导入重新完成信任确认。旧版 lock 若没有运行文件 SHA-256，不会参与自动探测；它仍可由用户手动“检查更新”，重新导入后才会升级为可自动探测的受验证快照。
 
 一个不依赖原生二进制的最小清单：
 
@@ -96,7 +79,10 @@ ihub-plugin-my-feature/
   "entry": { "frontend": "dist/index.html" },
   "activationEvents": ["onCommand:open-my-feature"],
   "contributes": {
-    "commands": [{ "id": "open-my-feature", "title": "Open My feature" }]
+    "commands": [{ "id": "open-my-feature", "title": "Open My feature" }],
+    "searchProviders": [
+      { "id": "my-search", "title": "My feature", "trigger": "my ", "priority": 10 }
+    ]
   },
   "permissions": {
     "notifications": true
@@ -104,7 +90,9 @@ ihub-plugin-my-feature/
 }
 ```
 
-清单中的包内路径不能是绝对路径，也不能借由 `..` 离开插件根目录。每个 `backend.binaries[].target` 只能声明一次：`windows-x86_64`、`windows-aarch64`、`darwin-x86_64`、`darwin-aarch64`。
+清单中的包内路径不能是绝对路径，也不能借由 `..` 离开插件根目录。`entry.frontend` 必须放在专用构建目录（通常是 `dist/`）内：iHub 只会把**该入口所在目录**作为 loopback 静态资源根，绝不会把包含 `plugin.json`、`.env`、`bin/` 或源码的包根暴露给浏览器。每个 `backend.binaries[].target` 只能声明一次：`windows-x86_64`、`windows-aarch64`、`darwin-x86_64`、`darwin-aarch64`。
+
+每个 `contributes.commands[]` 的 `id` 必须唯一，并可选 `execution: "frontend" | "native"`。不写时保持兼容行为：含原生 worker 的插件默认启动 native 命令，其余插件默认打开前端。带 worker 的插件若要先显示自己的 UI（例如 OCR 先让用户选图），应在该入口命令明确写 `"execution": "frontend"`；原生命令只能通过清单锁定的 worker 执行。原生命令还可显式写 `"run": { "timeoutMs": 900000 }`：该字段只能与 `execution: "native"` 一起使用，范围为 1,000–1,800,000 ms；省略时保持兼容的 60 秒上限。
 
 ## 前端 SDK
 
@@ -125,11 +113,15 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
       id: "result-1",
       title: `Search: ${request.query}`,
       score: 1,
-      actions: [{ id: "open", title: "Open" }]
+      payload: { query: request.query }
     }],
   );
 });
 ```
+
+`search.register()` 的 `id` 必须与 `contributes.searchProviders` 中的同名声明匹配；宿主会拒绝未声明的运行时提供器。用户在启动器中输入匹配文本时，iHub 才惰性载入该插件的单个隐藏 iframe；在 `lifecycle.ready` 之后，最多同时查询 3 个匹配提供器，每个请求在原生侧按 `requestId` 关联，并在 280ms 后超时。单个提供器最多返回 6 项，启动器最多展示其中 3 项；标题、载荷和结果数量均有上限。未注册、加载失败、超时或返回无效 JSON 的提供器只会缺席本次结果，不会阻塞本机搜索。
+
+带 `trigger` 的提供器仅在输入以该前缀开头时被调用，传给处理器的 `request.query` 已移除前缀；无 `trigger` 的提供器可参与普通文本搜索。选择一项插件搜索结果会打开该插件前端，并向 `ihub://plugin/<id>/event/search.select` 发送 `{ requestId, providerId, resultId, payload }`。可用 `ihub.events.on("search.select", listener)` 消费它；`actions` 目前仅是结果元数据，尚没有独立的启动器动作执行 API。
 
 `PluginContext` 提供的宿主 API：
 
@@ -137,15 +129,161 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | --- | --- | --- |
 | `commands.register` | 无 | 注册命令处理器。 |
 | `search.register` | 无 | 注册低延迟搜索提供器。 |
-| `settings.get/set` | 无 | 插件命名空间下的设置存储。密钥设置应在清单上标注 `secret`。 |
+| `settings.get/set` | 无 | 插件命名空间下的设置存储。密钥设置必须在清单上标注 `secret`。 |
 | `clipboard.readText/writeText` | `clipboard.read/write` | 读写剪贴板文本。 |
+| `clipboard.history.snapshot` | `clipboard.history` | 仅在插件主动调用时返回最多 36 条、已经由用户启用的内置纯文本历史；不会开启采集、读取当前系统剪贴板或修改全局历史。 |
+| `screenCapture.acquireFocusLease/releaseFocusLease` | `screenCapture: true` | 仅在浏览器 `getDisplayMedia` 系统选择器显示期间临时阻止启动器因焦点丢失而隐藏；不授予屏幕像素、录制、全局快捷键或原生捕获 API。 |
+| `cursorColor.sampleOnce` | `cursorColor: true` | 仅当前可见插件页可请求。iHub 宿主必须先由用户确认，再固定等待 2 秒读取光标下一个像素；只返回 `hex`/`rgb`，不返回坐标、截图、显示器/窗口信息，也不支持后台轮询。 |
+| `launcherContext.consume` | `launcherContext.text/files/image` | 仅在用户明确选择一次已声明的前端插件命令后，按该次动作签发的不透明 `contextId` 可消费一次。文本有上限；文件只有 canonical 名称/类型/大小与无路径 handle；图片只有 PNG 元数据与无像素 handle。不会读取剪贴板、解析路径或变成文件授权。 |
+| `windowManagement.manageLauncher` | `windowManagement: true` | 仅对 iHub 标签为 `main` 的主启动器执行固定动作：居中、贴靠左侧、贴靠右侧或切换置顶。不会读取、枚举、聚焦或控制其他应用窗口，也不接受任意坐标。 |
 | `notifications.show` | `notifications` | 显示本机通知。 |
 | `shell.openExternal/openPath` | `shell.*` | 打开 URL 或文件路径。 |
-| `process.spawn` | `process.spawn` | 启动批准范围内的外部进程。优先使用专用 `backend`。 |
+| `filesystem.selectDirectory` | `filesystem.read: ["user-selected"]` | 打开原生文件夹选择器，返回当前插件专属、15 分钟过期的 `grantId`。 |
+| `filesystem.selectFiles` | `filesystem.read: ["user-selected"]` | 打开原生多文件选择器；网页只获得文件名/大小与短期 `grantId`，不会获得本地路径。 |
+| `filesystem.previewBatchRename` | `filesystem.read: ["user-selected"]` | 只在该 `grantId` 对应的目录生成安全重命名预览。 |
+| `filesystem.applyBatchRename` | `filesystem.write: ["user-selected"]` | 只接受同一 `grantId` 和宿主刚生成、5 分钟内且单次有效的 `previewId`。 |
+| `native.runCommand` | `nativeApi` | 运行清单中声明的当前平台 worker；若传入文件授权，路径只放入 worker 的 JSON 输入，网页不可见。默认最多 60 秒，原生命令可通过受审阅的 `run.timeoutMs` 将前台等待上限提高至最多 30 分钟。 |
 | `events.on` | 取决于事件 | 订阅宿主发送给当前插件的事件。 |
 | `logger` | 无 | 写入带插件 ID 的宿主日志。 |
 
-不要直接导入 `@tauri-apps/api`。iHub 会把 `entry.frontend` 作为 `asset:` 资源载入宿主控制的 iframe；SDK 在该 iframe 中通过父窗口 `postMessage` 桥访问宿主。`window.__IHUB_PLUGIN_API__` 可作为其他受控宿主表面的替代注入桥。两种生产路径都不向插件 bundle 暴露 Tauri API；SDK 不提供直接调用 Tauri 的后备路径。浏览器预览或测试必须显式传入 `createDevelopmentBridge()` 或自定义 `HostBridge`。
+普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
+
+不要主动导入 `@tauri-apps/api`。iHub 会为 `entry.frontend` 创建每 iframe 独立的 `127.0.0.1` loopback 资源来源；SDK 在该 iframe 中通过父窗口 `postMessage` Bridge 访问宿主。该 remote origin 不匹配 iHub 的 Tauri capability，父窗口还会验证消息来源窗口与精确 origin，并由宿主附加租约。`window.__IHUB_PLUGIN_API__` 是 SDK 预留给未来受控宿主表面的接口，当前 launcher 不会注入它。SDK 不提供直接调用 Tauri 的后备路径；这条边界只覆盖 TypeScript 前端，不会限制插件附带的原生 worker，因此 GitHub 导入的前端和二进制仍必须仅来自你信任的发布者。浏览器预览或测试必须显式传入 `createDevelopmentBridge()` 或自定义 `HostBridge`。
+
+Vite 插件必须保留 `base: "./"`（生成模板已配置）。iHub 的前端 URL 含有短期 `/v1/<token>/` 前缀；默认 `base: "/"` 会让产物请求错误的根路径 `/assets/...`，从而无法加载静态资源。
+
+### 启动器上下文交接（显式、一次性）
+
+`launcherContext` 是给 “用此文本翻译”“用此图片 OCR” 一类动作准备的**宿主/SDK 原语**，不是剪贴板、文件系统或图片读取权限。插件只需在自己的 `plugin.json` 写出真正需要的最小集合：
+
+```json
+{
+  "permissions": {
+    "launcherContext": {
+      "text": true,
+      "files": true,
+      "image": true
+    }
+  }
+}
+```
+
+三个 flag 独立审核：`text` 不会带来文件元数据，`files` 不会带来路径或读取权，`image` 不会带来 PNG 字节、屏幕像素、录屏流或 `getDisplayMedia`。文件输入会先在宿主规范化并确认仍是普通文件/文件夹；交给 iframe 的只有 `name`、`kind`、可选 `size` 和随机 `handleId`。该 handle 目前没有“解析为路径/字节”的 Bridge API。图片同样只有受限 `image/png` 元数据和 handle。原生 worker 的既有能力不因此变强：不能把这个上下文 ID 当作 `fileGrantId`，也不会自动把它传给 worker。
+
+插件前端只消费、从不签发上下文。一个可信 iHub 父界面必须严格按下面顺序实现动作；调用 API 本身不能证明用户意图，因此**不得**从搜索建议渲染、计时器、启动事件、剪贴板监听或后台 runtime 调用第 2 步：
+
+1. 用户点击一个可见的“用 <插件> 处理当前内容”动作；父界面确认目标是同一插件已经声明的 `execution: "frontend"` 命令，并从当前这次显式粘贴/选择得到源内容。
+2. 父界面只能在该 iframe 的 `lifecycle.ready`、命令注册和原生命令事件订阅都已完成后，调用受 Tauri 主界面限制的 `issue_plugin_launcher_context({ pluginId, commandId, context, frontendLeaseId })`。它会校验大小、路径/文件状态、图片元数据、每个 `launcherContext.*` flag 及这个**当前**前端租约，并返回 60 秒过期的 `contextId`；它不会主动打开 iframe 或推送内容。
+3. 父界面立即调用 `invoke_plugin_frontend_command({ pluginId, commandId, launcherContextId: contextId, frontendLeaseId })`。宿主会再次校验同一租约，只把 `{ contextId, expiresInMs }` 放入这一次命令事件，拒绝跨插件、跨命令、跨租约或重复分派。
+4. 命令处理器自行决定是否使用，并在处理器内显式消费一次：
+
+```ts
+await ihub.commands.register(
+  { id: "translate-selection", title: "Translate selection" },
+  async (invocation) => {
+    const transfer = invocation.launcherContext;
+    if (!transfer) return { message: "No selection was handed to this action." };
+
+    const selected = await ihub.launcherContext.consume(transfer.contextId);
+    // selected.text / selected.files / selected.image are bounded metadata.
+    return { message: selected.text ? "Selection received" : "No text selected" };
+  },
+);
+```
+
+消费前关闭/reload iframe、停用、更新、解除本地链接或卸载插件都会撤销 token；重复消费、不同插件、不同命令、不同租约或过期 token 都会失败。当前主启动器的上下文建议会进入专用的“选择插件命令”面板：它只列出**已启用、已安装、带 frontend 入口**，且 `launcherContext.text/files/image` 与当前类别精确匹配的命令；浏览或搜索候选不会签发 token。用户先选择命令，再点击“确认并运行”后，主界面会等待该 iframe 完成 `lifecycle.ready`、命令注册和事件订阅，然后才按第 2–3 步签发并分派。主界面为这次确认保留独立 generation：任何隐藏、关闭、焦点重开、Escape、来源更新或租约替换都会先作废 generation，再丢弃内存源；它会持续保存已分派 token 的精确 generation/租约撤销句柄，直到插件消费、宿主 TTL 或表面释放，因此已签发**或已分派但未消费**的 token 都会立即撤销。该界面不读取 ambient clipboard，也不会把 `contextId` 写入设置、日志、历史或网络请求。
+
+### 用户选择目录与批量重命名
+
+文件系统权限不是全盘路径通行证。插件应由用户点击 UI 后调用 `ihub.filesystem.selectDirectory()`，并显式处理 `{ cancelled: true }`。用户选中的目录会被宿主规范化，返回的 `grantId` 仅属于发起调用的插件、不会持久化，并在 15 分钟后过期。
+
+批量重命名应使用下面的两阶段流程：
+
+```ts
+const selected = await ihub.filesystem.selectDirectory();
+if (selected.cancelled) return;
+
+const preview = await ihub.filesystem.previewBatchRename({
+  grantId: selected.grantId,
+  find: "draft-",
+  replace: "final-",
+  useRegex: false,
+});
+// 先在插件 UI 展示 preview.items 和 preview.errors，再让用户确认。
+if (preview.canApply && preview.previewId) {
+  await ihub.filesystem.applyBatchRename({
+    grantId: selected.grantId,
+    previewId: preview.previewId,
+  });
+}
+```
+
+宿主只枚举所选目录的直接普通文件，并在预览与执行时分别复查路径、符号链接、重名冲突和过期记录。前端不能传 `directory` 或 `items` 给执行调用；预览令牌与授权目录、插件 ID 绑定且用后即失效。不要试图把 `grantId` 保存到设置、日志或远端服务。
+
+### 用户选择文件与原生 worker
+
+图片、OCR 等插件不应要求用户把本地绝对路径粘贴进网页。声明 `filesystem.read: ["user-selected"]` 与 `nativeApi: true` 后，前端可以在用户点击时选择文件，再将短期 `grantId` 交给自身已声明的 worker：
+
+```ts
+const selection = await ihub.filesystem.selectFiles();
+if (selection.cancelled) return;
+
+const result = await ihub.native.runCommand({
+  commandId: "recognize-image",
+  fileGrantId: selection.grantId,
+  input: { language: "eng" },
+});
+```
+
+网页只得到文件名和大小。worker 收到的 JSONL `params` 是 `{ input, files }`，其中 `files` 才包含经过宿主规范化的本地路径。每个授权最多 24 个文件、15 分钟后过期、只能由发起插件使用一次；插件停用、更新、卸载或 iframe 生命周期清理也会撤销它。worker 的 stdout/stderr 会回到调用 iframe，因此受信任的二进制仍可主动回显路径；文件授权不是针对二进制的保密或沙箱边界。调用 native worker 等同于执行该插件的本机代码，安装前必须审阅来源与二进制。
+
+`run.timeoutMs` 只适用于用户正在前台等待结果的一次性 worker；宿主会在上限到达时终止**声明的 worker 进程**。它不是后台任务、进度或取消 API；当前版本也不会递归终止该 worker 自行启动的 FFmpeg 等子进程。需要子进程的 worker 必须自行建立、停止和回收它们，且插件不应把“关闭 iframe/停用插件”当作取消信号。`run.timeoutMs` 会进入来源锁和例行更新的安全比较，更新不能静默把短命令改成长时间任务。
+
+### 浏览器屏幕选择器与焦点租约
+
+若插件在用户点击后调用浏览器的 `navigator.mediaDevices.getDisplayMedia()`，可在**同一个用户手势处理流程中**用 `screenCapture: true` 申请临时焦点租约，防止系统屏幕选择器短暂夺走焦点时 iHub 自动隐藏。它不是录屏授权，也不会给插件任何额外的屏幕内容或系统 API：浏览器仍会显示并管理系统选择器。
+
+```json
+{
+  "permissions": {
+    "screenCapture": true
+  }
+}
+```
+
+```ts
+// 先开始异步申请，但绝不能在 getDisplayMedia 前 await 它：
+// iframe/Tauri 往返会让 Chromium 丢失这次点击的 transient activation。
+const focusLease = ihub.screenCapture.acquireFocusLease().catch((error) => {
+  console.warn("iHub focus protection was unavailable", error);
+  return null;
+});
+
+// 必须紧随用户点击同步调用；这里没有 await。
+const streamPromise = navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+try {
+  const stream = await streamPromise;
+  // 仅在用户已完成浏览器选择后使用 stream。
+} finally {
+  const lease = await focusLease;
+  if (lease) {
+    await ihub.screenCapture.releaseFocusLease(lease.leaseId).catch(() => undefined);
+  }
+}
+```
+
+每个插件同一时间最多保留一个租约；新申请会替换该插件旧租约。宿主全局最多保留 4 个，固定在 90 秒后过期，并会在插件 iframe 销毁、停用、更新、解除链接或卸载时撤销。`releaseFocusLease()` 只能释放本插件持有的随机不透明 ID；其他插件的 ID 会被拒绝，未知或已经过期的 ID 仅返回 `{ released: false }`，便于 `finally` 安全重试。获取租约失败不应阻断浏览器选择器，也不能造成未处理的 Promise rejection。不要把租约 ID 写入设置、日志、剪贴板或网络。
+
+### 原生单像素取色
+
+若插件需要取鼠标下的一个颜色值，请在 `plugin.json` 明确声明 `cursorColor: true`，并且只从用户点击的**可见插件页面**调用：
+
+```ts
+const color = await ihub.cursorColor.sampleOnce();
+// color is exactly { hex: "#RRGGBB", rgb: "rgb(r, g, b)" }
+```
+
+调用并不会直接读取屏幕：iHub 的父层会先显示自己的确认层，用户确认后才签发一次性授权；宿主随后固定等待两秒，原生层只采样光标下一个像素并删除授权。SDK 为这一笔前台请求保留最多两分钟的响应通道，以便 macOS 首次“屏幕录制”授权完成；这不改变宿主的一次性、不可后台化限制。插件不能提交延迟、坐标、区域、显示器、窗口 ID 或“已确认”标记，返回值也绝不会带位置数据。该功能在 Windows/macOS 上可用；macOS 需要用户为 iHub 授予系统“屏幕录制”权限。后台搜索 runtime、过期页面、重复授权或定时轮询都会被拒绝。
 
 ### 生命周期与 IPC
 
@@ -159,7 +297,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 }
 ```
 
-在默认 iframe 桥中，SDK 将该对象通过 `ihub-plugin-bridge/v1` 的 `postMessage` 请求发送给父窗口。父窗口验证消息来自当前 iframe、丢弃插件自报的 `pluginId`，使用当前活动插件 ID 重建请求后，才调用 Rust 的 `plugin_host_call({ request })`；结果通过 `ihub-host-bridge/v1` 的同一请求 ID 回到 iframe。插件作者不能也不需要直接调用 Tauri `invoke`。
+在默认 iframe 桥中，SDK 将该对象通过 `ihub-plugin-bridge/v1` 的 `postMessage` 请求发送给父窗口。父窗口验证消息来自当前 iframe **以及该 iframe 租约的精确 loopback origin**、丢弃插件自报的 `pluginId`，使用当前活动插件 ID 并附加**宿主拥有的租约 ID**重建请求后，才调用 Rust 的 `plugin_host_call({ request })`；结果通过 `ihub-host-bridge/v1` 的同一请求 ID 和精确 target origin 回到 iframe。插件消息本身不携带也不能选择该租约；更新、停用、重新链接、解除链接或卸载后，旧租约会被 Rust 侧拒绝。插件作者不需要、也不应依赖直接调用 Tauri `invoke`；原生 worker 仍不是安全隔离，仍只应载入可信代码。
 
 SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 
@@ -169,7 +307,7 @@ SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 | `ihub://plugin/<id>/search` | `requestId`、`providerId`、`query`、`limit`、`context` | `search.complete` |
 | `ihub://plugin/<id>/event/<name>` | 插件定义的 JSON 载荷 | 无；监听器自行处理。 |
 
-这些事件同样必须由宿主转换为父窗口到 iframe 的 `postMessage`；插件不能直接订阅 Tauri 事件。`bootstrapPlugin` 成功激活后发送 `lifecycle.ready`，销毁时发送 `lifecycle.dispose`。命令和搜索处理器必须尽快返回；慢任务应首先给出可用结果，再通过插件自己的 UI 或事件继续展示进度。
+这些事件同样应由宿主转换为父窗口到 iframe 的 `postMessage`；SDK 不支持插件直接订阅 Tauri 事件。`bootstrapPlugin` 成功激活后发送 `lifecycle.ready`，销毁时发送 `lifecycle.dispose`。命令和搜索处理器必须尽快返回；慢任务应首先给出可用结果，再通过插件自己的 UI 或事件继续展示进度。
 
 
 ## 原生二进制后端
@@ -179,7 +317,6 @@ SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 ```json
 "backend": {
   "protocol": "jsonl-rpc-v1",
-  "restart": "on-failure",
   "binaries": [
     { "target": "windows-x86_64", "path": "bin/windows-x86_64/worker.exe" },
     { "target": "darwin-aarch64", "path": "bin/darwin-aarch64/worker" }
@@ -190,7 +327,7 @@ SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 宿主只启动当前平台匹配的二进制，并通过 stdin/stdout 使用一行一个 JSON-RPC 2.0 消息的 `jsonl-rpc-v1` 协议：
 
 ```json
-{"jsonrpc":"2.0","id":"42","method":"ocr.recognize","params":{"path":"C:\\image.png"}}
+{"jsonrpc":"2.0","id":"42","method":"ocr.recognize","params":{"input":{"language":"zh-Hans"},"files":[{"path":"<host-granted-path>","name":"image.png","size":12345}]}}
 {"jsonrpc":"2.0","id":"42","result":{"text":"Recognized text"}}
 ```
 
@@ -198,41 +335,50 @@ SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 
 - stdout 只能写 JSON-RPC 行；日志、进度诊断和第三方库输出必须走 stderr。
 - 每一行是完整 UTF-8 JSON，最大请求/响应大小由宿主限制；二进制数据应写临时文件并传路径，而不是塞进 JSON。
-- 使用 `id` 回应请求；通知不带 `id`；错误遵循 JSON-RPC `error.code`、`message`、`data` 结构。
-- 当前 MVP 为二进制命令提供 `IHUB_PLUGIN_ID`、`IHUB_COMMAND_ID` 和 JSON 字符串 `IHUB_PLUGIN_INPUT` 环境变量，并以 JSONL 写入标准输入。生产协议可再补充版本、数据目录与协议标识；不要假定工作目录是插件目录。
-- 二进制须自行处理取消、超时和子进程回收。`restart: "always"` 只适合无状态常驻服务。
+- 使用完全相同的 `id` 回应请求；当前宿主要求 stdout 恰好一条非空响应行，错误遵循 JSON-RPC `error.code`、`message`、`data` 结构。
+- 当前 MVP 为二进制命令提供 `IHUB_PLUGIN_ID`、`IHUB_COMMAND_ID` 环境变量，并以 JSONL 写入标准输入；请求数据不会再镜像进环境变量。生产协议可再补充版本、数据目录与协议标识；不要假定工作目录是插件目录。
+- 二进制须自行处理取消、超时和子进程回收。当前宿主为每次调用启动并等待一个 worker；省略 `run.timeoutMs` 时最多等待 60 秒，显式声明的前台上限最多 30 分钟。到期时宿主仅终止并回收声明的 worker，不承诺杀死它启动的进程树。`backend.restart` 不是已实现的常驻/自动重启语义，插件不能依赖它。
 
-原生后端可以由 Rust、Go、C/C++、Python 打包程序或现有 CLI 实现。生产分发阶段应为每个二进制计算哈希，并在安装锁文件中记录实际解析的提交与完整性信息；当前 MVP 尚未自动验证这些哈希或维护完整的安装锁。
+原生后端可以由 Rust、Go、C/C++、Python 打包程序或现有 CLI 实现。iHub 会为每次 Git 导入写入来源、请求 ref、实际解析 commit 和安装时间的 source lock；新导入还会锁定 `plugin.json`、整个可服务的前端构建目录，以及清单声明的每个原生二进制的 SHA-256。后续打开前端、执行命令或检查/应用更新时若这些文件与锁不一致，iHub 会拒绝加载或运行该快照；重新导入才能生成新的经用户确认的锁。例行 Git 更新会拒绝任何桥接权限或原生二进制声明变化；发布者签名与界面中的逐字段权限/哈希 diff 仍是下一阶段能力。
 
 ## GitHub 直装与去中心化分发
 
 ### 当前 MVP
 
-iHub 的插件中心只是一个可选发现源，不是唯一下载源。当前 MVP 的 GitHub 导入器接受以下三种写法：
+iHub 的插件中心只是一个可选发现源，不是唯一下载源。当前 MVP 的 GitHub 导入器接受以下三种写法（均可附 `@tag-or-branch`，URL 可附 `#ref`）：
 
 - GitHub 仓库 URL，例如 `https://github.com/acme/ihub-plugin-weather`；
 - `github:owner/repo`，例如 `github:acme/ihub-plugin-weather`；
 - 裸 `owner/repo`，例如 `acme/ihub-plugin-weather`。
 
-它会浅克隆该仓库当前可解析的 `HEAD`，读取包根（或单层子目录）的 `plugin.json` / `ihub.plugin.json`，并将解析出的 `HEAD` 提交记录为这次已安装快照。导入过程中只运行 Git 并读取已构建的插件文件：**不会**执行 `npm install`、`pnpm install`、构建脚本、Git hook 或仓库中的任意 package script。
+它会先解析远端 ref 的实际 commit，再检出并复核这个 commit，读取包根（或单层子目录）的 `plugin.json` / `ihub.plugin.json`，最后将来源、请求 ref、实际 commit 与安装时间写入本机 source lock。导入过程中只运行 Git 并读取已构建的插件文件：**不会**执行 `npm install`、`pnpm install`、构建脚本、Git hook 或仓库中的任意 package script。
 
-这不代表 Git 仓库本身安全：插件的前端和经用户选择启动的原生二进制仍是不受沙箱限制的代码。当前 MVP 不提供 ref 选择、本地目录导入、完整性校验、签名校验、可审计 lock 文件或插件自动更新。对同一来源重新导入会再次解析当时的 `HEAD`；它不是不可变版本管理。
+这不代表 Git 仓库本身安全：插件的前端和经用户选择启动的原生二进制仍是不受沙箱限制的代码。当前 MVP 已提供 ref 选择、source lock、显式本地链接，以及“检查更新 → 用户确认 → 暂存校验后原子替换”的 Git 快照刷新；检查阶段只重新解析保存的来源/ref，不写入 lock、不检出代码也不启动插件。新 Git 快照会为 manifest、完整前端资产目录和 manifest 声明的原生二进制写入 SHA-256，并在加载/执行/更新前复核；自动探测会先验证这些记录，不完整或不匹配就跳过并保留手动检查入口。普通例行更新若发现桥接权限、原生二进制、原生命令参数、执行声明或 `run.timeoutMs` 变化会拒绝替换，要求用户卸载、审阅后走显式导入；界面尚不提供逐字段权限/哈希 diff，也不提供第三方二进制的静默自动更新。对同一来源重新导入会解析并锁定当时选择的 ref；它不是替代受审阅 Release 的完整供应链验证。仅开发者可通过插件中心显式链接一个本地绝对目录；该链接不复制源文件，也不会让 Git 导入器接受本地路径。
+
+### 作者从生成模板发布
+
+1. 在项目目录自行运行 `pnpm install`，再运行 `pnpm build`。该命令会生成 `dist/` 并执行静态预检；若随后改动了 `plugin.json` 或加入 worker 工件，再运行一次 `pnpm verify`。
+2. 若启用原生 worker，先按生成项目的 `docs/ENABLE_NATIVE_WORKER.md` 构建、测试，并只声明确实存在的 Windows/macOS target。`nativeApi` 只在 TypeScript 前端实际调用 `ihub.native.runCommand()` 时需要。
+3. 审阅 `git status`，提交 `plugin.json`、`dist/`、以及每个已声明 `bin/<target>/` 工件；不要依赖未提交目录、`node_modules/` 或导入时自动构建。
+4. 发布 tag 或记录完整 commit 后，在插件中心输入 `owner/repo@v1.2.0`（或带 `#ref` 的完整 URL）。不带 ref 时会解析远端 `HEAD`；它仍会锁定这次的 commit，但不适合作为稳定发布引用。
+
+本地链接的作用是让 iHub 直接读取开发目录，不是构建器或文件监视器。每次重建后关闭并重新打开插件前端；链接操作本身从不执行项目脚本、worker 或二进制。
 
 ### 生产分发规范（后续实现）
 
-生产导入器应在安装前解析并显示指定的 ref（分支、tag 或 commit），并可在明确的开发者模式下导入本地目录。它应当：读取并 JSON Schema 校验根目录 `plugin.json` → 展示版本、来源、权限、二进制平台及与上次版本的权限变化 → 由用户确认 → 原子复制/检出到插件存储目录 → 写入 lock 文件。
+生产导入器应在安装前解析并显示指定的 ref（分支、tag 或 commit）。它应当：读取并 JSON Schema 校验根目录 `plugin.json` → 展示版本、来源、权限、二进制平台及与上次版本的权限变化 → 由用户确认 → 原子复制/检出到插件存储目录 → 写入 lock 文件。
 
-该 lock 文件应至少保存规范化来源、请求的 ref、解析的不可变提交、包与每个平台二进制的 SHA-256、签名身份/验证结果，以及用户确认过的权限集。自动更新也属于后续能力：它必须沿用 lock 中的来源和更新通道，重新验证签名与哈希，并在权限新增、GitHub owner 变化、签名失效或哈希不符时再次要求确认。
+该 lock 文件应至少保存规范化来源、请求的 ref、解析的不可变提交、包与每个平台二进制的 SHA-256、签名身份/验证结果，以及用户确认过的权限集。当前 Git 刷新沿用 lock 中的来源和 ref，并要求用户在每次替换前确认；已实现的自动部分仅是受限的只读发现（官方 stable `autoUpdate: true` 加 immutable lock 和完整 SHA-256 记录），并不静默替换任何代码。未来若支持无交互替换，仍必须重新验证签名与哈希，并在权限新增、GitHub owner 变化、签名失效或哈希不符时再次要求确认。
 
 仓库作者现在就应发布不可变 tag、提供 release notes、让构建产物可复现，并在 GitHub Releases 附上每个平台二进制的 SHA-256；这样才能平滑接入上述生产校验。不要把长期 token、私钥或用户数据写入仓库或前端 bundle。
 
 ## 安全与信任（无沙箱）
 
-**iHub 插件并不隔离插件代码。** TypeScript 前端可调用被宿主桥允许的能力；原生二进制则能以启动 iHub 的用户权限读取、写入、联网、启动进程或调用系统 API。即使清单没有请求某项权限，恶意二进制仍可能绕过桥接层直接使用操作系统能力。
+**iHub 不把含原生 worker 的插件伪装成沙箱。** TypeScript 前端运行在每 iframe 独立的 loopback remote origin，只能通过经 origin 验证的宿主 Bridge 请求能力；但原生二进制仍能以启动 iHub 的用户权限读取、写入、联网、启动进程或调用系统 API。即使清单没有请求某项权限，恶意二进制仍可能绕过桥接层直接使用操作系统能力。
 
-因此 `permissions` 的作用是三件事：安装前让用户看见风险、让宿主拒绝未声明的桥接调用、让更新流程识别权限提升；它不是对受信任二进制的安全边界。当前宿主已把敏感的**前端桥接调用**作为权限 gate，未声明的 clipboard、shell、notification 或 process 调用会被拒绝；原生二进制不受这个 gate 约束。完整的安装确认与更新差异确认属于后续生产分发流程。实现与审核必须遵守：
+因此 `permissions` 的作用是三件事：安装前让用户看见风险、让宿主拒绝未声明的桥接调用、让更新流程识别权限提升；它不是对受信任二进制的安全边界。当前宿主已把敏感的**前端桥接调用**作为权限 gate，未声明的 clipboard、shell、notification、用户选择目录或 iHub 主启动器布局调用会被拒绝；例行更新也会拒绝任何权限、网络目标、全局快捷键、native API 或原生二进制声明变化。原生二进制本身仍不受这个 gate 约束，且完整的安装确认与字段级更新差异界面仍属于后续生产分发流程。`process.spawn` 尚未实现为宿主 Bridge API；需要启动本机程序的插件应使用其经过清单锁定的原生 worker。实现与审核必须遵守：
 
-- 默认拒绝高风险桥接调用，按最小权限声明；生产实现应进一步限制 `process.spawn.allow` 列表。
+- 默认拒绝高风险桥接调用，按最小权限声明；原生 worker 的声明、哈希与启动参数都应进入可审计发布物。
 - 生产安装、更新和 GitHub 直装必须展示作者、仓库、固定提交/版本、二进制哈希、目标平台和完整权限清单。
 - 官方插件应使用受保护发布分支、可审计 CI、签名 release 与可复现构建。第三方插件应被标为“社区来源”。
 - 用户不得安装来源不明、仅通过私信发送、或权限与功能描述不相称的插件；有疑虑时使用专门的低权限系统账户或虚拟机测试。

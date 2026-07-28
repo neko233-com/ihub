@@ -14,16 +14,31 @@
 
 iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿主。它的交互目标是像命令面板一样安静、即时；它的扩展目标则是比传统启动器更开放：插件 UI 用 TypeScript 编写，重能力可以通过独立二进制 worker（包括 ffmpeg）实现。
 
-> 当前仓库是可运行 MVP：包含本地文件名索引、模糊搜索、全局唤起、系统托盘、开机自启、更新配置、GitHub 插件导入底座、插件 SDK 与官方插件注册表。全盘 NTFS USN / macOS FSEvents 的原生索引适配器已留出架构位置，见 [搜索引擎设计](docs/SEARCH_ENGINE.md)。
+> 当前仓库是可运行 MVP：包含本地文件名索引、真实系统应用发现、模糊搜索、全局唤起、系统托盘、开机自启、更新配置、GitHub 插件导入与显式刷新、内置工具箱、插件 SDK 与官方插件注册表。已授权目录会通过系统文件监听进行去抖增量同步；队列溢出或根目录边界变化才会安全重扫当前范围。Windows 另有只在用户**明确授权盘符根目录**时可用的只读 NTFS USN P1a/P1c 加速。P1d/P1e 仅在 iHub 状态目录不位于任何授权盘符根目录内、MFT 初始化完整且 watcher 已登记时启用：Journal 未变时直接复用快照；有有限、连续变更时以只读 USN 回放稳定路径绑定，并在多卷回放和原子写入前双重验证。未知 FRN、硬链接变更、重解析点、重命名不完整、Journal 间断、同卷状态写入或范围不确定都会回退完整扫描。窄目录不会扩大为整卷读取，macOS FSEvents 水位持久化仍是后续升级，见 [搜索引擎设计](docs/SEARCH_ENGINE.md)。
 
 ## 现在能做什么
 
 - Rust 后台并行扫描用户常用目录；搜索过程不在 WebView 中访问文件系统。
-- 在一个键盘优先的 React 命令面板中搜索文件、文件夹、命令和插件。
-- 通过 Tauri v2 的单实例、托盘、全局快捷键与开机自启能力保持随叫随到。
-- 从 GitHub URL 或 <code>github:owner/repo</code> 导入插件。安装器固定来源、读取 manifest，不执行仓库的 npm、Git hook、PowerShell 或 shell 脚本。
-- 为插件提供 TypeScript SDK、manifest schema、stdio JSON-RPC worker 协议和 Hello 模板。
-- 配置签名自动更新的发布管线；Windows 与 macOS 各自产出原生包。
+- Windows 只读扫描当前用户与所有用户的 Start Menu 快捷方式，macOS 只读扫描 `/Applications` 与 `~/Applications` 的 `.app`；它们以真实“应用”结果与文件、文件夹、命令和插件并列，只有显式选择才会启动。
+- **文件启动**：在搜索结果中右键真实、可固定的本地文件、文件夹或应用即可固定到启动页“已固定”。最多保存 18 个此类快捷项；路径和索引来源只保存在 iHub 原生 app-data，前端只拿不透明 ID。打开时 Rust 会从当前索引重新解析、检查类型/授权范围并 canonicalize；失效、链接重定向或不受支持的目标会安全报错而不会猜测替代目标。Windows Start Menu 的 `.lnk/.url` 仍可即时搜索打开，但不会作为持久启动项固定。
+- 通过 Tauri v2 的单实例、托盘、全局快捷键与开机自启能力保持随叫随到。默认使用 `Alt+Space`（macOS 为 `Option+Space`）：后台时居中唤出，已显示且聚焦时再次按下隐藏；可见但失焦时只恢复焦点并保留当前查询/工具表面。原生层会抑制按键自动重复；托盘与第二实例始终只显示，不会误触反向隐藏。设置页可直接录制跨平台自定义组合并恢复默认。
+- 从 GitHub URL、<code>github:owner/repo@tag</code> 或 <code>owner/repo@tag</code> 导入插件。安装器先解析远端 ref，再锁定实际 commit，且不执行仓库的 npm、Git hook、PowerShell 或 shell 脚本。
+- 为插件提供自包含 TypeScript iframe bridge、manifest schema、stdio JSON-RPC worker 协议和前端 + Rust worker 模板。
+- 已接入 Tauri 签名 updater 的客户端配置与发布管线；Windows 与 macOS 各自产出原生包。生产更新仍需实际私钥、签名／公证凭据和已发布的 HTTPS `latest.json`。
+
+### 内置工具（现在可用）
+
+- **本地搜索**：主命令框由 Rust 索引驱动；可在“工具 → 本地搜索”查看、添加或移除索引目录，保存后后台重扫。名称与路径使用 Unicode NFKC 检索键，中文文件名和路径支持无声调全拼、首字母、中文／英文混输与未完成音节（例如 `zhongwenjihua` / `zwjh` → “中文计划”）。多音字按字典中的常见读音保证召回，当前不做词组上下文消歧；原文和直接英文名称优先排序。索引只保存两组有界字符签名并共享一份拼音词典，不保存逐条拼音字符串，也不改写显示路径或磁盘快照。
+- **颜色工具**：通过系统颜色选择器生成并复制 HEX、RGB、HSL；支持 EyeDropper 的 WebView 可从屏幕拾取颜色。
+- **截图**：每次通过系统选择器明确选择屏幕、窗口或标签页，导出 PNG 并保留当前会话预览。
+- **剪贴板历史**：默认关闭；只有手动开启后才在本机保存纯文本，可固定、复制、删除和清除未固定记录。
+- **JSON**：本地校验与 2 空格格式化；输入不会发送到网络。
+- **速记、转换与计算器**：本机便签的保存、搜索、复制、删除，以及 BigInt 二/八/十/十六进制、UTF-8 Hex / Base64 转换和离线四则/括号/幂表达式计算；计算器历史只保存在本机。
+- **二维码**：离线将文本或 URL 编码为二维码，预览后导出 PNG；也可识别你主动选择的本地图片。图片不会上传、不会读取相册或调用摄像头。
+- **统一云盘（WebDAV）**：第一方原生连接器，只在首次连接时接收密码；认证成功后浏览、下载和上传只使用随机原生会话 ID。可选择只连接一次，也可明确保存到 Windows 凭据管理器 / macOS 钥匙串，普通元数据文件和插件桥均拿不到密码。连接器拒绝重定向与非本机 HTTP；下载使用原生保存框和不覆盖临时文件，上传使用原生选择器、唯一暂存名与 `MOVE + Overwrite: F`。阿里云盘、百度网盘与 OneDrive 预留相同 UI 下的独立 OAuth 原生适配器，不会把令牌交给前端。
+- **录屏**：调用系统屏幕选择器录制屏幕、窗口或标签页，结束后下载 WebM。MP4/FFmpeg、快捷键与编辑能力计划由 Screen Record 原生插件承载。
+- **批量重命名**：只操作选定目录的直接普通文件；必须先预览，应用阶段会再校验路径、符号链接、冲突和过期预览。
+- **插件项目创建器**：在指定绝对父目录生成一个独立的 TypeScript + Vite 前端、Rust JSONL worker、Windows/macOS 构建脚本与协议文档；目标目录已存在时绝不覆盖，也不会自动运行脚本。
 
 ## 架构
 
@@ -32,7 +47,7 @@ flowchart TB
   UI["React + TypeScript<br/>Vite 8 · Motion · React Bits interaction"]
   CORE["iHub Core (Rust)<br/>Search · index · lifecycle · trust"]
   FS["Native file index<br/>parallel scan → persisted index"]
-  PUI["Plugin UI (TypeScript)<br/>iHub Bridge only"]
+  PUI["Plugin UI (TypeScript)<br/>独立 loopback 来源 + iHub Bridge"]
   WORKER["Plugin worker<br/>Binary / ffmpeg / Rust / Go / Python"]
   GH["GitHub repository / release<br/>manifest · hash · signature"]
 
@@ -43,13 +58,32 @@ flowchart TB
   GH -->|"pinned source + verification"| CORE
 ~~~
 
-第三方前端绝不直接获得 Tauri IPC 或全盘文件权限；二进制 worker 按需启动，并明确显示风险。用户要求“无沙箱”并不等于没有安全边界：它意味着二进制等价于用户手动运行一个程序，因此 iHub 采用来源锁定、哈希、签名链、权限审阅和可回滚版本来降低供应链风险，而不虚假承诺隔离。
+每个 TypeScript 插件 iframe 都使用独立、短生命周期的 `127.0.0.1` 来源，并只读取声明入口所在的专用构建目录；它不使用 Tauri `asset:` 协议或直接 `invoke`。同一插件只保留一个当前租约，父窗口以精确的 iframe `source`、`origin` 和宿主签发的租约验证 Bridge 消息；更新、停用、解除链接或异常 renderer 超时会使旧租约失效，因此前端只能通过声明的宿主 Bridge 请求能力。用户要求“无沙箱”仍然适用于原生 worker：含二进制的插件必须按本机代码信任，只导入你审阅并信任的发布者。iHub 会把来源、请求 ref、实际 commit、manifest、完整前端资产目录和声明原生二进制的 SHA-256 写入安装锁，并在加载、执行、检查更新与应用更新前复核；发布者签名、权限 diff、第三方静默自动更新与回滚仍是下一阶段能力，不能被当作已经实现。
 
 ## 快速开始
 
 ### 开发环境
 
-需要 Node 22.12+、pnpm、Rust stable 与对应平台的 Tauri 前置依赖。
+需要 Node 22.12+（含 Corepack）、Rust stable、Git 与对应平台的 Tauri 前置依赖。
+
+开发机推荐直接运行当前工作树，而不是安装一份容易落后的副本：
+
+~~~powershell
+# Windows
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\dev.ps1
+~~~
+
+~~~sh
+# macOS
+bash ./scripts/dev.sh
+~~~
+
+脚本会以锁文件同步依赖、进行 TypeScript 检查，然后启动 Tauri 开发端；保存源码后，重载的就是当前工作树中的最新代码。想让开发机每次启动时尽可能追随远端，运行 `./scripts/dev.ps1 -UpdateIfClean`（Windows）或 `bash ./scripts/dev.sh --update-if-clean`（macOS）：它只会在工作树干净且可严格 fast-forward 时更新，其他情况保留当前源码继续启动，绝不 reset、checkout、clean 或覆盖工作区。若希望无法更新时明确失败，改用严格的 `-Update` / `--update`。完整的本机开发、构建和安装说明见[开发机运行与更新](docs/DEVELOPMENT.md)。
+
+若需要让**已安装的开发副本**跟随本地保存源码，显式运行 `./scripts/dev.ps1 -WatchInstall`（Windows）或 `bash ./scripts/dev.sh --watch-install`（macOS）；它们不更新 Git、不启动或结束 iHub，只在稳定源码变更后走当前工作树的安全打包/安装路径。Windows 还可运行 `./scripts/install-dev.ps1`，在用户目录和开始菜单创建“iHub Development (Always Latest, Safe)”“Current Source”“Update & Launch”“Install Current Build”和“Watch & Install Current Build”入口；第一个入口会在安全条件满足时自动 fast-forward，条件不满足则直接运行当前保存源码。若明确需要登录后持续运行“安全同步 + 关闭 iHub 后安装”的开发服务，先创建启动器，再显式执行 `./scripts/install-dev.ps1 -EnablePersistentDevelopmentInstall`；macOS 则先运行 `bash ./scripts/install-dev.sh --install-launcher`，再显式使用 `--enable-persistent-development-install` 注册对应的当前用户 LaunchAgent。两种持久服务均默认关闭、只以当前用户的有限权限运行。完整规则见[开发机运行与更新](docs/DEVELOPMENT.md)。
+
+Windows 的本地安装流程还会对本次构建的 release 可执行文件和安装后的精确目标做 SHA-256 一致性验证；持久 watcher 只有拿到这个已验证 fingerprint 和成功时间后才会报告健康。升级过旧的开发启动器时须先重新运行 `.\scripts\install-dev.ps1 -NoLaunch` 刷新可信 marker。“Always Latest, Safe”只表示安全条件满足时跟随上游并安装已验证的本地快照；工作树脏、领先或分叉、网络／构建失败、或 iHub 仍在运行时都会保留现状。
 
 ~~~sh
 pnpm install
@@ -76,18 +110,22 @@ Windows 的开发包可以在 Windows 上构建。macOS <code>.app</code>、签�
 发布后可用以下脚本（默认目标为 <code>neko233-com/ihub</code>）：
 
 ~~~powershell
-irm https://raw.githubusercontent.com/neko233-com/ihub/main/scripts/install.ps1 | iex
+$script = Join-Path $env:TEMP 'ihub-install.ps1'
+Invoke-WebRequest https://raw.githubusercontent.com/neko233-com/ihub/main/scripts/install.ps1 -OutFile $script
+Unblock-File $script
+& $script
 ~~~
 
 ~~~sh
-curl -fsSL https://raw.githubusercontent.com/neko233-com/ihub/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/neko233-com/ihub/main/scripts/install.sh -o /tmp/ihub-install.sh
+bash /tmp/ihub-install.sh
 ~~~
 
-安装脚本只下载 GitHub Release 资产，并在存在 <code>SHA256SUMS.txt</code> 时进行校验。生产使用前请阅读 [发布与更新](docs/RELEASE.md)。
+安装脚本只下载 GitHub Release 资产，并强制要求同一 Release 提供 <code>SHA256SUMS.txt</code> 及所选安装包的有效 SHA-256 条目；清单缺失、条目不匹配或校验失败时都会安全停止。生产使用前请阅读 [发布与更新](docs/RELEASE.md)；开发机运行当前源码请使用上面的开发启动脚本。
 
 ## 插件：去中心化，但不轻率
 
-用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会 clone 一个 GitHub 源码仓库、固定 HEAD commit、只识别已构建的前端/二进制文件，绝不执行仓库脚本。生产级的 <code>.ihubpkg</code> Release 资产校验（integrity 清单与发布者签名）已在规范中定义，是下一阶段安装器的目标。
+用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会解析 <code>owner/repo@tag</code> 或 URL <code>#ref</code>，在下载前锁定远端的实际 commit，并锁定 manifest、整个可服务前端目录与清单声明二进制的 SHA-256，绝不执行仓库脚本。同一插件 ID 首次安装后会绑定其来源与 ref，其他仓库不能借同名 ID 覆盖它；更新必须走已安装来源的只读检查与用户确认。生产级的 <code>.ihubpkg</code> 发布者签名、权限 diff、自动更新与回滚仍是下一阶段安装器的目标。
 
 ~~~text
 GitHub source → pinned commit/tag → manifest / integrity / signature check
@@ -108,30 +146,21 @@ GitHub source → pinned commit/tag → manifest / integrity / signature check
 - [TypeScript SDK](plugin-sdk)
 - [Hello 插件](examples/ihub-plugin-hello)
 
-### 首批官方插件
+### 官方插件 catalog
 
-| 仓库 | 主要能力 | 状态 |
-| --- | --- | --- |
-| [ihub-plugin-ocr](https://github.com/neko233-com/ihub-plugin-ocr) | 截图、剪贴板、图片 OCR | 规划 |
-| [ihub-plugin-translate](https://github.com/neko233-com/ihub-plugin-translate) | 划词、剪贴板与多服务商翻译 | 规划 |
-| [ihub-plugin-colorpick](https://github.com/neko233-com/ihub-plugin-colorpick) | 全局吸管、颜色转换、历史 | 规划 |
-| ihub-plugin-clipboard | 剪贴板历史、固定片段、隐私排除 | 推荐 |
-| ihub-plugin-batch-rename | 批量重命名、正则预览、可撤销日志 | 推荐 |
-| ihub-plugin-image-tools | 压缩、转换、水印、拼图 | 推荐 |
-| ihub-plugin-screen-record | 屏幕录制与 ffmpeg 管线 | 推荐 |
-| ihub-plugin-qrcode | 二维码 / 条码生成识别 | 推荐 |
-| ihub-plugin-devtools | JSON、Base64、时间戳、hash、正则 | 推荐 |
-| ihub-plugin-quick-note | 快速 Markdown 笔记与检索 | 推荐 |
+内置工具已经提供本地搜索、颜色、截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
 
-官方插件以独立 Git 仓库维护，主仓库使用 <code>plugins/official</code> 中的映射和 lock file 做集成验证；终端用户安装的是 Release 包，而不是运行 Git 仓库中的安装脚本。
+[ihub-plugin-window-manager@v1.0.2](https://github.com/neko233-com/ihub-plugin-window-manager/tree/v1.0.2) 只可对 iHub 自己的主启动器执行居中、左右贴靠和切换置顶，不能枚举、读取、聚焦或控制其他应用窗口。图片、OCR 和批量重命名的 `launcherContext` 只交接一次性元数据，仍要求用户重新选择文件／目录；文本工具与翻译只预填显式交接文本，不自动处理或发送。PDF、ZIP 和网页动作均在最小权限下提供正式 Git fallback。完整源码 checkout 中的 18 个官方项目都带固定 ID 的 `workspaceProject` 开发入口：开发安装器验证 `sourceRoot` 后优先链接当前构建产物，普通安装则全部回退到锁定 commit 的 Git 包。
+
+官方插件会以独立 Git 仓库维护；只有发布经过审阅、锁定不可变 commit、记录 manifest/二进制 SHA-256 后，registry 才会把条目标记为可用。终端用户安装的是经验证的 Release 包或 Git 快照，而不是运行仓库内脚本。
 
 ## 搜索引擎路线
 
 “Everything 级速度”不能靠递归扫描冒充。iHub 的进化路径是：
 
-1. **MVP**：Rust 线程池并行扫描、内存文件名索引、增量重建。
-2. **持久化与内容**：SQLite / Tantivy 元数据与全文索引；内容提取限额并交给 OCR/PDF/Office 插件。
-3. **Windows 加速器**：NTFS MFT / USN Journal 枚举与增量变更；不支持的卷自动降级。
+1. **当前 MVP**：Rust 线程池并行扫描、内存文件名/路径检索、可持久化的用户目录范围、原子 JSON 路径快照与 `path:` / `ext:` / `kind:` / `modified:` / `size:` 筛选。启动会先恢复上一次快照，再后台验证；系统监听会将已授权目录的连续变化去抖为一批路径增量替换，目录变更只重扫其子树。另有不落盘的受限正文投影，只有写出 `content:` / `body:` 才查询；它只覆盖小型 UTF-8/UTF-16 文本和源码文件，绝不等同于完整全文数据库。Windows P1a/P1c 对显式盘符根目录使用只读 Journal/MFT；P1d/P1e 会在状态目录外置、完整快照与 watcher 完整登记时把路径快照和稳定路径绑定原子保存。重启时 Journal 无变化直接复用；Journal 连续前进时仅回放有界 USN 区间、重新读取受影响路径，并在多卷回放后与落盘前双重验证。窄目录、UNC、挂载卷、未知拓扑或任何不连续都保守回退。
+2. **持久化与内容**：SQLite / Tantivy 元数据与全文索引；扩展内容提取限额并交给 OCR/PDF/Office 插件。
+3. **Windows 加速器（P1c/P1e）**：已接入受盘符根目录授权约束的只读 NTFS MFT 初始枚举、单次初始化窗口的 USN Journal 差分收敛，以及在状态目录位于授权卷之外时可用的跨重启零变更复用和有限增量回放。绑定保存的只是已索引稳定路径及其必需的 FRN/父 FRN 元数据；运行期普通 watcher 快照不会继承绑定。跨重启回放遇到未知事件、硬链接变更、重解析点、Journal 断档或验证竞争就自动降级，不承诺完整 Everything 数据库语义。
 4. **macOS 加速器**：FSEvents 变更流、可靠的全量重扫回退，并将 Spotlight 作为可选辅助。
 
 详细约束、数据模型和基准策略在 [搜索引擎设计](docs/SEARCH_ENGINE.md)。
@@ -139,13 +168,13 @@ GitHub source → pinned commit/tag → manifest / integrity / signature check
 ## 自动更新与开机自启
 
 - 开机自启为显式用户设置，不在首次运行时静默开启。
-- 更新使用 Tauri 官方 updater，生产构建必须提供签名公钥、HTTPS endpoint 和私钥环境变量。
+- 更新使用 Tauri 官方 updater，生产构建必须提供签名公钥、HTTPS endpoint 和私钥环境变量。应用侧默认只检查；设置中可由用户明确开启“自动安装已签名正式版”，它只接受版本更高且签名验证通过的 iHub Release，不拉取开发源码或插件。Windows 会移交系统安装程序、可能关闭并重新打开 iHub，macOS 在下次启动时应用；在签名 Release 发布 `latest.json` 前，它不会把本机开发包伪装为可自动更新的正式版本。插件中心会对已启用且显式选择 `stable` / `autoUpdate` 的官方锁定 Git 源做有界只读发现，仍须用户点击后才更新。候选若改变权限、网络目标或原生二进制声明会被拒绝，不能把第三方二进制的静默自动更新伪装成已完成能力。
 - Windows 建议采用用户范围的 passive NSIS 安装；macOS 需要 Developer ID 签名和 notarization。
 - GitHub Actions 在 Windows 和 macOS runner 上构建；发布 secrets 不会写入仓库。
 
 ## 视觉系统
 
-界面采用低干扰的深石墨命令面板：一个高对比搜索平面、一种青绿强调色、紧凑信息密度与键盘优先流。React Bits 的 BlurText 交互以本地可调组件形式集成，Motion 负责进入、列表和抽屉过渡；所有动画尊重 <code>prefers-reduced-motion</code>。
+界面采用低干扰的深石墨命令面板：一个高对比搜索平面、一种青绿强调色、紧凑信息密度与键盘优先流。启动器分组标题接入了固定版本的 React Bits BlurText（保留其许可通知），Motion 负责进入、列表和抽屉过渡；所有动画尊重 <code>prefers-reduced-motion</code>。
 
 ## 项目结构
 
