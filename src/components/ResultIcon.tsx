@@ -1,4 +1,5 @@
 import {
+  AppWindow,
   FileText,
   Folder,
   Puzzle,
@@ -10,6 +11,7 @@ import type { SearchKind } from "../lib/types";
 const icons: Record<SearchKind, LucideIcon> = {
   file: FileText,
   folder: Folder,
+  application: AppWindow,
   plugin: Puzzle,
   command: Terminal,
 };

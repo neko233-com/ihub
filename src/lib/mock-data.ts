@@ -1,4 +1,4 @@
-import type { PluginInfo, SearchResult } from "./types";
+import type { SearchResult } from "./types";
 
 export const mockResults: SearchResult[] = [
   {
@@ -10,60 +10,27 @@ export const mockResults: SearchResult[] = [
     commandId: "ihub.index.default",
   },
   {
-    id: "plugin-ocr",
-    name: "OCR · extract text from an image",
-    kind: "plugin",
+    id: "preview-file-app",
+    name: "App.tsx",
+    kind: "file",
     score: 0.98,
-    metadata: "Official plugin",
-    pluginId: "io.ihub.ocr",
-    commandId: "ocr.capture",
+    metadata: "TypeScript · 当前工作区",
+    path: "D:\\Code\\neko233-Projects\\ihub\\src\\App.tsx",
   },
   {
-    id: "plugin-translate",
-    name: "Translate selected text",
-    kind: "plugin",
+    id: "preview-folder-plugins",
+    name: "plugins",
+    kind: "folder",
     score: 0.96,
-    metadata: "Official plugin",
-    pluginId: "io.ihub.translate",
-    commandId: "translate.text",
+    metadata: "插件 catalog 与官方模板",
+    path: "D:\\Code\\neko233-Projects\\ihub\\plugins",
   },
   {
-    id: "plugin-color",
-    name: "Pick a color from your screen",
-    kind: "plugin",
+    id: "preview-file-design",
+    name: "DESIGN.md",
+    kind: "file",
     score: 0.94,
-    metadata: "Official plugin",
-    pluginId: "io.ihub.colorpick",
-    commandId: "colorpick.capture",
-  },
-];
-
-export const mockPlugins: PluginInfo[] = [
-  {
-    id: "io.ihub.ocr",
-    name: "OCR",
-    version: "0.1.0",
-    description: "Screenshot, clipboard and image OCR",
-    enabled: true,
-    hasNativeWorker: true,
-    commands: 2,
-  },
-  {
-    id: "io.ihub.translate",
-    name: "Translate",
-    version: "0.1.0",
-    description: "Translate a selection or your clipboard",
-    enabled: true,
-    hasNativeWorker: false,
-    commands: 2,
-  },
-  {
-    id: "io.ihub.colorpick",
-    name: "Color Pick",
-    version: "0.1.0",
-    description: "Global eyedropper and color history",
-    enabled: true,
-    hasNativeWorker: false,
-    commands: 1,
+    metadata: "iHub 交互设计说明",
+    path: "D:\\Code\\neko233-Projects\\ihub\\docs\\DESIGN.md",
   },
 ];

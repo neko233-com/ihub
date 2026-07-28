@@ -15,10 +15,35 @@ export async function command<T>(
   return invoke<T>(name, args);
 }
 
-export async function onFocusSearch(callback: () => void): Promise<UnlistenFn> {
+export interface LauncherFocusEventPayload {
+  /** True only when a hidden launcher starts a new centered reveal. */
+  freshReveal: boolean;
+  reason: "hotkey" | "explicit";
+}
+
+export async function onFocusSearch(
+  callback: (payload: LauncherFocusEventPayload) => void,
+): Promise<UnlistenFn> {
   if (!isDesktop()) {
     return () => undefined;
   }
 
-  return listen("ihub://focus-search", callback);
+  return listen<LauncherFocusEventPayload>("ihub://focus-search", (event) => {
+    const payload = event.payload as Partial<LauncherFocusEventPayload> | null;
+    callback({
+      // Older development hosts emitted `{}`. Treat that as a fresh reveal so
+      // a source-first renderer can still recover from its hidden surface.
+      freshReveal: payload?.freshReveal !== false,
+      reason: payload?.reason === "hotkey" ? "hotkey" : "explicit",
+    });
+  });
+}
+
+/** Fired by the native shell after the launcher hides because it lost focus. */
+export async function onHideSearch(callback: () => void): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+
+  return listen("ihub://hide-search", callback);
 }
