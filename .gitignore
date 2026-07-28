@@ -1,6 +1,29 @@
 # JavaScript / Vite
 node_modules/
 dist/
+
+# The public catalog plugins are independent Git repositories checked out at
+# these fixed development paths. The parent repository owns only
+# repositories.json + registry locks and must never stage nested repositories
+# as accidental gitlinks.
+/plugins/official/ihub-plugin-base-converter/
+/plugins/official/ihub-plugin-archive-tools/
+/plugins/official/ihub-plugin-batch-rename/
+/plugins/official/ihub-plugin-clipboard/
+/plugins/official/ihub-plugin-colorpick/
+/plugins/official/ihub-plugin-developer-tools/
+/plugins/official/ihub-plugin-image-tools/
+/plugins/official/ihub-plugin-json-tools/
+/plugins/official/ihub-plugin-ocr/
+/plugins/official/ihub-plugin-pdf-tools/
+/plugins/official/ihub-plugin-qrcode/
+/plugins/official/ihub-plugin-quick-note/
+/plugins/official/ihub-plugin-screen-record/
+/plugins/official/ihub-plugin-screenshot/
+/plugins/official/ihub-plugin-text-tools/
+/plugins/official/ihub-plugin-translate/
+/plugins/official/ihub-plugin-web-actions/
+/plugins/official/ihub-plugin-window-manager/
 coverage/
 .vite/
 .cache/
@@ -12,9 +35,12 @@ yarn-error.log*
 
 # Rust / Tauri
 src-tauri/target/
+# Verification builds are disposable Cargo output, never desktop source.
+src-tauri/target-verify/
 target/
 src-tauri/gen/
 *.pdb
+*.obj
 
 # Local configuration and signing material
 .env
@@ -36,6 +62,8 @@ release-assets/
 .DS_Store
 Thumbs.db
 Desktop.ini
+.playwright-cli/
+output/
 .idea/
 .vscode/*
 !.vscode/extensions.json

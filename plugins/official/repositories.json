@@ -7,8 +7,18 @@
     { "id": "ihub-plugin-colorpick", "path": "plugins/official/ihub-plugin-colorpick", "url": "https://github.com/neko233-com/ihub-plugin-colorpick" },
     { "id": "ihub-plugin-clipboard", "path": "plugins/official/ihub-plugin-clipboard", "url": "https://github.com/neko233-com/ihub-plugin-clipboard" },
     { "id": "ihub-plugin-screenshot", "path": "plugins/official/ihub-plugin-screenshot", "url": "https://github.com/neko233-com/ihub-plugin-screenshot" },
+    { "id": "ihub-plugin-image-tools", "path": "plugins/official/ihub-plugin-image-tools", "url": "https://github.com/neko233-com/ihub-plugin-image-tools" },
     { "id": "ihub-plugin-json-tools", "path": "plugins/official/ihub-plugin-json-tools", "url": "https://github.com/neko233-com/ihub-plugin-json-tools" },
+    { "id": "ihub-plugin-text-tools", "path": "plugins/official/ihub-plugin-text-tools", "url": "https://github.com/neko233-com/ihub-plugin-text-tools" },
     { "id": "ihub-plugin-base-converter", "path": "plugins/official/ihub-plugin-base-converter", "url": "https://github.com/neko233-com/ihub-plugin-base-converter" },
-    { "id": "ihub-plugin-quick-note", "path": "plugins/official/ihub-plugin-quick-note", "url": "https://github.com/neko233-com/ihub-plugin-quick-note" }
+    { "id": "ihub-plugin-quick-note", "path": "plugins/official/ihub-plugin-quick-note", "url": "https://github.com/neko233-com/ihub-plugin-quick-note" },
+    { "id": "ihub-plugin-screen-record", "path": "plugins/official/ihub-plugin-screen-record", "url": "https://github.com/neko233-com/ihub-plugin-screen-record" },
+    { "id": "ihub-plugin-batch-rename", "path": "plugins/official/ihub-plugin-batch-rename", "url": "https://github.com/neko233-com/ihub-plugin-batch-rename" },
+    { "id": "ihub-plugin-qrcode", "path": "plugins/official/ihub-plugin-qrcode", "url": "https://github.com/neko233-com/ihub-plugin-qrcode" },
+    { "id": "ihub-plugin-developer-tools", "path": "plugins/official/ihub-plugin-developer-tools", "url": "https://github.com/neko233-com/ihub-plugin-developer-tools" },
+    { "id": "ihub-plugin-window-manager", "path": "plugins/official/ihub-plugin-window-manager", "url": "https://github.com/neko233-com/ihub-plugin-window-manager" },
+    { "id": "ihub-plugin-pdf-tools", "path": "plugins/official/ihub-plugin-pdf-tools", "url": "https://github.com/neko233-com/ihub-plugin-pdf-tools" },
+    { "id": "ihub-plugin-archive-tools", "path": "plugins/official/ihub-plugin-archive-tools", "url": "https://github.com/neko233-com/ihub-plugin-archive-tools" },
+    { "id": "ihub-plugin-web-actions", "path": "plugins/official/ihub-plugin-web-actions", "url": "https://github.com/neko233-com/ihub-plugin-web-actions" }
   ]
 }
