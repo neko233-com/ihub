@@ -1,6 +1,20 @@
 mod app;
+mod builtin_tools;
+mod clipboard_access;
+mod clipboard_history;
+mod cloud_credentials;
+mod cloud_drive;
 mod indexer;
+mod launcher_hotkey;
+mod launcher_shortcuts;
 mod models;
+mod native_color_picker;
+mod native_screenshot;
+mod ntfs_usn;
+mod plugin_asset_server;
+mod plugin_settings;
 mod plugins;
+mod project_template;
+mod window_management;
 
 pub use app::run;

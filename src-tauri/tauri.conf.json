@@ -16,33 +16,70 @@
       {
         "label": "main",
         "title": "iHub",
-        "width": 1040,
-        "height": 680,
-        "minWidth": 640,
-        "minHeight": 460,
-        "resizable": true,
-        "center": true
+        "width": 1200,
+        "height": 756,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "center": true,
+        "focus": true,
+        "visible": false,
+        "transparent": true,
+        "backgroundColor": "#00000000",
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": true,
+        "theme": "Dark",
+        "acceptFirstMouse": true
       }
     ],
     "security": {
-      "csp": null,
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["$LOCALDATA/iHub/plugins/**/*"]
+      "csp": {
+        "default-src": "'self' customprotocol: asset:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "font-src": "'self' data:",
+        "frame-src": "http://127.0.0.1:*",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "media-src": "'self' blob:",
+        "style-src": "'self' 'unsafe-inline'",
+        "worker-src": "'self' blob:"
+      },
+      "headers": {
+        "X-Content-Type-Options": "nosniff"
       }
     }
   },
   "bundle": {
     "active": true,
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.icns",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
     "targets": "all",
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "./Info.plist"
+    }
   },
   "plugins": {
     "updater": {
       "endpoints": [
         "https://github.com/neko233-com/ihub/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY_BEFORE_RELEASE"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3NzZCRDk2MjdBNEJCRDcKUldUWHU2UW5scjEybDJTWmh1U25xWng4Mi9GT1VwcUZ5TURxN2hXb0ZGYXZ3clJ6cWxEUU0zUlQK"
     }
   }
 }

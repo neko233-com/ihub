@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Tauri merges this file into the generated macOS bundle Info.plist.
+    Keep iHub an accessory (agent) app so starting its resident launcher does
+    not briefly create a Dock icon before the runtime configures the tray.
+  -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
