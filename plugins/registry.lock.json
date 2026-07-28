@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
   "lockState": "resolved",
-  "generatedAt": "2026-07-28T20:26:18.826Z",
+  "generatedAt": "2026-07-28T21:12:13.416Z",
   "packages": [
     {
       "id": "ihub-plugin-ocr",
@@ -592,14 +592,14 @@
       "id": "ihub-plugin-pdf-tools",
       "source": {
         "url": "https://github.com/neko233-com/ihub-plugin-pdf-tools",
-        "requestedRef": "v0.1.0"
+        "requestedRef": "v0.1.1"
       },
       "resolved": {
-        "commit": "ef3c226c60e0bebde89f3f4495f8935aaca5643d",
-        "version": "0.1.0"
+        "commit": "0db35029e7a2a11f2c0ec34e09659051555c90c3",
+        "version": "0.1.1"
       },
       "integrity": {
-        "manifestSha256": "8745dc39e71bd0656432ba969e8cb14d60278084b970b04679ad524cfb9ada23",
+        "manifestSha256": "d37aaa4c7ec8da84bcc61cbabaddc8f44da59361edfe7a9e68f499ad652b854e",
         "artifacts": [
           {
             "target": "web",
@@ -620,7 +620,7 @@
       },
       "permissions": {},
       "verified": true,
-      "note": "Published v0.1.0. PDF merge, split, reorder, delete, and rotation run in the current WebView against explicitly selected files with bounded file/page limits; there is no host, network, or native capability."
+      "note": "Published v0.1.1. PDF merge, split, reorder, delete, and rotation run in the current WebView against explicitly selected files with bounded file/page limits; there is no host, network, or native capability. Verification now treats an absent optional Poppler renderer consistently on Windows while explicit invalid renderer configuration still fails closed."
     },
     {
       "id": "ihub-plugin-archive-tools",

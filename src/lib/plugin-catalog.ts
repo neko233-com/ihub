@@ -421,7 +421,7 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     category: "productivity",
     distribution: "installable",
     workspaceProject: true,
-    source: "neko233-com/ihub-plugin-pdf-tools@v0.1.0",
+    source: "neko233-com/ihub-plugin-pdf-tools@v0.1.1",
     tags: ["PDF", "合并", "拆分", "旋转", "页面", "离线"],
     icon: "note",
   },

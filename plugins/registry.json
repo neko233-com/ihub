@@ -252,10 +252,10 @@
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-pdf-tools",
-        "defaultRef": "v0.1.0",
+        "defaultRef": "v0.1.1",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "v0.1.0" },
+      "channels": { "stable": "v0.1.1" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
       "capabilities": [],
       "status": "available"

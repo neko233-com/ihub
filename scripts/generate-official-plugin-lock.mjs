@@ -46,7 +46,7 @@ const releaseNotes = {
   "ihub-plugin-window-manager":
     "Published v1.0.2 with a vendored @ihub/plugin-sdk 0.2.0 snapshot for standalone builds. Its only capability is four fixed layout actions applied to iHub's own launcher; it cannot inspect or control other applications.",
   "ihub-plugin-pdf-tools":
-    "Published v0.1.0. PDF merge, split, reorder, delete, and rotation run in the current WebView against explicitly selected files with bounded file/page limits; there is no host, network, or native capability.",
+    "Published v0.1.1. PDF merge, split, reorder, delete, and rotation run in the current WebView against explicitly selected files with bounded file/page limits; there is no host, network, or native capability. Verification now treats an absent optional Poppler renderer consistently on Windows while explicit invalid renderer configuration still fails closed.",
   "ihub-plugin-archive-tools":
     "Published v0.1.0. ZIP creation and selective extraction run in the current WebView with zip-slip, size, ratio, encryption, ZIP64, and entry-count preflight limits; downloads remain explicit.",
   "ihub-plugin-web-actions":
