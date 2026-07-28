@@ -6575,14 +6575,18 @@ mod tests {
         let second = entry("Second.md", &second_path);
         persist_snapshot(&snapshot_path, &roots, &now_iso(), &[second], None).unwrap();
         let replaced = SearchIndex::with_storage(storage.clone());
-        assert!(replaced
-            .search("second.md", Some(100))
+        let replaced_entries = replaced
+            .inner
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone_records_for_test();
+        assert!(replaced_entries
             .iter()
-            .any(|result| result.path == second_path && result.name == "Second.md"));
-        assert!(replaced
-            .search("first", Some(100))
+            .any(|entry| entry.path == second_path && entry.name == "Second.md"));
+        assert!(replaced_entries
             .iter()
-            .all(|result| result.path != first_path));
+            .all(|entry| entry.path != first_path));
         assert!(std::fs::read_dir(&storage)
             .unwrap()
             .filter_map(Result::ok)
@@ -6694,25 +6698,31 @@ mod tests {
 
     #[test]
     fn duplicate_snapshot_entries_fail_closed_instead_of_retaining_a_repaired_subset() {
-        let storage = unique_test_directory("snapshot-binding-repair-storage");
+        let storage = unique_test_directory("snapshot-duplicate-storage");
+        let indexed_root = unique_test_directory("snapshot-duplicate-root");
         std::fs::create_dir_all(&storage).unwrap();
-        let (roots, entries, pairs, seeds) = complete_replay_projection();
+        std::fs::create_dir_all(&indexed_root).unwrap();
+        let indexed_root = indexed_root.canonicalize().unwrap();
+        let roots = vec![indexed_root.clone()];
+        let duplicated_path = indexed_root.join("Duplicate.md");
+        std::fs::write(&duplicated_path, b"duplicate").unwrap();
+        let duplicated_path = duplicated_path.to_string_lossy().into_owned();
+        let duplicated_entry = entry("Duplicate.md", &duplicated_path);
         let snapshot_path = storage.join(SNAPSHOT_FILE_NAME);
-        let binding = build_usn_snapshot_binding(&roots, &entries, &pairs, &seeds).unwrap();
-        let mut repaired_entries = entries;
-        repaired_entries.push(repaired_entries[2].clone());
+        let duplicated_entries = vec![duplicated_entry.clone(), duplicated_entry];
 
         persist_snapshot(
             &snapshot_path,
             &roots,
             &now_iso(),
-            &repaired_entries,
-            Some(&binding),
+            &duplicated_entries,
+            None,
         )
         .unwrap();
         let managed_state_roots = managed_state_roots(&[Some(snapshot_path.as_path())]);
         assert!(load_persisted_snapshot(&snapshot_path, &managed_state_roots, &roots).is_none());
         let _ = std::fs::remove_dir_all(&storage);
+        let _ = std::fs::remove_dir_all(&indexed_root);
     }
 
     #[cfg(windows)]
@@ -7084,14 +7094,18 @@ mod tests {
             .set_roots(vec![new_root.to_string_lossy().to_string()])
             .unwrap();
 
-        assert!(index
-            .search("private.txt", Some(100))
+        let current_entries = index
+            .inner
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone_records_for_test();
+        assert!(current_entries
             .iter()
-            .all(|result| result.path != old_path_text));
-        assert!(index
-            .search("keep.txt", Some(100))
+            .all(|entry| entry.path != old_path_text));
+        assert!(current_entries
             .iter()
-            .any(|result| result.path == new_path_text && result.name == "keep.txt"));
+            .any(|entry| entry.path == new_path_text && entry.name == "keep.txt"));
 
         let _ = std::fs::remove_dir_all(&old_root);
         let _ = std::fs::remove_dir_all(&new_root);
