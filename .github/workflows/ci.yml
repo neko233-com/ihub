@@ -56,6 +56,11 @@ jobs:
       - name: Restore locked official plugin checkouts
         run: pnpm bootstrap:official-plugins
 
+      - name: Verify Windows development service scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-development-scripts.ps1
+
       - name: Type-check frontend
         run: pnpm check
 
@@ -79,7 +84,7 @@ jobs:
           pnpm --dir examples/ihub-plugin-hello run build
 
       - name: Verify immutable official plugin locks
-        run: pnpm verify:official-plugins -- --strict-worktree
+        run: pnpm verify:official-plugins --strict-worktree
 
       - name: Rebuild official plugins
         run: pnpm verify:official-plugin-builds

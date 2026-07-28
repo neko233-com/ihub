@@ -140,7 +140,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 - **iHub Development - Watch & Install**：监测这份工作树的已保存源码；只有源码稳定、包与 updater sidecar 重新生成并通过既有本地校验，且你已经自行关闭精确的已安装 iHub 后，才会替换安装版。
 - **iHub Development - Safe Upstream Refresh**：在登录后循环尝试 `UpdateIfClean`；只有工作树干净且能严格 fast-forward 时才 fetch/更新。脏、领先、分叉或网络失败会保留现有源码，绝不 `reset`、`checkout`、`clean` 或强行合并；源码真的变化后由上一个 watcher 构建。
 
-它不使用 `SYSTEM`、管理员／最高权限、保存密码、`-Command` 或 `ihub.exe` 作为任务动作，也不会启动、结束或强制替换运行中的 iHub。首次启用在下次 Windows 登录时开始；当前正在运行的安装版仍必须由你从托盘自行退出后才会更新。
+它不使用 `SYSTEM`、管理员／最高权限、保存密码、`-Command` 或 `ihub.exe` 作为任务动作，也不会启动、结束或强制替换运行中的 iHub。启用事务完成后会立即启动两个任务，后续登录再由登录触发器恢复；当前正在运行的安装版仍必须由你从托盘自行退出后才会更新。
+
+重复启用会做一次完整的协作交接，而不是用 `Register-ScheduledTask -Force` 覆盖仍在运行的定义：脚本先写 stop signal、注销带 ownership marker 的旧任务以阻断重启，再按精确的 `powershell.exe -File "<wrapper>"` 命令行等待所有旧 watcher／refresh 进程自然退出，包括已经不受当前 Task Scheduler 定义跟踪的 orphan。全部归零后才原子写新 wrapper、注册新任务并启动。管理事务、watcher 与 refresh 分别使用基于安装目录的全局命名互斥；即使任务定义被外部重建，也最多只有一个实例进入实际工作循环。超时或中途注册失败会保留 stop signal、回滚本轮 owned task 并拒绝形成半配置，全程不停止任何进程。可在 Windows 或 CI 中运行 `.\scripts\verify-windows-development-scripts.ps1`，检查主脚本和生成 wrapper 的语法、禁用强停命令、禁止强制覆盖任务，并从 PowerShell 7 验证 Windows PowerShell 任务对象可构造。
 
 `-DevelopmentInstallStatus` 只在 watcher 的一次安装已经通过上述 payload SHA-256 对比后，才把 `watcherService.healthy` 报为 `true`；同一状态还会给出 `installedFingerprint`、`lastSuccessAt` 与 `lastError`。这些字段证明最近一次持久 watcher 安装的精确二进制和结果，不代表上游此刻可访问，也不代表运行中的应用会被即时替换。
 
@@ -151,7 +153,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install-dev.ps1 -DisablePersistentDevelopmentInstall
 ```
 
-关闭会先写入协作停止信号，再注销带有 iHub ownership marker 的未来登录任务；它不会调用 `Stop-Process` 或 `Stop-ScheduledTask`。已在运行的 watcher 会在下一次轮询／安装边界自行退出，安全刷新循环也会在最多数秒内退出。macOS 的同类用户级 LaunchAgent 规则见下一节；两个平台都不能把“运行中的二进制立即被强制替换”伪装成已实现能力。
+关闭会先写入协作停止信号，再注销带有 iHub ownership marker 的未来登录任务，并等待所有精确 wrapper 进程在轮询／安装安全边界自行退出后才返回；它不会调用 `Stop-Process` 或 `Stop-ScheduledTask`。若有构建正在进行，等待可能长于数秒，但任务已先注销且 stop signal 会一直保留。macOS 的同类用户级 LaunchAgent 规则见下一节；两个平台都不能把“运行中的二进制立即被强制替换”伪装成已实现能力。
 
 ### 可选的 macOS 持久开发安装服务
 

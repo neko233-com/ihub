@@ -174,7 +174,9 @@ function Assert-ScheduledTasksSupport {
             'New-ScheduledTaskSettingsSet',
             'New-ScheduledTask',
             'Register-ScheduledTask',
-            'Unregister-ScheduledTask'
+            'Unregister-ScheduledTask',
+            'Start-ScheduledTask',
+            'Get-CimInstance'
         )) {
         if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
             throw "Windows Scheduled Tasks support is unavailable: missing $commandName. No persistent development service was changed."
@@ -294,6 +296,131 @@ function ConvertTo-PowerShellFileArguments {
     return "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`""
 }
 
+function Get-IHubPersistentPowerShellExecutable {
+    $powershellCommand = Get-Command powershell.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    if ($null -eq $powershellCommand -or [string]::IsNullOrWhiteSpace([string]$powershellCommand.Source)) {
+        throw 'Windows PowerShell is unavailable; persistent development tasks were not changed.'
+    }
+    return [IO.Path]::GetFullPath([string]$powershellCommand.Source)
+}
+
+function Get-IHubPersistentWrapperProcesses {
+    param([Parameter(Mandatory)][string]$PowerShellExecutable)
+
+    $expectedExecutable = [IO.Path]::GetFullPath($PowerShellExecutable)
+    $wrapperPatterns = @(
+        $persistentWatcherWrapperPath
+        $persistentRefreshWrapperPath
+    ) | ForEach-Object {
+        '(?i)(?:^|\s)-File\s+"' + [regex]::Escape([IO.Path]::GetFullPath($_)) + '"\s*$'
+    }
+
+    $matchingProcesses = @()
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop)) {
+        if (
+            [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -or
+            [string]::IsNullOrWhiteSpace([string]$process.CommandLine)
+        ) {
+            continue
+        }
+        try {
+            $processExecutable = [IO.Path]::GetFullPath([string]$process.ExecutablePath)
+        }
+        catch {
+            continue
+        }
+        if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        foreach ($pattern in $wrapperPatterns) {
+            if ([string]$process.CommandLine -match $pattern) {
+                $matchingProcesses += $process
+                break
+            }
+        }
+    }
+    return @($matchingProcesses)
+}
+
+function Wait-IHubPersistentWrapperProcessesToExit {
+    param(
+        [Parameter(Mandatory)][string]$PowerShellExecutable,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $announced = $false
+    while ($true) {
+        $processes = @(Get-IHubPersistentWrapperProcesses -PowerShellExecutable $PowerShellExecutable)
+        if ($processes.Count -eq 0) {
+            if ($announced) {
+                Write-Host 'All previous iHub persistent service instances exited cooperatively.'
+            }
+            return
+        }
+        if (-not $announced) {
+            $processIds = ($processes | ForEach-Object { [string]$_.ProcessId }) -join ', '
+            Write-Host "Waiting for previous iHub persistent service instance(s) to exit cooperatively (PID $processIds). No process will be stopped."
+            $announced = $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            $processIds = ($processes | ForEach-Object { [string]$_.ProcessId }) -join ', '
+            throw "Timed out waiting for previous iHub persistent service instance(s) to exit cooperatively (PID $processIds). The stop request remains in place, and no replacement task was registered."
+        }
+        Start-Sleep -Seconds 1
+    }
+}
+
+function Get-IHubPersistentScopedMutexName {
+    param([Parameter(Mandatory)][ValidateSet('Management', 'Watch', 'Refresh')][string]$Purpose)
+
+    $scope = "$(([IO.Path]::GetFullPath($installRoot)).ToUpperInvariant())|$Purpose"
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $scopeBytes = [Text.Encoding]::UTF8.GetBytes($scope)
+        $scopeHash = ([BitConverter]::ToString($sha256.ComputeHash($scopeBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    return "Global\iHub-PersistentDevelopment-$Purpose-$scopeHash"
+}
+
+function Invoke-WithIHubPersistentManagementMutex {
+    param([Parameter(Mandatory)][scriptblock]$Action)
+
+    $mutex = [Threading.Mutex]::new($false, (Get-IHubPersistentScopedMutexName -Purpose Management))
+    $ownsMutex = $false
+    try {
+        try {
+            $ownsMutex = $mutex.WaitOne([TimeSpan]::FromMinutes(6))
+        }
+        catch [Threading.AbandonedMutexException] {
+            $ownsMutex = $true
+        }
+        if (-not $ownsMutex) {
+            throw 'Another iHub persistent development service management operation is still active. No task was changed.'
+        }
+        return & $Action
+    }
+    finally {
+        if ($ownsMutex) {
+            $mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+    }
+}
+
+function Write-IHubPersistentStopSignal {
+    if (Test-Path -LiteralPath $persistentStopSignalPath) {
+        $stopSignal = Get-Item -LiteralPath $persistentStopSignalPath -Force
+        if ($stopSignal.PSIsContainer -or (($stopSignal.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "Refusing to replace an unsafe persistent-service stop signal: $($stopSignal.FullName)"
+        }
+    }
+    Write-AtomicUtf8File -Path $persistentStopSignalPath -Content ([DateTime]::UtcNow.ToString('o'))
+}
+
 function Remove-IHubPersistentStopSignal {
     if (-not (Test-Path -LiteralPath $persistentStopSignalPath)) {
         return
@@ -308,6 +435,9 @@ function Remove-IHubPersistentStopSignal {
 
 function Write-IHubPersistentServiceWrappers {
     param([Parameter(Mandatory)][ValidateRange(10, 240)][int]$RefreshMinutes)
+
+    $watcherMutexName = Get-IHubPersistentScopedMutexName -Purpose Watch
+    $refreshMutexName = Get-IHubPersistentScopedMutexName -Purpose Refresh
 
     # The wrappers keep Task Scheduler actions deliberately boring: each action
     # is an exact local PowerShell -File path. The scripts themselves validate
@@ -396,30 +526,72 @@ function Write-ServiceStatus {
     }
 }
 
-if (Test-Path -LiteralPath $stopSignalPath) {
-    Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown before the watcher started.'
+function Wait-ServiceMutexOrStop {
+    param([Parameter(Mandatory)][string]$MutexName)
+
+    $mutex = [Threading.Mutex]::new($false, $MutexName)
+    $ownsMutex = $false
+    while (-not $ownsMutex) {
+        if (Test-Path -LiteralPath $stopSignalPath) {
+            $mutex.Dispose()
+            return $null
+        }
+        try {
+            $ownsMutex = $mutex.WaitOne(1000)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $ownsMutex = $true
+        }
+    }
+    if (Test-Path -LiteralPath $stopSignalPath) {
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
+        return $null
+    }
+    return $mutex
+}
+
+$serviceMutex = Wait-ServiceMutexOrStop -MutexName '__IHUB_WATCH_MUTEX_NAME__'
+if ($null -eq $serviceMutex) {
+    Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown before this watcher instance acquired ownership.'
     exit 0
 }
 
+$serviceExitCode = 0
 try {
-    # dev.ps1 owns the long-running state transitions so every verified install
-    # or failed attempt is visible while this wrapper remains active.
-    Write-ServiceStatus -State 'starting' -Message 'Validating the configured source before the WatchInstall loop starts.'
-    & $launcherPath -WatchInstall -WatchIntervalSeconds 5 -WatchStopSignalPath $stopSignalPath -WatchStatusPath $statusPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "The iHub Development watcher exited with code $LASTEXITCODE."
-    }
     if (Test-Path -LiteralPath $stopSignalPath) {
-        Write-ServiceStatus -State 'stopped' -Message 'The watcher observed the user shutdown signal and exited without stopping iHub.'
+        Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown before the watcher started.'
     }
     else {
-        Write-ServiceStatus -State 'failed' -Message 'The watcher exited unexpectedly; Task Scheduler may retry it.'
-        exit 1
+        try {
+            # dev.ps1 owns the long-running state transitions so every verified
+            # install or failed attempt is visible while this wrapper owns the
+            # cross-task-definition service mutex.
+            Write-ServiceStatus -State 'starting' -Message 'Validating the configured source before the WatchInstall loop starts.'
+            & $launcherPath -WatchInstall -WatchIntervalSeconds 5 -WatchStopSignalPath $stopSignalPath -WatchStatusPath $statusPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "The iHub Development watcher exited with code $LASTEXITCODE."
+            }
+            if (Test-Path -LiteralPath $stopSignalPath) {
+                Write-ServiceStatus -State 'stopped' -Message 'The watcher observed the user shutdown signal and exited without stopping iHub.'
+            }
+            else {
+                Write-ServiceStatus -State 'failed' -Message 'The watcher exited unexpectedly; Task Scheduler may retry it.'
+                $serviceExitCode = 1
+            }
+        }
+        catch {
+            Write-ServiceStatus -State 'failed' -Message $_.Exception.Message
+            $serviceExitCode = 1
+        }
     }
 }
-catch {
-    Write-ServiceStatus -State 'failed' -Message $_.Exception.Message
-    exit 1
+finally {
+    $serviceMutex.ReleaseMutex()
+    $serviceMutex.Dispose()
+}
+if ($serviceExitCode -ne 0) {
+    exit $serviceExitCode
 }
 '@
 
@@ -470,30 +642,69 @@ function Write-ServiceStatus {
     }
 }
 
-while (-not (Test-Path -LiteralPath $stopSignalPath)) {
-    try {
-        Write-ServiceStatus -State 'checking' -Message 'Attempting a safe upstream refresh only when the worktree is clean and can fast-forward.'
-        & $launcherPath -UpdateIfClean -VerifyOnly -SkipInstall -SkipCheck
-        if ($LASTEXITCODE -ne 0) {
-            throw "The iHub Development safe refresh exited with code $LASTEXITCODE."
-        }
-        Write-ServiceStatus -State 'waiting' -Message "Last safe upstream refresh attempt completed; next attempt is in $refreshMinutes minute(s)."
-    }
-    catch {
-        Write-ServiceStatus -State 'retrying' -Message $_.Exception.Message
-    }
+function Wait-ServiceMutexOrStop {
+    param([Parameter(Mandatory)][string]$MutexName)
 
-    $remainingSeconds = $refreshMinutes * 60
-    while ($remainingSeconds -gt 0 -and -not (Test-Path -LiteralPath $stopSignalPath)) {
-        $sleepSeconds = [Math]::Min(5, $remainingSeconds)
-        Start-Sleep -Seconds $sleepSeconds
-        $remainingSeconds -= $sleepSeconds
+    $mutex = [Threading.Mutex]::new($false, $MutexName)
+    $ownsMutex = $false
+    while (-not $ownsMutex) {
+        if (Test-Path -LiteralPath $stopSignalPath) {
+            $mutex.Dispose()
+            return $null
+        }
+        try {
+            $ownsMutex = $mutex.WaitOne(1000)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $ownsMutex = $true
+        }
     }
+    if (Test-Path -LiteralPath $stopSignalPath) {
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
+        return $null
+    }
+    return $mutex
 }
 
-Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown. No process was stopped by the script.'
+$serviceMutex = Wait-ServiceMutexOrStop -MutexName '__IHUB_REFRESH_MUTEX_NAME__'
+if ($null -eq $serviceMutex) {
+    Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown before this refresh instance acquired ownership.'
+    exit 0
+}
+
+try {
+    while (-not (Test-Path -LiteralPath $stopSignalPath)) {
+        try {
+            Write-ServiceStatus -State 'checking' -Message 'Attempting a safe upstream refresh only when the worktree is clean and can fast-forward.'
+            & $launcherPath -UpdateIfClean -VerifyOnly -SkipInstall -SkipCheck
+            if ($LASTEXITCODE -ne 0) {
+                throw "The iHub Development safe refresh exited with code $LASTEXITCODE."
+            }
+            Write-ServiceStatus -State 'waiting' -Message "Last safe upstream refresh attempt completed; next attempt is in $refreshMinutes minute(s)."
+        }
+        catch {
+            Write-ServiceStatus -State 'retrying' -Message $_.Exception.Message
+        }
+
+        $remainingSeconds = $refreshMinutes * 60
+        while ($remainingSeconds -gt 0 -and -not (Test-Path -LiteralPath $stopSignalPath)) {
+            $sleepSeconds = [Math]::Min(5, $remainingSeconds)
+            Start-Sleep -Seconds $sleepSeconds
+            $remainingSeconds -= $sleepSeconds
+        }
+    }
+
+    Write-ServiceStatus -State 'stopped' -Message 'A user requested persistent development service shutdown. No process was stopped by the script.'
+}
+finally {
+    $serviceMutex.ReleaseMutex()
+    $serviceMutex.Dispose()
+}
 '@
 
+    $watcherWrapperContent = $watcherWrapperContent.Replace('__IHUB_WATCH_MUTEX_NAME__', $watcherMutexName)
+    $refreshWrapperContent = $refreshWrapperContent.Replace('__IHUB_REFRESH_MUTEX_NAME__', $refreshMutexName)
     $refreshWrapperContent = $refreshWrapperContent.Replace('__IHUB_REFRESH_MINUTES__', [string]$RefreshMinutes)
     Write-AtomicUtf8File -Path $persistentWatcherWrapperPath -Content $watcherWrapperContent
     Write-AtomicUtf8File -Path $persistentRefreshWrapperPath -Content $refreshWrapperContent
@@ -506,10 +717,7 @@ function New-IHubPersistentScheduledTask {
         [Parameter(Mandatory)][string]$CurrentUserName
     )
 
-    $powershellExecutable = Join-Path $PSHOME 'powershell.exe'
-    if (-not (Test-Path -LiteralPath $powershellExecutable -PathType Leaf)) {
-        throw "The Windows PowerShell executable is unavailable: $powershellExecutable"
-    }
+    $powershellExecutable = Get-IHubPersistentPowerShellExecutable
     $action = New-ScheduledTaskAction -Execute $powershellExecutable -Argument (ConvertTo-PowerShellFileArguments -ScriptPath $WrapperPath) -WorkingDirectory $installRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUserName
     $principal = New-ScheduledTaskPrincipal -UserId $CurrentUserName -LogonType Interactive -RunLevel Limited
@@ -523,43 +731,100 @@ function Enable-IHubPersistentDevelopmentInstall {
 
     $null = Get-TrustedExistingDevelopmentLauncher -ExpectedSourceRoot $repositoryRoot
     Assert-ScheduledTasksSupport
-    $existingTasks = @(
+    $preflightTasks = @(
         Get-IHubPersistentTaskRecord -TaskName $persistentWatcherTaskName
         Get-IHubPersistentTaskRecord -TaskName $persistentRefreshTaskName
     )
-    foreach ($existingTask in $existingTasks) {
-        Assert-IHubPersistentTaskOwnership -TaskRecord $existingTask
+    foreach ($preflightTask in $preflightTasks) {
+        Assert-IHubPersistentTaskOwnership -TaskRecord $preflightTask
     }
-
     $currentUserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     if ([string]::IsNullOrWhiteSpace($currentUserName)) {
         throw 'Could not determine the current Windows user for the limited persistent development tasks.'
     }
+    $powershellExecutable = Get-IHubPersistentPowerShellExecutable
 
     # Construct every task before writing a wrapper or registering anything, so
     # unsupported task settings fail closed without changing local state.
     $watcherTask = New-IHubPersistentScheduledTask -TaskName $persistentWatcherTaskName -WrapperPath $persistentWatcherWrapperPath -CurrentUserName $currentUserName
     $refreshTask = New-IHubPersistentScheduledTask -TaskName $persistentRefreshTaskName -WrapperPath $persistentRefreshWrapperPath -CurrentUserName $currentUserName
 
-    if ($PSCmdlet.ShouldProcess($persistentWatcherWrapperPath, 'write iHub Development current-source watcher wrapper')) {
-        Write-IHubPersistentServiceWrappers -RefreshMinutes $RefreshMinutes
-    }
-    if ($PSCmdlet.ShouldProcess($persistentStopSignalPath, 'clear a previous cooperative persistent-service stop request')) {
-        Remove-IHubPersistentStopSignal
-    }
-    if ($PSCmdlet.ShouldProcess("Task Scheduler\\$persistentWatcherTaskName", 'register limited current-user iHub Development watcher task')) {
-        Register-ScheduledTask -TaskName $persistentWatcherTaskName -InputObject $watcherTask -Force | Out-Null
-    }
-    if ($PSCmdlet.ShouldProcess("Task Scheduler\\$persistentRefreshTaskName", 'register limited current-user iHub Development safe upstream refresh task')) {
-        Register-ScheduledTask -TaskName $persistentRefreshTaskName -InputObject $refreshTask -Force | Out-Null
+    $transactionTarget = "Task Scheduler\\$persistentWatcherTaskName and Task Scheduler\\$persistentRefreshTaskName"
+    if (-not $PSCmdlet.ShouldProcess($transactionTarget, 'cooperatively hand off and register the complete iHub persistent development service')) {
+        Write-Host 'Would enable the default-off iHub Development persistent install service for the current Windows user.'
+        return
     }
 
-    if ($WhatIfPreference) {
-        Write-Host 'Would enable the default-off iHub Development persistent install service for the current Windows user.'
+    Invoke-WithIHubPersistentManagementMutex -Action {
+        $existingTasks = @(
+            Get-IHubPersistentTaskRecord -TaskName $persistentWatcherTaskName
+            Get-IHubPersistentTaskRecord -TaskName $persistentRefreshTaskName
+        )
+        foreach ($existingTask in $existingTasks) {
+            Assert-IHubPersistentTaskOwnership -TaskRecord $existingTask
+        }
+
+        $handoffStarted = $false
+        try {
+            # A task definition can be replaced while its former engine process
+            # is still alive. Signal first, remove every restart source, and
+            # then wait for all exact wrapper command lines—including orphaned
+            # former task instances—to leave cooperatively before publishing
+            # new wrappers.
+            Write-IHubPersistentStopSignal
+            $handoffStarted = $true
+            foreach ($existingTask in $existingTasks) {
+                if ($existingTask.Exists) {
+                    Unregister-ScheduledTask -TaskName $existingTask.Name -Confirm:$false
+                }
+            }
+            Wait-IHubPersistentWrapperProcessesToExit -PowerShellExecutable $powershellExecutable
+            Write-IHubPersistentServiceWrappers -RefreshMinutes $RefreshMinutes
+
+            # Keep the stop signal present until both definitions exist. An
+            # unexpected immediate trigger can therefore only exit safely.
+            Register-ScheduledTask -TaskName $persistentWatcherTaskName -InputObject $watcherTask | Out-Null
+            Register-ScheduledTask -TaskName $persistentRefreshTaskName -InputObject $refreshTask | Out-Null
+            Remove-IHubPersistentStopSignal
+            Start-ScheduledTask -TaskName $persistentWatcherTaskName
+            Start-ScheduledTask -TaskName $persistentRefreshTaskName
+        }
+        catch {
+            $setupError = $_
+            if ($handoffStarted) {
+                try {
+                    Write-IHubPersistentStopSignal
+                }
+                catch {
+                    Write-Warning "Could not restore the cooperative stop signal after persistent-service setup failed: $($_.Exception.Message)"
+                }
+                foreach ($taskName in @($persistentWatcherTaskName, $persistentRefreshTaskName)) {
+                    try {
+                        $rollbackTask = Get-IHubPersistentTaskRecord -TaskName $taskName
+                        if ($rollbackTask.Exists) {
+                            if (-not $rollbackTask.Owned) {
+                                Write-Warning "A non-iHub task appeared during rollback and was not changed: $taskName"
+                                continue
+                            }
+                            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+                        }
+                    }
+                    catch {
+                        Write-Warning "Could not remove owned task '$taskName' during rollback: $($_.Exception.Message)"
+                    }
+                }
+                try {
+                    Wait-IHubPersistentWrapperProcessesToExit -PowerShellExecutable $powershellExecutable
+                }
+                catch {
+                    Write-Warning $_.Exception.Message
+                }
+            }
+            throw $setupError
+        }
     }
-    else {
-        Write-Host 'Enabled the default-off iHub Development persistent install service for the current Windows user.'
-    }
+
+    Write-Host 'Enabled the default-off iHub Development persistent install service for the current Windows user.'
     Write-Host "  Watch task:   $persistentWatcherTaskName"
     Write-Host "  Refresh task: $persistentRefreshTaskName (every $RefreshMinutes minute(s) while signed in)"
     Write-Host 'It only installs a verified local package after you close the exact installed iHub yourself; it never stops iHub or uses administrator privileges.'
@@ -570,46 +835,33 @@ function Disable-IHubPersistentDevelopmentInstall {
     param()
 
     Assert-ScheduledTasksSupport
-    $existingTasks = @(
-        Get-IHubPersistentTaskRecord -TaskName $persistentWatcherTaskName
-        Get-IHubPersistentTaskRecord -TaskName $persistentRefreshTaskName
-    )
-    foreach ($existingTask in $existingTasks) {
-        Assert-IHubPersistentTaskOwnership -TaskRecord $existingTask
-    }
-
-    $canWriteStopSignal = $false
-    if (Test-Path -LiteralPath $installRoot -PathType Container) {
-        try {
-            $null = Get-TrustedExistingDevelopmentLauncher -ExpectedSourceRoot $repositoryRoot
-            $canWriteStopSignal = $true
-        }
-        catch {
-            Write-Warning "The existing launcher could not be trusted for a cooperative stop signal: $($_.Exception.Message) Future owned tasks can still be unregistered without stopping their current process."
-        }
-    }
-    else {
-        Write-Warning "The launcher directory is unavailable, so no cooperative stop signal could be written: $installRoot"
-    }
-
-    if ($canWriteStopSignal) {
-        if ($PSCmdlet.ShouldProcess($persistentStopSignalPath, 'request cooperative persistent development service shutdown')) {
-            Write-AtomicUtf8File -Path $persistentStopSignalPath -Content ([DateTime]::UtcNow.ToString('o'))
-        }
-    }
-
-    foreach ($existingTask in $existingTasks) {
-        if ($existingTask.Exists -and $PSCmdlet.ShouldProcess("Task Scheduler\\$($existingTask.Name)", 'unregister iHub-owned persistent development task without stopping its current process')) {
-            Unregister-ScheduledTask -TaskName $existingTask.Name -Confirm:$false
-        }
-    }
-
-    if ($WhatIfPreference) {
+    $null = Get-TrustedExistingDevelopmentLauncher -ExpectedSourceRoot $repositoryRoot
+    $powershellExecutable = Get-IHubPersistentPowerShellExecutable
+    $transactionTarget = "Task Scheduler\\$persistentWatcherTaskName and Task Scheduler\\$persistentRefreshTaskName"
+    if (-not $PSCmdlet.ShouldProcess($transactionTarget, 'request cooperative shutdown and unregister the complete iHub persistent development service')) {
         Write-Host 'Would disable future iHub Development persistent service starts. No iHub or scheduled-task process would be stopped.'
+        return
     }
-    else {
-        Write-Host 'Disabled future iHub Development persistent service starts. A running watcher exits cooperatively when it observes the stop signal; no iHub or scheduled-task process was stopped.'
+
+    Invoke-WithIHubPersistentManagementMutex -Action {
+        $existingTasks = @(
+            Get-IHubPersistentTaskRecord -TaskName $persistentWatcherTaskName
+            Get-IHubPersistentTaskRecord -TaskName $persistentRefreshTaskName
+        )
+        foreach ($existingTask in $existingTasks) {
+            Assert-IHubPersistentTaskOwnership -TaskRecord $existingTask
+        }
+
+        Write-IHubPersistentStopSignal
+        foreach ($existingTask in $existingTasks) {
+            if ($existingTask.Exists) {
+                Unregister-ScheduledTask -TaskName $existingTask.Name -Confirm:$false
+            }
+        }
+        Wait-IHubPersistentWrapperProcessesToExit -PowerShellExecutable $powershellExecutable
     }
+
+    Write-Host 'Disabled future iHub Development persistent service starts. Every prior wrapper instance exited cooperatively; no iHub or scheduled-task process was stopped.'
 }
 
 function Get-IHubPersistentServiceStatusFile {
