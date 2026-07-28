@@ -32,7 +32,7 @@ const mappingsById = uniqueById(mappings.repositories, "repository mappings");
 
 const releaseNotes = {
   "ihub-plugin-ocr":
-    "Published v0.2.0. Launcher file/image handoff contains bounded metadata only; the user must still select a PNG/JPG/JPEG grant before the hash-locked Windows OCR worker runs. No network or background scan is available.",
+    "Published v0.2.1. Launcher file/image handoff contains bounded metadata only; the user must still select a PNG/JPG/JPEG grant before the hash-locked Windows OCR worker runs. Cross-host release checks validate the PE statically, while Windows also rebuilds and executes its RPC probes. No network or background scan is available.",
   "ihub-plugin-translate":
     "Published v1.1.0. Explicit launcher text is consumed once and only prefilled; translation occurs only after the user supplies an HTTPS LibreTranslate-compatible endpoint and clicks Translate. The optional API key remains session-only.",
   "ihub-plugin-colorpick":

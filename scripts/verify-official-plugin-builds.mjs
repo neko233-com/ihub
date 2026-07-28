@@ -46,12 +46,19 @@ for (const mapping of mappings) {
     hasLock ? "--frozen-lockfile" : "--lockfile=false",
   ]);
 
+  let verificationScope = "reproducible build";
   if (
     mapping.id === "ihub-plugin-ocr" &&
     process.platform !== "win32"
   ) {
+    // The locked OCR package deliberately ships one Windows-only native
+    // worker. Non-Windows matrix jobs rebuild its frontend and run the
+    // package's static distribution checks; the Windows matrix job also
+    // rebuilds and executes the worker's JSON-RPC verification.
     runPnpm(repositoryPath, ["run", "build:frontend"]);
     run(repositoryPath, "node", ["scripts/verify-dist.mjs"]);
+    verificationScope =
+      "reproducible frontend and static package; Windows runtime deferred";
   } else if (packageJson.scripts?.verify) {
     runPnpm(repositoryPath, ["run", "verify"]);
   } else if (packageJson.scripts?.build) {
@@ -70,7 +77,7 @@ for (const mapping of mappings) {
       `${mapping.id} rebuild changed its release checkout:\n${changes}`,
     );
   }
-  console.log(`✓ ${mapping.id} (reproducible build)`);
+  console.log(`✓ ${mapping.id} (${verificationScope})`);
 }
 
 console.log(`Verified reproducible builds for ${mappings.length} official plugins.`);

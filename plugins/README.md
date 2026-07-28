@@ -10,7 +10,7 @@ Run `pnpm verify:official-plugins` from the iHub root to check the exact Git blo
 
 Release CI runs `node scripts/verify-official-plugin-lock.mjs --remote`, which clones every canonical GitHub repository into a temporary directory and verifies its stable tag, `plugin.json`, and every lock-listed frontend/native artifact before a release draft is created. A stale digest or a repository that is not really an independent worktree stops the release.
 
-The catalog includes OCR, Translate, JSON/Text/Color/QR tools, Screen Recorder, Base Converter, Batch Rename, Quick Note, Clipboard History, Image Tools, Developer Tools, PDF Tools, Archive Tools, Web Actions, Screenshot, and iHub Window Layout. OCR v0.2.0 is Windows x64 only and its worker is not yet Authenticode signed. Launcher context is metadata-only for files/images and prefill-only for text. PDF and ZIP processing stays in the current WebView; Web Actions opens only reviewed HTTP(S) targets after an explicit click. A catalog URL alone is not a downloadable plugin unless its package record is marked available and its lock verifies.
+The catalog includes OCR, Translate, JSON/Text/Color/QR tools, Screen Recorder, Base Converter, Batch Rename, Quick Note, Clipboard History, Image Tools, Developer Tools, PDF Tools, Archive Tools, Web Actions, Screenshot, and iHub Window Layout. OCR v0.2.1 is Windows x64 only and its worker is not yet Authenticode signed. Launcher context is metadata-only for files/images and prefill-only for text. PDF and ZIP processing stays in the current WebView; Web Actions opens only reviewed HTTP(S) targets after an explicit click. A catalog URL alone is not a downloadable plugin unless its package record is marked available and its lock verifies.
 
 ## Development checkouts
 

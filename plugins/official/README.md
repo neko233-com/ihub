@@ -25,7 +25,7 @@ Each listed directory is the local development checkout of one independently mai
 
 All 18 directories are independent, published source repositories. The parent registry records each stable tag's resolved commit, exact manifest version and permissions, plus every served frontend/native artifact SHA-256. `scripts/bootstrap-official-plugins.mjs --locked` recreates missing checkouts without treating them as parent-repository content.
 
-[`ihub-plugin-ocr@v0.2.0`](https://github.com/neko233-com/ihub-plugin-ocr/tree/v0.2.0) is the only package with a native artifact. Its Windows x64 `ocr-worker.exe` is hash-locked but is not Authenticode signed, so iHub presents that native boundary at install time.
+[`ihub-plugin-ocr@v0.2.1`](https://github.com/neko233-com/ihub-plugin-ocr/tree/v0.2.1) is the only package with a native artifact. Its Windows x64 `ocr-worker.exe` is hash-locked but is not Authenticode signed, so iHub presents that native boundary at install time.
 
 Launcher file/image context carries metadata only and never grants paths or pixels; Text Tools and Translate only prefill one explicitly handed-off text value. PDF Tools and Archive Tools process selected browser `File` objects in memory. Web Actions accepts only reviewed HTTP(S) targets and opens them only after a visible click.
 

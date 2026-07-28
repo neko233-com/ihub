@@ -131,7 +131,7 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     category: "media",
     distribution: "installable",
     workspaceProject: true,
-    source: "neko233-com/ihub-plugin-ocr@v0.2.0",
+    source: "neko233-com/ihub-plugin-ocr@v0.2.1",
     aliases: ["io.ihub.ocr"],
     tags: ["OCR", "截图", "文字识别", "图片"],
     icon: "ocr",

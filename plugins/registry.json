@@ -16,10 +16,10 @@
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-ocr",
-        "defaultRef": "v0.2.0",
+        "defaultRef": "v0.2.1",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "v0.2.0" },
+      "channels": { "stable": "v0.2.1" },
       "supportedTargets": ["windows-x86_64"],
       "capabilities": ["filesystem.read", "clipboard.write", "nativeApi", "launcherContext.files", "launcherContext.image"],
       "status": "available"

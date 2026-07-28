@@ -3,20 +3,20 @@
   "schemaVersion": 1,
   "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
   "lockState": "resolved",
-  "generatedAt": "2026-07-28T17:17:49.950Z",
+  "generatedAt": "2026-07-28T20:26:18.826Z",
   "packages": [
     {
       "id": "ihub-plugin-ocr",
       "source": {
         "url": "https://github.com/neko233-com/ihub-plugin-ocr",
-        "requestedRef": "v0.2.0"
+        "requestedRef": "v0.2.1"
       },
       "resolved": {
-        "commit": "e9e58e118f1b09d82af4086f22116df000b9d89e",
-        "version": "0.2.0"
+        "commit": "b4e927c08485bc171e0d1f9c799ad4939d8127b5",
+        "version": "0.2.1"
       },
       "integrity": {
-        "manifestSha256": "789e8cf2ac8c673fb7ee31167d01506fb56ebf37f312da7b777bc5dc6df722a8",
+        "manifestSha256": "70eed45befae46f8b16f22cb20dcfd3643a083f07b4e4c8f3acbdb79f3f3d537",
         "artifacts": [
           {
             "target": "web",
@@ -56,7 +56,7 @@
         }
       },
       "verified": true,
-      "note": "Published v0.2.0. Launcher file/image handoff contains bounded metadata only; the user must still select a PNG/JPG/JPEG grant before the hash-locked Windows OCR worker runs. No network or background scan is available."
+      "note": "Published v0.2.1. Launcher file/image handoff contains bounded metadata only; the user must still select a PNG/JPG/JPEG grant before the hash-locked Windows OCR worker runs. Cross-host release checks validate the PE statically, while Windows also rebuilds and executes its RPC probes. No network or background scan is available."
     },
     {
       "id": "ihub-plugin-translate",
