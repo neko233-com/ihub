@@ -30,6 +30,80 @@ die() {
   exit 1
 }
 
+get_exact_installed_ihub_pids() {
+  local expected_executable="$1"
+  local pid=''
+  local command_line=''
+  local -a matches=()
+
+  # Match the executable path rather than the process name alone: another
+  # checkout may legitimately be running an `ihub` binary and must not block
+  # replacement of the selected installed application.
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if ! command_line="$(/bin/ps -ww -p "$pid" -o command= 2>/dev/null)"; then
+      printf 'Could not safely inspect iHub process PID %s.\n' "$pid" >&2
+      return 2
+    fi
+    command_line="${command_line#"${command_line%%[![:space:]]*}"}"
+    if [[ "$command_line" == "$expected_executable" || "$command_line" == "$expected_executable "* ]]; then
+      matches+=("$pid")
+    fi
+  done < <(/usr/bin/pgrep -x ihub 2>/dev/null || true)
+
+  if (( ${#matches[@]} > 0 )); then
+    printf '%s\n' "${matches[*]}"
+  fi
+}
+
+assert_exact_installed_ihub_is_not_running() {
+  local expected_executable="$1"
+  local matching_pids=''
+  if ! matching_pids="$(get_exact_installed_ihub_pids "$expected_executable")"; then
+    die "Could not safely inspect an iHub process before replacing $expected_executable. Close iHub yourself (or resolve the access issue), then rerun scripts/install.sh. No process was stopped and no application bundle was replaced."
+  fi
+  if [[ -n "$matching_pids" ]]; then
+    die "The exact installed iHub executable is running (PID ${matching_pids}): $expected_executable. Close it yourself, then rerun scripts/install.sh. No process was stopped and no application bundle was replaced."
+  fi
+}
+
+verify_installed_ihub_bundle() {
+  local bundle_path="$1"
+  local executable_path="${bundle_path}/Contents/MacOS/ihub"
+  local executable_description=''
+
+  if [[ ! -d "$bundle_path" || -L "$bundle_path" ]]; then
+    printf 'Installed iHub bundle is missing or is a symbolic link: %s\n' "$bundle_path" >&2
+    return 1
+  fi
+  if [[ ! -f "$executable_path" || -L "$executable_path" ]]; then
+    printf 'Installed iHub executable is missing or is a symbolic link: %s\n' "$executable_path" >&2
+    return 1
+  fi
+
+  executable_description="$(/usr/bin/file -b "$executable_path")" || {
+    printf 'Could not inspect the installed iHub executable: %s\n' "$executable_path" >&2
+    return 1
+  }
+  if [[ "$executable_description" != *"$expected_binary_arch"* ]]; then
+    printf 'Installed iHub executable does not match macOS %s: %s\n' "$release_arch" "$executable_description" >&2
+    return 1
+  fi
+
+  if [[ "$require_signature" == '1' ]]; then
+    if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$bundle_path" >/dev/null 2>&1; then
+      printf 'Installed iHub bundle did not retain a valid Apple code signature.\n' >&2
+      return 1
+    fi
+    if ! /usr/sbin/spctl --assess --type execute --verbose=2 "$bundle_path" >/dev/null 2>&1; then
+      printf 'Installed iHub bundle failed the final Gatekeeper assessment.\n' >&2
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 cleanup() {
   if [[ "${mounted:-0}" == '1' && -n "${mount_point:-}" ]]; then
     /usr/bin/hdiutil detach "$mount_point" -quiet >/dev/null 2>&1 || true
@@ -86,9 +160,15 @@ case "$application_dir" in
     ;;
 esac
 
-for required_command in curl shasum osascript hdiutil ditto codesign; do
+for required_command in curl shasum osascript hdiutil ditto codesign file pgrep ps; do
   command -v "$required_command" >/dev/null 2>&1 || die "Required macOS command is unavailable: $required_command"
 done
+
+installed_executable="$application_dir/iHub.app/Contents/MacOS/ihub"
+# Refuse before contacting GitHub so a running installed launcher cannot be
+# replaced later. Check again immediately before application-directory changes
+# to cover a launcher opened while the release assets were downloading.
+assert_exact_installed_ihub_is_not_running "$installed_executable"
 
 machine_arch="$(/usr/bin/uname -m)"
 if [[ "$machine_arch" == 'x86_64' && "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null || true)" == '1' ]]; then
@@ -101,6 +181,18 @@ elif [[ "$machine_arch" == 'x86_64' ]]; then
 else
   die "Unsupported macOS architecture: $machine_arch"
 fi
+
+case "$release_arch" in
+  aarch64)
+    expected_binary_arch='arm64'
+    ;;
+  x64)
+    expected_binary_arch='x86_64'
+    ;;
+  *)
+    die "Unsupported selected iHub macOS release architecture: $release_arch"
+    ;;
+esac
 
 temp_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/ihub-install.XXXXXX")"
 mount_point="$temp_dir/mount"
@@ -173,8 +265,18 @@ printf '%s\n' 'SHA-256 verification passed.'
 /bin/mkdir -p "$mount_point"
 /usr/bin/hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg_path" >/dev/null
 mounted=1
-app_path="$(/usr/bin/find "$mount_point" -type d -name '*.app' -prune -print | /usr/bin/head -n 1)"
-[[ -n "$app_path" && -d "$app_path" ]] || die 'The verified DMG did not contain an application bundle.'
+app_path=''
+app_count=0
+while IFS= read -r -d '' candidate; do
+  app_count=$((app_count + 1))
+  app_path="$candidate"
+done < <(/usr/bin/find "$mount_point" -type d -name 'iHub.app' -prune -print0)
+[[ "$app_count" -eq 1 && -d "$app_path" && ! -L "$app_path" ]] || die "The verified DMG must contain exactly one regular iHub.app bundle (found $app_count)."
+
+app_binary="$app_path/Contents/MacOS/ihub"
+[[ -f "$app_binary" && ! -L "$app_binary" ]] || die 'The verified iHub.app bundle does not contain a regular iHub executable.'
+binary_description="$(/usr/bin/file -b "$app_binary")"
+[[ "$binary_description" == *"$expected_binary_arch"* ]] || die "The verified iHub executable is not compatible with macOS $release_arch: $binary_description"
 
 if /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path" >/dev/null 2>&1; then
   printf '%s\n' 'Apple code-signature verification passed.'
@@ -196,6 +298,10 @@ run_privileged() {
   fi
 }
 
+# A running iHub may have been opened after the pre-download check. Never stop
+# it or swap its app bundle; require the user to close it before proceeding.
+assert_exact_installed_ihub_is_not_running "$installed_executable"
+
 run_privileged /bin/mkdir -p "$application_dir"
 destination="$application_dir/iHub.app"
 staging="$application_dir/.iHub.installing.$$"
@@ -214,6 +320,16 @@ if ! run_privileged /bin/mv "$staging" "$destination"; then
     run_privileged /bin/mv "$previous" "$destination" || true
   fi
   die 'Could not move the new iHub application into place.'
+fi
+if ! verify_installed_ihub_bundle "$destination"; then
+  # Keep the previous app until the final target itself has passed all checks.
+  # If validation fails, restore it when possible rather than reporting a
+  # successful installation with a damaged or redirected launcher bundle.
+  run_privileged /bin/rm -rf -- "$destination" || true
+  if [[ -e "$previous" ]]; then
+    run_privileged /bin/mv "$previous" "$destination" || true
+  fi
+  die 'Post-install verification failed; the previous iHub application was restored when possible.'
 fi
 if [[ -e "$previous" ]]; then
   run_privileged /bin/rm -rf -- "$previous"

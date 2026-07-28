@@ -121,6 +121,145 @@ function Get-ExpectedChecksum {
     throw "SHA256SUMS.txt does not contain a checksum for '$AssetName'."
 }
 
+function Get-ExactInstalledIHubProcessState {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    $expectedPath = [IO.Path]::GetFullPath($ExecutablePath)
+    $exactMatches = @()
+    $unknownPathPids = @()
+    foreach ($process in @(Get-Process -Name 'ihub' -ErrorAction SilentlyContinue)) {
+        try {
+            $processPath = [string]$process.Path
+        }
+        catch {
+            $unknownPathPids += $process.Id
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace($processPath)) {
+            $unknownPathPids += $process.Id
+            continue
+        }
+
+        try {
+            $normalizedProcessPath = [IO.Path]::GetFullPath($processPath)
+        }
+        catch {
+            $unknownPathPids += $process.Id
+            continue
+        }
+
+        if ([string]::Equals($normalizedProcessPath, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            $exactMatches += $process.Id
+        }
+    }
+
+    return [pscustomobject]@{
+        ExpectedPath    = $expectedPath
+        ExactMatches    = @($exactMatches)
+        UnknownPathPids = @($unknownPathPids)
+    }
+}
+
+function Assert-ExactInstalledIHubIsNotRunning {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    $state = Get-ExactInstalledIHubProcessState -ExecutablePath $ExecutablePath
+    if ($state.ExactMatches.Count -gt 0) {
+        throw "The exact installed iHub executable is running (PID $($state.ExactMatches -join ', ')): $($state.ExpectedPath). Close it yourself, then rerun scripts/install.ps1. No process was stopped and no installer was started."
+    }
+    if ($state.UnknownPathPids.Count -gt 0) {
+        throw "Could not safely inspect iHub process path(s) for PID $($state.UnknownPathPids -join ', '). Close iHub yourself (or resolve the access issue), then rerun scripts/install.ps1. No process was stopped and no installer was started."
+    }
+}
+
+function Get-ReleaseVersionCore {
+    param([Parameter(Mandatory)][string]$ReleaseTag)
+
+    $normalizedTag = $ReleaseTag.Trim()
+    if ($normalizedTag.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+        $normalizedTag = $normalizedTag.Substring(1)
+    }
+
+    # Windows PE version metadata cannot faithfully retain SemVer pre-release
+    # or build labels. Verify the immutable numeric release core instead (for
+    # example, v1.2.3-rc.1 must install an executable reporting 1.2.3).
+    $match = [regex]::Match($normalizedTag, '^(?<core>[0-9]+\.[0-9]+\.[0-9]+)(?:[-+].*)?$')
+    if (-not $match.Success) {
+        throw "Release tag '$ReleaseTag' does not contain a semantic numeric version required for post-install verification."
+    }
+
+    return $match.Groups['core'].Value
+}
+
+function Assert-InstalledIHubExecutable {
+    param(
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][string]$ReleaseTag
+    )
+
+    if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
+        throw "The installer completed but the expected iHub executable is missing: $ExecutablePath"
+    }
+
+    $item = Get-Item -LiteralPath $ExecutablePath -Force
+    $attributes = [IO.File]::GetAttributes($item.FullName)
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$item.LinkType)) {
+        throw "The installer completed but the expected iHub executable is a reparse point, which is not accepted: $ExecutablePath"
+    }
+
+    $expectedVersionCore = Get-ReleaseVersionCore -ReleaseTag $ReleaseTag
+    $acceptableVersion = '^(?:' + [regex]::Escape($expectedVersionCore) + ')(?:\.0)?$'
+    $versionInfo = $item.VersionInfo
+    $reportedVersions = @(
+        @(
+            [string]$versionInfo.ProductVersion,
+            [string]$versionInfo.FileVersion
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    )
+
+    if ($reportedVersions.Count -eq 0 -or -not (@($reportedVersions | Where-Object { $_ -match $acceptableVersion }).Count -gt 0)) {
+        $reported = if ($reportedVersions.Count -gt 0) { $reportedVersions -join ', ' } else { 'none' }
+        throw "The installer completed but '$ExecutablePath' does not report the expected version $expectedVersionCore for release '$ReleaseTag'. Reported: $reported"
+    }
+
+    Write-Host "Post-install verification passed: $ExecutablePath ($($reportedVersions -join ', '))."
+}
+
+function Repair-iHubShortcuts {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
+        Write-Warning "iHub was installed but its expected executable was not found for shortcut repair: $ExecutablePath"
+        return
+    }
+
+    $startMenuRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::StartMenu)
+    $desktopRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+    $shortcutPaths = @()
+    if (-not [string]::IsNullOrWhiteSpace($startMenuRoot)) {
+        $programsRoot = Join-Path $startMenuRoot 'Programs'
+        New-Item -ItemType Directory -Path $programsRoot -Force | Out-Null
+        $shortcutPaths += Join-Path $programsRoot 'iHub.lnk'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($desktopRoot)) {
+        $shortcutPaths += Join-Path $desktopRoot 'iHub.lnk'
+    }
+
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($shortcutPath in $shortcutPaths) {
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $ExecutablePath
+        # A production autostart instance receives --ihub-autostart and stays
+        # hidden; a user-launched shortcut always requests the launcher surface.
+        $shortcut.Arguments = '--show'
+        $shortcut.WorkingDirectory = Split-Path -Parent $ExecutablePath
+        $shortcut.Description = 'Open the iHub Spotlight launcher.'
+        $shortcut.IconLocation = "$ExecutablePath,0"
+        $shortcut.Save()
+    }
+}
+
 if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw 'scripts/install.ps1 installs iHub on Windows only. Use scripts/install.sh on macOS.'
 }
@@ -146,6 +285,16 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 $Repository = Assert-Repository $Repository
 $Version = Assert-ReleaseTag $Version
+
+if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    throw 'LOCALAPPDATA is unavailable; cannot safely determine the per-user iHub installation target. No installer was downloaded or started.'
+}
+$installedExecutablePath = Join-Path $env:LOCALAPPDATA 'iHub\ihub.exe'
+# Refuse before contacting GitHub so a running installed launcher cannot be
+# replaced later by a silent installer. A second check immediately before NSIS
+# closes the race where iHub is opened while assets are downloading.
+Assert-ExactInstalledIHubIsNotRunning -ExecutablePath $installedExecutablePath
+
 $release = Get-Release -Repo $Repository -Tag $Version
 
 $installerAsset = Get-ReleaseAsset -Release $release -Description 'Windows x64 NSIS installer' -Predicate {
@@ -191,6 +340,8 @@ try {
         Write-Warning "Installer Authenticode status is '$($signature.Status)'. The SHA-256 manifest is valid, but use -RequireAuthenticodeSignature for a signed-only policy."
     }
 
+    Assert-ExactInstalledIHubIsNotRunning -ExecutablePath $installedExecutablePath
+
     if ($Interactive) {
         $process = Start-Process -FilePath $installerPath -Wait -PassThru
     }
@@ -208,6 +359,9 @@ try {
     else {
         Write-Host 'iHub installed successfully.'
     }
+
+    Assert-InstalledIHubExecutable -ExecutablePath $installedExecutablePath -ReleaseTag ([string]$release.tag_name)
+    Repair-iHubShortcuts -ExecutablePath $installedExecutablePath
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {

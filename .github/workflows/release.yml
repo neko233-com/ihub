@@ -24,31 +24,138 @@ concurrency:
 
 jobs:
   prepare:
-    name: Validate release inputs
+    name: Validate release inputs and signing prerequisites
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.release_tag.outputs.value }}
+      tag: ${{ steps.release_ref.outputs.tag }}
+      release_sha: ${{ steps.release_ref.outputs.release_sha }}
+      release_id: ${{ steps.draft_release.outputs.release_id }}
     steps:
+      - name: Resolve the exact release commit
+        id: release_ref
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        with:
+          script: |
+            const tag = process.env.REQUESTED_TAG || context.ref.replace(/^refs\/tags\//, '');
+            const releaseSha = context.sha.toLowerCase();
+            if (!/^v?[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(tag)) {
+              throw new Error(`Invalid release tag: ${tag}`);
+            }
+            if (!/^[0-9a-f]{40}$/.test(releaseSha)) {
+              throw new Error(`GitHub did not provide an exact commit SHA: ${context.sha}`);
+            }
+
+            const repository = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            };
+            async function resolveTagCommit(tagName) {
+              let object;
+              try {
+                object = (await github.rest.git.getRef({
+                  ...repository,
+                  ref: `tags/${tagName}`,
+                })).data.object;
+              } catch (error) {
+                if (error.status === 404) {
+                  return undefined;
+                }
+                throw error;
+              }
+
+              const visited = new Set();
+              while (object.type === 'tag') {
+                if (visited.has(object.sha)) {
+                  throw new Error(`Tag ${tagName} contains a tag-object cycle.`);
+                }
+                visited.add(object.sha);
+                object = (await github.rest.git.getTag({
+                  ...repository,
+                  tag_sha: object.sha,
+                })).data.object;
+              }
+              if (object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha)) {
+                throw new Error(`Tag ${tagName} does not resolve to a commit.`);
+              }
+              return object.sha.toLowerCase();
+            }
+
+            const existingTagSha = await resolveTagCommit(tag);
+            if (existingTagSha && existingTagSha !== releaseSha) {
+              throw new Error(
+                `Existing tag ${tag} points to ${existingTagSha}, not this workflow's exact commit ${releaseSha}.`,
+              );
+            }
+            core.info(
+              existingTagSha
+                ? `Using existing tag ${tag} at exact commit ${releaseSha}.`
+                : `Tag ${tag} will be created at exact commit ${releaseSha}.`,
+            );
+            core.setOutput('tag', tag);
+            core.setOutput('release_sha', releaseSha);
+
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release_ref.outputs.release_sha }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      - name: Test release updater URL policy
+        run: node --test scripts/release-updater-json.node-test.mjs
+
+      - name: Verify immutable official plugin source locks
+        run: node scripts/verify-official-plugin-lock.mjs --remote
+
       - name: Validate tag, versions, and updater configuration
-        id: release_tag
         env:
-          REQUESTED_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          tag="$RELEASE_TAG"
           package_version="$(node -p "require('./package.json').version")"
 
           if [[ "$tag" != "v${package_version}" ]]; then
             echo "Release tag ($tag) must equal v${package_version}." >&2
+            exit 1
+          fi
+
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo 'TAURI_SIGNING_PRIVATE_KEY is required for signed in-app updates. Refusing to create an unsigned release.' >&2
+            exit 1
+          fi
+
+          missing_apple_secrets=()
+          for secret_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
+            KEYCHAIN_PASSWORD; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              missing_apple_secrets+=("$secret_name")
+            fi
+          done
+          if (( ${#missing_apple_secrets[@]} > 0 )); then
+            printf 'A public macOS release requires Developer ID signing and notarization. Missing GitHub secrets: %s\n' "${missing_apple_secrets[*]}" >&2
             exit 1
           fi
 
@@ -65,9 +172,123 @@ jobs:
           if (!publicKey || publicKey.includes('REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY')) {
             throw new Error('Configure the Tauri updater public key before creating a release.');
           }
+          if (tauriConfig?.bundle?.createUpdaterArtifacts !== true) {
+            throw new Error('bundle.createUpdaterArtifacts must be true for signed in-app updates.');
+          }
+          const endpoints = tauriConfig?.plugins?.updater?.endpoints;
+          if (!Array.isArray(endpoints) || endpoints.length === 0 || endpoints.some((endpoint) => typeof endpoint !== 'string' || !endpoint.startsWith('https://'))) {
+            throw new Error('Configure at least one HTTPS updater endpoint before creating a release.');
+          }
           NODE
 
-          echo "value=$tag" >> "$GITHUB_OUTPUT"
+          # Tauri only offers updater payloads whose version is greater than
+          # the installed app. Prevent a public same-version (or downgrade)
+          # release that users could install manually but never receive through
+          # the in-app updater.
+          node ./scripts/verify-release-version.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$tag"
+
+      # All matrix jobs must upload to one known draft. Creating it here avoids
+      # a race where several Tauri action instances concurrently try to create
+      # the same tag release, and a later rerun can only resume a draft.
+      - name: Create or reuse the release draft
+        id: draft_release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release_ref.outputs.release_sha }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease || false }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const releaseSha = process.env.RELEASE_SHA;
+            const prerelease = process.env.RELEASE_PRERELEASE === 'true';
+            const repository = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            };
+
+            async function resolveTagCommit(tagName) {
+              let object;
+              try {
+                object = (await github.rest.git.getRef({
+                  ...repository,
+                  ref: `tags/${tagName}`,
+                })).data.object;
+              } catch (error) {
+                if (error.status === 404) {
+                  return undefined;
+                }
+                throw error;
+              }
+              const visited = new Set();
+              while (object.type === 'tag') {
+                if (visited.has(object.sha)) {
+                  throw new Error(`Tag ${tagName} contains a tag-object cycle.`);
+                }
+                visited.add(object.sha);
+                object = (await github.rest.git.getTag({
+                  ...repository,
+                  tag_sha: object.sha,
+                })).data.object;
+              }
+              if (object.type !== 'commit') {
+                throw new Error(`Tag ${tagName} does not resolve to a commit.`);
+              }
+              return object.sha.toLowerCase();
+            }
+
+            let tagCommit = await resolveTagCommit(tag);
+            if (!tagCommit) {
+              await github.rest.git.createRef({
+                ...repository,
+                ref: `refs/tags/${tag}`,
+                sha: releaseSha,
+              });
+              tagCommit = await resolveTagCommit(tag);
+            }
+            if (tagCommit !== releaseSha) {
+              throw new Error(`Tag ${tag} points to ${tagCommit}, not exact release commit ${releaseSha}.`);
+            }
+
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ ...repository, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              release = (await github.rest.repos.createRelease({
+                ...repository,
+                tag_name: tag,
+                target_commitish: releaseSha,
+                name: `iHub ${tag}`,
+                body: 'iHub desktop release. Verify installers with SHA256SUMS.txt.',
+                draft: true,
+                prerelease,
+                generate_release_notes: true,
+              })).data;
+            }
+
+            if (!release.draft) {
+              throw new Error(`Release ${tag} is already public; refusing to replace its assets.`);
+            }
+            if (Boolean(release.prerelease) !== prerelease) {
+              throw new Error(`Draft release ${tag} prerelease state does not match this workflow request.`);
+            }
+
+            if (release.tag_name !== tag) {
+              throw new Error(`Draft release ${release.id} belongs to unexpected tag ${release.tag_name}.`);
+            }
+            const draftTagSha = await resolveTagCommit(tag);
+            if (draftTagSha !== releaseSha) {
+              throw new Error(
+                `Draft release ${release.id} tag ${tag} points to ${draftTagSha}, not ${releaseSha}.`,
+              );
+            }
+            core.info(`Draft release ${release.id} is bound to ${tag} at ${releaseSha}.`);
+            core.setOutput('release_id', String(release.id));
 
   build_and_upload:
     name: ${{ matrix.name }}
@@ -76,6 +297,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - name: Windows x64 installers
@@ -94,6 +316,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -114,6 +339,31 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Import macOS Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/ihub-release-certificate.p12"
+          keychain_path="$RUNNER_TEMP/ihub-release.keychain-db"
+          trap 'rm -f "$certificate_path"' EXIT
+          if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path" 2>/dev/null; then
+            printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          fi
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null
+
       - name: Build and upload Tauri artifacts
         uses: tauri-apps/tauri-action@v1
         env:
@@ -122,22 +372,19 @@ jobs:
           # GitHub Actions secrets; the matching public key belongs in Tauri config.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Optional macOS Developer ID / notarization credentials. See
-          # docs/RELEASE.md before enabling a public macOS release.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The certificate is imported only on macOS. Keeping these empty on
+          # Windows avoids exposing Apple credentials to an unrelated runner.
+          APPLE_SIGNING_IDENTITY: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
         with:
+          # The prepare job owns draft creation, so concurrent platform jobs
+          # cannot race to create the tag release. Keep tagName as well: the
+          # Tauri action uses it when constructing tagged updater URLs.
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ needs.prepare.outputs.tag }}
-          releaseName: iHub ${{ needs.prepare.outputs.tag }}
-          releaseCommitish: ${{ github.sha }}
-          releaseBody: "iHub desktop release. Verify installers with SHA256SUMS.txt."
           releaseDraft: true
-          prerelease: ${{ inputs.prerelease || false }}
-          generateReleaseNotes: true
           tauriScript: pnpm tauri
           args: ${{ matrix.args }}
           # These predictable names are consumed by scripts/install.ps1 and
@@ -148,6 +395,64 @@ jobs:
           uploadUpdaterSignatures: true
           retryAttempts: 3
 
+      - name: Normalize updater manifest to browser download URLs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          normalize_dir="$(mktemp -d)"
+          trap 'rm -rf "$normalize_dir"' EXIT
+          release_metadata="$normalize_dir/release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$release_metadata"
+
+          latest_asset_id="$(
+            node --input-type=module - "$release_metadata" <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const metadata = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const matches = Array.isArray(metadata.assets)
+            ? metadata.assets.filter((asset) => asset?.name === 'latest.json')
+            : [];
+          if (matches.length !== 1 || !Number.isSafeInteger(matches[0].id) || matches[0].id <= 0) {
+            throw new Error(`Expected exactly one uploaded latest.json asset, found ${matches.length}.`);
+          }
+          process.stdout.write(String(matches[0].id));
+          NODE
+          )"
+
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/assets/${latest_asset_id}" \
+            -H 'Accept: application/octet-stream' \
+            > "$normalize_dir/latest.json"
+          test -s "$normalize_dir/latest.json"
+          mkdir "$normalize_dir/normalized"
+          node ./scripts/normalize-release-updater-json.mjs \
+            --input "$normalize_dir/latest.json" \
+            --output "$normalize_dir/normalized/latest.json" \
+            --release-metadata "$release_metadata" \
+            --release-id "$RELEASE_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG"
+
+          encoded_tag="$(node -p 'encodeURIComponent(process.env.RELEASE_TAG)')"
+          current_release_state="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}" \
+              --jq '[.id, .draft] | @tsv'
+          )"
+          IFS=$'\t' read -r current_release_id current_release_is_draft <<< "$current_release_state"
+          if [[ "$current_release_id" != "$RELEASE_ID" || "$current_release_is_draft" != 'true' ]]; then
+            echo "Release tag $RELEASE_TAG no longer resolves to draft $RELEASE_ID." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "$normalize_dir/normalized/latest.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
   checksums_and_publish:
     name: Publish checksums
     needs: [prepare, build_and_upload]
@@ -156,6 +461,68 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Revalidate the exact draft before publication
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        with:
+          script: |
+            const releaseIdText = process.env.RELEASE_ID;
+            const releaseId = Number(releaseIdText);
+            const releaseSha = process.env.RELEASE_SHA;
+            const tag = process.env.RELEASE_TAG;
+            if (!Number.isSafeInteger(releaseId) || releaseId <= 0 || String(releaseId) !== releaseIdText) {
+              throw new Error(`Invalid expected release ID: ${releaseIdText}`);
+            }
+            const repository = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            };
+            const release = (await github.rest.repos.getRelease({
+              ...repository,
+              release_id: releaseId,
+            })).data;
+            if (!release.draft || release.tag_name !== tag || String(release.id) !== releaseIdText) {
+              throw new Error(`Release ${releaseIdText} is no longer the expected ${tag} draft.`);
+            }
+            const releaseByTag = (await github.rest.repos.getReleaseByTag({
+              ...repository,
+              tag,
+            })).data;
+            if (String(releaseByTag.id) !== releaseIdText) {
+              throw new Error(`Tag ${tag} no longer resolves to draft release ${releaseIdText}.`);
+            }
+
+            let object = (await github.rest.git.getRef({
+              ...repository,
+              ref: `tags/${tag}`,
+            })).data.object;
+            const visited = new Set();
+            while (object.type === 'tag') {
+              if (visited.has(object.sha)) {
+                throw new Error(`Tag ${tag} contains a tag-object cycle.`);
+              }
+              visited.add(object.sha);
+              object = (await github.rest.git.getTag({
+                ...repository,
+                tag_sha: object.sha,
+              })).data.object;
+            }
+            if (object.type !== 'commit' || object.sha.toLowerCase() !== releaseSha) {
+              throw new Error(`Tag ${tag} is no longer bound to exact release commit ${releaseSha}.`);
+            }
+            core.info(`Release ${releaseIdText} remains a draft at ${tag} (${releaseSha}).`);
 
       - name: Download release assets
         env:
@@ -170,6 +537,17 @@ jobs:
             --dir release-assets \
             --clobber
 
+      - name: Verify updater manifest and installer set
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ./scripts/verify-release-assets.mjs \
+            --input-dir release-assets \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG"
+
       - name: Generate SHA-256 manifest
         shell: pwsh
         run: ./scripts/generate-checksums.ps1 -InputDirectory release-assets
@@ -177,12 +555,28 @@ jobs:
       - name: Upload SHA-256 manifest and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           test -s release-assets/SHA256SUMS.txt
+          encoded_tag="$(node -p 'encodeURIComponent(process.env.RELEASE_TAG)')"
+          release_state="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}" \
+              --jq '[.id, .draft] | @tsv'
+          )"
+          IFS=$'\t' read -r current_release_id current_release_is_draft <<< "$release_state"
+          if [[ "$current_release_id" != "$RELEASE_ID" || "$current_release_is_draft" != 'true' ]]; then
+            echo "Refusing to publish: $RELEASE_TAG is no longer draft release $RELEASE_ID." >&2
+            exit 1
+          fi
           gh release upload "$RELEASE_TAG" release-assets/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            >/dev/null
