@@ -11,130 +11,284 @@
     {
       "id": "ihub-plugin-ocr",
       "name": "OCR",
-      "description": "Recognize text from screenshots, images, and selected files with a local native engine.",
+      "description": "Offline Windows x64 OCR. Launcher image/file handoff carries metadata only; recognition still requires an explicit user-selected PNG, JPG, or JPEG.",
       "icon": "icons/ocr.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-ocr",
-        "defaultRef": "main",
+        "defaultRef": "v0.2.0",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
-      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["filesystem.read", "clipboard.write", "nativeApi"],
-      "status": "bootstrap"
+      "channels": { "stable": "v0.2.0" },
+      "supportedTargets": ["windows-x86_64"],
+      "capabilities": ["filesystem.read", "clipboard.write", "nativeApi", "launcherContext.files", "launcherContext.image"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-translate",
       "name": "Translate",
-      "description": "Translate selected text with configurable providers and clipboard-friendly actions.",
+      "description": "Consent-first translation through a user-selected LibreTranslate-compatible HTTPS endpoint; explicit launcher text is only prefilled and is never sent automatically.",
       "icon": "icons/translate.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-translate",
-        "defaultRef": "main",
+        "defaultRef": "v1.1.0",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.1.0" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["network", "clipboard.read", "clipboard.write"],
-      "status": "bootstrap"
+      "capabilities": ["network", "clipboard.write", "launcherContext.text"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-colorpick",
       "name": "Color Picker",
-      "description": "Pick screen colors and copy HEX, RGB, HSL, or CSS values.",
+      "description": "Offline color conversion plus a host-confirmed, one-shot system pixel sample that never exposes cursor coordinates or screenshots.",
       "icon": "icons/colorpick.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-colorpick",
-        "defaultRef": "main",
+        "defaultRef": "v1.1.0",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.1.0" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["clipboard.write", "globalShortcut", "nativeApi"],
-      "status": "bootstrap"
+      "capabilities": ["clipboard.write", "cursorColor"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-clipboard",
       "name": "Clipboard History",
-      "description": "Search, pin, and reuse clipboard history from the launcher.",
+      "description": "Consent-first local text collection: capture the current clipboard only on request, then pin, search, and reuse it; optionally load a read-only opt-in iHub history snapshot.",
       "icon": "icons/clipboard.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-clipboard",
-        "defaultRef": "main",
+        "defaultRef": "v1.0.1",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.0.1" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["clipboard.read", "clipboard.write", "filesystem.write"],
-      "status": "bootstrap"
+      "capabilities": ["clipboard.read", "clipboard.write", "clipboard.history"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-screenshot",
       "name": "Screenshot",
-      "description": "Capture, annotate, copy, or save a region of the current screen.",
+      "description": "User-initiated browser getDisplayMedia capture of one selected screen, window, or tab frame as PNG; no native capture or global hotkey.",
       "icon": "icons/screenshot.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-screenshot",
-        "defaultRef": "main",
+        "defaultRef": "v1.0.1",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.0.1" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["filesystem.write", "clipboard.write", "globalShortcut", "nativeApi"],
-      "status": "bootstrap"
+      "capabilities": ["screenCapture", "clipboard.write"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-image-tools",
+      "name": "Image Tools",
+      "description": "Offline batch image conversion. Launcher file/image handoff carries metadata only; pixels are processed only after explicit re-selection or drop.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-image-tools",
+        "defaultRef": "v1.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["launcherContext.files", "launcherContext.image"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-json-tools",
       "name": "JSON Tools",
-      "description": "Format, validate, query, convert, and copy JSON without leaving the launcher.",
-      "icon": "icons/json.svg",
+      "description": "Self-contained offline JSON formatting, minification, validation, and copy tools; published as a pinned TypeScript source package.",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-json-tools",
-        "defaultRef": "main",
+        "defaultRef": "v1.0.1",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.0.1" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["clipboard.read", "clipboard.write", "filesystem.read", "filesystem.write"],
-      "status": "bootstrap"
+      "capabilities": ["clipboard.write"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-text-tools",
+      "name": "Text Tools",
+      "description": "Offline UUID, SHA-256, Base64, URL, case conversion, and whitespace cleanup; explicit launcher text is only prefilled.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-text-tools",
+        "defaultRef": "v1.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.write", "launcherContext.text"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-base-converter",
       "name": "Base Converter",
-      "description": "Convert values between binary, octal, decimal, hexadecimal, and encoded text.",
+      "description": "Offline BigInt-safe binary, octal, decimal, hexadecimal, and UTF-8/Base64 conversion.",
       "icon": "icons/base-converter.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-base-converter",
-        "defaultRef": "main",
+        "defaultRef": "v1.0.0",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.0.0" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["clipboard.read", "clipboard.write"],
-      "status": "bootstrap"
+      "capabilities": ["clipboard.write"],
+      "status": "available"
     },
     {
       "id": "ihub-plugin-quick-note",
       "name": "Quick Note",
-      "description": "Capture small notes instantly and retrieve them through full-text launcher search.",
+      "description": "Capture, pin, search, copy, and delete notes stored only in plugin-scoped local settings.",
       "icon": "icons/quick-note.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-quick-note",
-        "defaultRef": "main",
+        "defaultRef": "v1.0.0",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "main" },
+      "channels": { "stable": "v1.0.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.write"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-screen-record",
+      "name": "Screen Recorder",
+      "description": "Self-contained local WebM recorder; asks for display sharing only after the user starts, protects launcher focus only around the browser picker, and stops at 30 minutes or 512 MiB.",
+      "icon": "icons/screen-record.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-screen-record",
+        "defaultRef": "v1.0.3",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.0.3" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["screenCapture"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-batch-rename",
+      "name": "Batch Rename",
+      "description": "Preview and safely apply filename rules inside one user-selected folder; launcher file handoff carries metadata only and never grants paths.",
+      "icon": "icons/batch-rename.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-batch-rename",
+        "defaultRef": "v1.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["filesystem.read", "filesystem.write", "clipboard.write", "launcherContext.files"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-qrcode",
+      "name": "QR Code",
+      "description": "Self-contained offline text and URL QR generator with a local PNG preview and download.",
+      "icon": "icons/qrcode.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-qrcode",
+        "defaultRef": "v1.0.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.0.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["clipboard.write"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-developer-tools",
+      "name": "Plugin Developer Tools",
+      "description": "Create a standalone TypeScript/Vite iHub plugin project beneath a user-selected parent folder.",
+      "icon": "icons/developer-tools.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-developer-tools",
+        "defaultRef": "v1.0.1",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.0.1" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
       "capabilities": ["filesystem.read", "filesystem.write"],
-      "status": "bootstrap"
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-window-manager",
+      "name": "iHub Window Layout",
+      "description": "Center, snap, or change the always-on-top state of iHub's own launcher window.",
+      "icon": "icons/window-manager.svg",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-window-manager",
+        "defaultRef": "v1.0.2",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v1.0.2" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["windowManagement"],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-pdf-tools",
+      "name": "PDF Tools",
+      "description": "Merge, split, reorder, delete, and rotate only explicitly selected PDF files inside the local WebView.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-pdf-tools",
+        "defaultRef": "v0.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v0.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": [],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-archive-tools",
+      "name": "Archive Tools",
+      "description": "Create and inspect ZIP files locally with zip-slip, size, ratio, encryption, ZIP64, and entry-count preflight limits.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-archive-tools",
+        "defaultRef": "v0.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v0.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": [],
+      "status": "available"
+    },
+    {
+      "id": "ihub-plugin-web-actions",
+      "name": "Web Actions",
+      "description": "Normalize an HTTP(S) address or search phrase locally, then open it in the default browser only after an explicit click.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/neko233-com/ihub-plugin-web-actions",
+        "defaultRef": "v0.1.0",
+        "manifest": "plugin.json"
+      },
+      "channels": { "stable": "v0.1.0" },
+      "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
+      "capabilities": ["shell.openExternal"],
+      "status": "available"
     }
   ]
 }

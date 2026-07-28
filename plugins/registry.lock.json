@@ -2,80 +2,697 @@
   "$schema": "./registry.lock.schema.json",
   "schemaVersion": 1,
   "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
-  "lockState": "bootstrap",
-  "generatedAt": null,
+  "lockState": "resolved",
+  "generatedAt": "2026-07-28T17:17:49.950Z",
   "packages": [
     {
       "id": "ihub-plugin-ocr",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-ocr", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "filesystem": { "read": ["user-selected"] }, "clipboard": { "write": true }, "nativeApi": true },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-ocr",
+        "requestedRef": "v0.2.0"
+      },
+      "resolved": {
+        "commit": "e9e58e118f1b09d82af4086f22116df000b9d89e",
+        "version": "0.2.0"
+      },
+      "integrity": {
+        "manifestSha256": "789e8cf2ac8c673fb7ee31167d01506fb56ebf37f312da7b777bc5dc6df722a8",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "eca1af2282fbfa1198e8ba42a12b4e2363a1c51319dc0e1d154b40667e9bb213"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "c8a3f838f59dc2800a7594602bfe74c09a964dba64b2d53876768b572e66961e"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "a491751da86c05b206f29a22d4cd3477dc7407788050f02e07cce1a23dd814a1"
+          },
+          {
+            "target": "windows-x86_64",
+            "path": "bin/windows-x86_64/ocr-worker.exe",
+            "sha256": "945714f08e8f98dcd34ed1708cf74a8244c38a25e6911aa4dac547f7581c8a9b"
+          }
+        ]
+      },
+      "permissions": {
+        "filesystem": {
+          "read": [
+            "user-selected"
+          ]
+        },
+        "clipboard": {
+          "write": true
+        },
+        "nativeApi": true,
+        "launcherContext": {
+          "files": true,
+          "image": true
+        }
+      },
+      "verified": true,
+      "note": "Published v0.2.0. Launcher file/image handoff contains bounded metadata only; the user must still select a PNG/JPG/JPEG grant before the hash-locked Windows OCR worker runs. No network or background scan is available."
     },
     {
       "id": "ihub-plugin-translate",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-translate", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "network": { "allow": ["provider-configured"] }, "clipboard": { "read": true, "write": true } },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-translate",
+        "requestedRef": "v1.1.0"
+      },
+      "resolved": {
+        "commit": "e54b96d5c6ee1555f41e5750a34ef4d6e2580baf",
+        "version": "1.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "ab51c452fc88249cc0c4fffb553a4602f180b479ce1c3b9976ac3c1f66eeeba2",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "10dea2a4ae781c9f4254ade40f6a58c84d4ab88cf98eee31204c8c31e74ce63c"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "5fae4a8ba27dc55700aaaf99904057f0f6669d580dd0b416ac497214e3a99438"
+          }
+        ]
+      },
+      "permissions": {
+        "network": {
+          "allow": [
+            "user-configured HTTPS LibreTranslate-compatible endpoint"
+          ]
+        },
+        "clipboard": {
+          "write": true
+        },
+        "launcherContext": {
+          "text": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.1.0. Explicit launcher text is consumed once and only prefilled; translation occurs only after the user supplies an HTTPS LibreTranslate-compatible endpoint and clicks Translate. The optional API key remains session-only."
     },
     {
       "id": "ihub-plugin-colorpick",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-colorpick", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "clipboard": { "write": true }, "globalShortcut": true, "nativeApi": true },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-colorpick",
+        "requestedRef": "v1.1.0"
+      },
+      "resolved": {
+        "commit": "9dda181fab44f4fd1d0b5be4d5fe1c10c299befe",
+        "version": "1.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "536f487bdbaa42288a4d89b4b8a2db48d7727d1265ec06fa72e4073d39d5521c",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "bc061bd9cc7bd393245c6333a1d4d9c736dd257791519b5c3993c58d10c4e9eb"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "56ad469113bcffc88ad99dc4cdd4bd6f8edfd5ccf9e3eaca844f564ce2bf90bb"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        },
+        "cursorColor": true
+      },
+      "verified": true,
+      "note": "Published v1.1.0. Each native cursor-color sample requires a visible click and separate iHub confirmation, returns only HEX/RGB, and exposes no coordinates, screenshot, recording, or background polling."
     },
     {
       "id": "ihub-plugin-clipboard",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-clipboard", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "clipboard": { "read": true, "write": true }, "filesystem": { "write": ["plugin-data"] } },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-clipboard",
+        "requestedRef": "v1.0.1"
+      },
+      "resolved": {
+        "commit": "8158cfd4bdddbf6065c881d986f3ac72422d15e0",
+        "version": "1.0.1"
+      },
+      "integrity": {
+        "manifestSha256": "d6c353e5436c12e5426ce97d8c5b00c0237c6801f72291e128d00acf30e559b5",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "e5e90f85264f58f5d558aabf3564db768c0fa1860c3b36576347b8899161939d"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "a67eba9934a7006140b8dda193588d7ed05007d5dab1894973e8b4c4df71531f"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "834522f477138e4a148aca48659678da06c80c33f54fa4fe173807886e6a199d"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "read": true,
+          "write": true,
+          "history": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.1 source tag. Commit and manifest/frontend SHA-256 values were verified from a clean standalone clone with raw tag equality; current clipboard text is read only after user capture, and the separately granted history snapshot is read-only, bounded, and user-invoked. No native artifacts or publisher signature are present."
     },
     {
       "id": "ihub-plugin-screenshot",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-screenshot", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "filesystem": { "write": ["user-selected"] }, "clipboard": { "write": true }, "globalShortcut": true, "nativeApi": true },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-screenshot",
+        "requestedRef": "v1.0.1"
+      },
+      "resolved": {
+        "commit": "11ab0cfbb279523337a82066469a7786070bc42b",
+        "version": "1.0.1"
+      },
+      "integrity": {
+        "manifestSha256": "c5466cb8c265769cbd1e11ed8d6c624de8ab64874a232466502b0f50060e0862",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "65e57ee969b6aacecc8f4f6d910d7424df8d382d66690221d9723b69827b40c9"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "fa9eb2f8f897cbf24e6dfbc165c3ad4dc29f823d9d0d709f4104b41a569a36c0"
+          }
+        ]
+      },
+      "permissions": {
+        "screenCapture": true,
+        "clipboard": {
+          "write": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.1 source tag. Commit and manifest/frontend SHA-256 values were verified from raw GitHub contents and a clean standalone clone. The plugin asks the browser for user-selected getDisplayMedia sharing only after a click, takes one frame to a local PNG preview, and can write a confirmed result to the clipboard. screenCapture only grants a short-lived focus lease around the browser picker; it provides no screen pixels, native capture, filesystem access, background capture, or global hotkey. autoUpdate permits host-led stable update checks, while applying an update remains user-confirmed. No native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-image-tools",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-image-tools",
+        "requestedRef": "v1.1.0"
+      },
+      "resolved": {
+        "commit": "663b88540cc73cb83e0070d0462c450198386bb1",
+        "version": "1.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "e643e33b95c824b520973f158121c43f1d7c2e0b3e9c568a0813102714368656",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "ebe8ca9297b3a4d0dbdd53bdac07f55a68f0ccdbeb5a573b4bbb90949378e7b1"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "980f7926422a8b7995a5762b69f30f420f0dd90948373dc652ed8e68c8d36242"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "48489e1bac019cdb3b6d7798f3976eb24fe71a5605f3c75b1078661d0b43e622"
+          }
+        ]
+      },
+      "permissions": {
+        "launcherContext": {
+          "files": true,
+          "image": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.1.0. Launcher file/image handoff contains metadata only; pixels are processed locally only after explicit file selection or drop. The plugin has no network, arbitrary filesystem, clipboard, or native capability."
     },
     {
       "id": "ihub-plugin-json-tools",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-json-tools", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "clipboard": { "read": true, "write": true }, "filesystem": { "read": ["user-selected"], "write": ["user-selected"] } },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-json-tools",
+        "requestedRef": "v1.0.1"
+      },
+      "resolved": {
+        "commit": "584899b8aaa3c2ed1d6397c182a1ab75ded763cd",
+        "version": "1.0.1"
+      },
+      "integrity": {
+        "manifestSha256": "43fc4d2512a97b062f112fd3ea023e6c4208d8c5c90ba4b1302c2403dff4ee9e",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "5263e23ebb8613d2dec1b8fe7830426c64b874a7b6c300f03aed4a19187b42df"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "d87259426703964d7a42d6fb3747dc428cfbc890deaded830b8784c80d86c150"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.1 source tag. Commit and listed frontend SHA-256 values were verified from the Git tag; no native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-text-tools",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-text-tools",
+        "requestedRef": "v1.1.0"
+      },
+      "resolved": {
+        "commit": "a655c9e6b50d120ad92519b85018dc588352053d",
+        "version": "1.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "7dd920da79de036eab43e687d5db6c43538c9d28f0a13a4543918962dbaed058",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "6e446dac9b49afdf0b289eee57c378578cd53c8c0a6cac24370d89b74cb6e795"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "ede09ecd06fffb304921ecc9d201f7b52e5b2cf8f25f037592519b03af8889b4"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "d71e3f54d89fe0504a96786d5f13319b37994355d5423a447280050a04b239e2"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        },
+        "launcherContext": {
+          "text": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.1.0 with a vendored @ihub/plugin-sdk 0.2.0 snapshot. Explicit launcher text is consumed once and only prefilled for an offline operation; it is not transformed, persisted, or uploaded automatically."
     },
     {
       "id": "ihub-plugin-base-converter",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-base-converter", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "clipboard": { "read": true, "write": true } },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-base-converter",
+        "requestedRef": "v1.0.0"
+      },
+      "resolved": {
+        "commit": "767bd87e44555ba3220b243227cfff04cac7f3c0",
+        "version": "1.0.0"
+      },
+      "integrity": {
+        "manifestSha256": "7b90d9b041e01a250758476b0ecdb083f63ee369cc6c0d43bf708d250e6ca564",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "197d49199f13b5984217ba61888a7fe6e961e5b48c49dc71914b973752e49edc"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "e4b448e9bf8802fb0d26b6857996a39e287e0f44dc9d9ca84297776c20857667"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "e52f062b306b76a5d25f61b0e9588e00f8999867e33cd1cc543412d0ddcf7e44"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.0 source tag. Commit and manifest/frontend SHA-256 values were verified from a clean standalone clone with raw Git blob equality; no native artifacts or publisher signature are present."
     },
     {
       "id": "ihub-plugin-quick-note",
-      "source": { "url": "https://github.com/neko233-com/ihub-plugin-quick-note", "requestedRef": "main" },
-      "resolved": { "commit": null, "version": null },
-      "integrity": { "manifestSha256": null, "artifacts": [] },
-      "permissions": { "filesystem": { "read": ["plugin-data"], "write": ["plugin-data"] } },
-      "verified": false,
-      "note": "Pre-publication entry. Resolve an immutable commit and hashes before distribution."
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-quick-note",
+        "requestedRef": "v1.0.0"
+      },
+      "resolved": {
+        "commit": "a85ff32b087af14021195093f20773d0fa77b168",
+        "version": "1.0.0"
+      },
+      "integrity": {
+        "manifestSha256": "1f41c7a7bc744e72ad88fedc81490d8ca40ece03fdd49b20cc7d4a8024785582",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "602e0dadc91e1bc0445156204abdb556b1b100cd36ec07722f95fcb139e6a1c3"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "5cf987d60cbaefe3f9d2d2ed20a62950b8c13a38ebadd9ff77aee2b166847d19"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "6e209a50a77fec40b4e594556bf181d0c380dca3a85b9d7c1b55e805ac975cfa"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.0 source tag. Commit and manifest/frontend SHA-256 values were verified from a clean standalone clone with raw Git blob equality; notes are retained only in the plugin-scoped host settings store. No native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-screen-record",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-screen-record",
+        "requestedRef": "v1.0.3"
+      },
+      "resolved": {
+        "commit": "f2c83361fffa87d624f6ff2834df6e6ba506cdcb",
+        "version": "1.0.3"
+      },
+      "integrity": {
+        "manifestSha256": "7252887632d469ecc8292dae82858f880d5e168b99dd91692cb504318a6b9705",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "01b2bf239e6584aee3973d4834bb37479571a51510e32f041ef49dbdf2d9d342"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "da7ed5bd6361738b72caaea405b864cb94a2a7b5da2fca203ea2d33aec03a776"
+          }
+        ]
+      },
+      "permissions": {
+        "screenCapture": true
+      },
+      "verified": true,
+      "note": "Published v1.0.3 source tag. Commit and manifest/frontend SHA-256 values were verified from a clean standalone clone and GitHub raw contents. The local WebM recorder stops at 30 minutes or 512 MiB and remains user-started/user-saved. screenCapture only grants a short-lived, owner-bound focus lease around the browser getDisplayMedia picker; it grants no screen pixels, native capture, file access, or background recording. No native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-batch-rename",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-batch-rename",
+        "requestedRef": "v1.1.0"
+      },
+      "resolved": {
+        "commit": "203aeba2cf88a4b4cb23f6362a35e4b628d27eb0",
+        "version": "1.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "470985aa7dca907f4ace3e4d22e79e1a0221cc00d941940d71b8276cf417bc42",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "6f6529fd5e532122885d19c5885c9cea85f00b64f31a7159945aea7830775c82"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "c41156ad831a5d0403b876f8027e5d32eb5d62136cb927b3abe174a0efc32ea2"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "2aa8ef26f879b625b8c05abd5ad64b67814f8f2b129260fd063704e5aa161ba3"
+          }
+        ]
+      },
+      "permissions": {
+        "filesystem": {
+          "read": [
+            "user-selected"
+          ],
+          "write": [
+            "user-selected"
+          ]
+        },
+        "clipboard": {
+          "write": true
+        },
+        "launcherContext": {
+          "files": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.1.0. Launcher file handoff contains metadata only; rename preview and apply still require an owner-scoped user-selected directory grant and the exact one-shot native preview token."
+    },
+    {
+      "id": "ihub-plugin-qrcode",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-qrcode",
+        "requestedRef": "v1.0.0"
+      },
+      "resolved": {
+        "commit": "05a4774baad6c834a363ac4bfb20748d34d24dfb",
+        "version": "1.0.0"
+      },
+      "integrity": {
+        "manifestSha256": "a79472930fabd23ef509d00b55d373156543268fd3db8b8b26cbcb489f4adb72",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "bed7323aff7d4cb1301822d4a734f8f481dfee38b336b46b2362dbead30d03a9"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "0347b8eb572075cc211bc0129c4986889e1f5de3073f5a7d1f10810979cf35ca"
+          }
+        ]
+      },
+      "permissions": {
+        "clipboard": {
+          "write": true
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.0 source tag. Commit and listed frontend SHA-256 values were verified from raw Git contents with line-ending conversion disabled; no native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-developer-tools",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-developer-tools",
+        "requestedRef": "v1.0.1"
+      },
+      "resolved": {
+        "commit": "24194d2040174002a8df82347124ed5f4f6d1b2b",
+        "version": "1.0.1"
+      },
+      "integrity": {
+        "manifestSha256": "95480200d977ead9a3cc3e0e548580923631da84d5c5209ddf11c7ca2c2567de",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "8b5945369009766ac4c42d41f5345391fec06f6e6ae98eecc8cfd467899499d3"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "ebbd7ac72d4aead5fe4b2a81eb00707490cf4d37a609c22597b4003bae7940de"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "fbe9d50ca76e995b2114a5dbbb87c190b7b34f095107fa666bc1976e587be72d"
+          }
+        ]
+      },
+      "permissions": {
+        "filesystem": {
+          "read": [
+            "user-selected"
+          ],
+          "write": [
+            "user-selected"
+          ]
+        }
+      },
+      "verified": true,
+      "note": "Published v1.0.1 source tag. Commit and listed frontend SHA-256 values were verified from a clean remote tag checkout; no native artifacts or publisher signature are present."
+    },
+    {
+      "id": "ihub-plugin-window-manager",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-window-manager",
+        "requestedRef": "v1.0.2"
+      },
+      "resolved": {
+        "commit": "ae13ec783ef1af037b1ba661c549efcde7f694a3",
+        "version": "1.0.2"
+      },
+      "integrity": {
+        "manifestSha256": "3161eeb33914b49f54b4d3a929bf8f56d0135fc5cc5a9273512a730f888ed7ae",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "2d22b3da3cef0861dc3d8a459cee79e0f9576ae6eae9731d9275884dcaf27822"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "40082ef1d89df0386a3575d61129993794be21434554d1bd0662de3946385e2b"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "69fd8a4b122c9cf428c5cf61a7c21e0520428622a5a11227106d217bb9f35aa7"
+          }
+        ]
+      },
+      "permissions": {
+        "windowManagement": true
+      },
+      "verified": true,
+      "note": "Published v1.0.2 with a vendored @ihub/plugin-sdk 0.2.0 snapshot for standalone builds. Its only capability is four fixed layout actions applied to iHub's own launcher; it cannot inspect or control other applications."
+    },
+    {
+      "id": "ihub-plugin-pdf-tools",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-pdf-tools",
+        "requestedRef": "v0.1.0"
+      },
+      "resolved": {
+        "commit": "ef3c226c60e0bebde89f3f4495f8935aaca5643d",
+        "version": "0.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "8745dc39e71bd0656432ba969e8cb14d60278084b970b04679ad524cfb9ada23",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "b85542f379dad6e336a2d86c79c52cb6010f5e696cb4bb73e91b3e2eaec5e50d"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "c0905a6bbfc848b374c5b808d9b5ccd4e8c91b3841f7a9fe7baa1e772a29143c"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "a7bc2946073e140cc49f1a0d1af8e60196dd45ce0637eed0331be2fdac1e54c6"
+          }
+        ]
+      },
+      "permissions": {},
+      "verified": true,
+      "note": "Published v0.1.0. PDF merge, split, reorder, delete, and rotation run in the current WebView against explicitly selected files with bounded file/page limits; there is no host, network, or native capability."
+    },
+    {
+      "id": "ihub-plugin-archive-tools",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-archive-tools",
+        "requestedRef": "v0.1.0"
+      },
+      "resolved": {
+        "commit": "80ee6fcd359895e7d1c7d9bbba3f7dff6ec4292e",
+        "version": "0.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "a0b4c0ddb81cee339b9ef25e605c597e342589e28da5d36e066517c8498a512e",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "84fb2e9a8728ac6f6c2b6b8627834993b969b1861c4dcc7d3ab9905e67e27a77"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "a215f90a212152dd7f5fe64b0ff36da4858d3142f0e1a56920f620dd6468990c"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "2094fa0a837ade82d141adbcdeae670157f1a9902cb62a5227d8837514b246ed"
+          }
+        ]
+      },
+      "permissions": {},
+      "verified": true,
+      "note": "Published v0.1.0. ZIP creation and selective extraction run in the current WebView with zip-slip, size, ratio, encryption, ZIP64, and entry-count preflight limits; downloads remain explicit."
+    },
+    {
+      "id": "ihub-plugin-web-actions",
+      "source": {
+        "url": "https://github.com/neko233-com/ihub-plugin-web-actions",
+        "requestedRef": "v0.1.0"
+      },
+      "resolved": {
+        "commit": "99032242fdcf48fbcf1b928f44b826ae0b5b607f",
+        "version": "0.1.0"
+      },
+      "integrity": {
+        "manifestSha256": "4d34428438b60d991086319e597e73e0f1e32ff2c277a56fa857e742c9a0288c",
+        "artifacts": [
+          {
+            "target": "web",
+            "path": "dist/index.html",
+            "sha256": "449db00bb3243839628b940de63297c7e5f73a3547d43d9e376d35d0aea9ca7b"
+          },
+          {
+            "target": "web",
+            "path": "dist/main.js",
+            "sha256": "402a12d907ebe34e97d648cac25c0774b8a9ac29441853182f864507b5dc9716"
+          },
+          {
+            "target": "web",
+            "path": "dist/style.css",
+            "sha256": "93f1dced763a87ba29dec6b722df1cead92bc7eb34ca590d64b7632f735ebbf4"
+          }
+        ]
+      },
+      "permissions": {
+        "shell": {
+          "openExternal": true
+        }
+      },
+      "verified": true,
+      "note": "Published v0.1.0. URL normalization is local and only HTTP(S) targets are accepted; shell.openExternal is called solely after an explicit button click. No fetch, automatic navigation, or native worker is present."
     }
   ]
 }

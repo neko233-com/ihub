@@ -48,15 +48,41 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-target }}
+          components: rustfmt, clippy
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Restore locked official plugin checkouts
+        run: pnpm bootstrap:official-plugins
 
       - name: Type-check frontend
         run: pnpm check
 
       - name: Run frontend tests
         run: pnpm test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Build plugin SDK and template
+        shell: bash
+        run: |
+          pnpm --dir plugin-sdk run check
+          pnpm --dir plugin-sdk run build
+          pnpm --dir examples/ihub-plugin-hello run build
+
+      - name: Verify immutable official plugin locks
+        run: pnpm verify:official-plugins -- --strict-worktree
+
+      - name: Rebuild official plugins
+        run: pnpm verify:official-plugin-builds
 
       # --no-bundle keeps CI free from signing/notarization requirements while
       # still compiling the Rust binary and exercising Tauri's build pipeline.
