@@ -440,25 +440,38 @@ function Get-CurrentNsisPackageDescriptor {
     $releaseExecutablePath = Assert-PathIsChildOf -Path (Join-Path $releaseRoot ("$binaryName.exe")) -Root $releaseRoot -Description 'Tauri release executable path'
     $bundleRoot = Assert-PathIsChildOf -Path (Join-Path $releaseRoot 'bundle') -Root $releaseRoot -Description 'Tauri bundle directory'
     $nsisRoot = Assert-PathIsChildOf -Path (Join-Path $bundleRoot 'nsis') -Root $bundleRoot -Description 'NSIS bundle directory'
+    $nsisBuildRoot = Assert-PathIsChildOf -Path (Join-Path $releaseRoot 'nsis\x64') -Root $releaseRoot -Description 'NSIS generated build directory'
     Assert-NoReparsePointsBelowRoot -Path $nsisRoot -Root $RepositoryRoot -Description 'Tauri NSIS bundle path'
+    Assert-NoReparsePointsBelowRoot -Path $nsisBuildRoot -Root $RepositoryRoot -Description 'Tauri NSIS generated build path'
     $installerName = "${productName}_${version}_x64-setup.exe"
     if ([IO.Path]::GetFileName($installerName) -ne $installerName) {
         throw "Computed NSIS installer name is unsafe: '$installerName'."
     }
     $installerPath = Assert-PathIsChildOf -Path (Join-Path $nsisRoot $installerName) -Root $nsisRoot -Description 'NSIS installer path'
     $signaturePath = Assert-PathIsChildOf -Path "$installerPath.sig" -Root $nsisRoot -Description 'NSIS updater signature path'
+    # Tauri's generated NSIS template uses `File "${MAINBINARYSRCPATH}"`
+    # without `/oname`, so the immutable snapshot must retain the configured
+    # main-binary file name. Otherwise NSIS installs the snapshot beside the
+    # old application executable instead of replacing it.
+    $payloadSnapshotPath = Assert-PathIsChildOf -Path (Join-Path $nsisBuildRoot ("$binaryName.exe")) -Root $nsisBuildRoot -Description 'NSIS payload snapshot path'
+    $payloadProofPath = Assert-PathIsChildOf -Path (Join-Path $nsisBuildRoot 'nsis-output.exe.ihub-payload-proof.json') -Root $nsisBuildRoot -Description 'NSIS payload proof path'
+    $payloadIncludePath = Assert-PathIsChildOf -Path (Join-Path $nsisBuildRoot 'nsis-output.exe.ihub-payload-proof.nsh') -Root $nsisBuildRoot -Description 'NSIS payload proof include path'
 
     return [pscustomobject]@{
-        ProductName   = $productName
-        Version       = $version
-        BinaryName    = $binaryName
-        RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
-        ReleaseRoot   = $releaseRoot
+        ProductName          = $productName
+        Version              = $version
+        BinaryName           = $binaryName
+        RepositoryRoot       = [IO.Path]::GetFullPath($RepositoryRoot)
+        ReleaseRoot          = $releaseRoot
         ReleaseExecutablePath = $releaseExecutablePath
-        BundleRoot    = $bundleRoot
-        NsisRoot      = $nsisRoot
-        InstallerPath = $installerPath
-        SignaturePath = $signaturePath
+        BundleRoot           = $bundleRoot
+        NsisRoot             = $nsisRoot
+        NsisBuildRoot        = $nsisBuildRoot
+        InstallerPath        = $installerPath
+        SignaturePath        = $signaturePath
+        PayloadSnapshotPath  = $payloadSnapshotPath
+        PayloadProofPath     = $payloadProofPath
+        PayloadIncludePath   = $payloadIncludePath
     }
 }
 
@@ -508,17 +521,100 @@ function Get-TrustedRegularFileFingerprint {
     }
 }
 
+function Get-TrustedNsisPayloadProof {
+    param(
+        [Parameter(Mandatory)]$Descriptor,
+        [Parameter(Mandatory)][DateTime]$NotBefore
+    )
+
+    Assert-NoReparsePointsBelowRoot -Path $Descriptor.NsisBuildRoot -Root $Descriptor.RepositoryRoot -Description 'NSIS payload proof path'
+    $proofFingerprint = Get-TrustedRegularFileFingerprint -Path $Descriptor.PayloadProofPath -Description 'makensis payload proof'
+    if ($proofFingerprint.Length -gt 65536) {
+        throw "The makensis payload proof is too large to trust: $($proofFingerprint.Path)"
+    }
+
+    try {
+        $proof = Get-Content -LiteralPath $proofFingerprint.Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "The makensis payload proof is not valid JSON: $($proofFingerprint.Path). $($_.Exception.Message)"
+    }
+
+    if ([string]$proof.managedBy -ne 'iHub NSIS payload proof v1' -or [string]$proof.schemaVersion -ne '1') {
+        throw "The makensis payload proof has no trusted iHub schema marker: $($proofFingerprint.Path)"
+    }
+    $payloadSha256 = ([string]$proof.payloadSha256).ToLowerInvariant()
+    if ($payloadSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "The makensis payload proof contains an invalid SHA-256: $($proofFingerprint.Path)"
+    }
+    $nonce = ([string]$proof.nonce).ToLowerInvariant()
+    if ($nonce -notmatch '^[0-9a-f]{32}$') {
+        throw "The makensis payload proof contains an invalid build nonce: $($proofFingerprint.Path)"
+    }
+    [int64]$payloadLength = 0
+    if (-not [int64]::TryParse([string]$proof.payloadLength, [ref]$payloadLength) -or $payloadLength -le 0) {
+        throw "The makensis payload proof contains an invalid payload length: $($proofFingerprint.Path)"
+    }
+    $expectedSnapshotFileName = [IO.Path]::GetFileName($Descriptor.PayloadSnapshotPath)
+    if (-not [string]::Equals([string]$proof.snapshotFileName, $expectedSnapshotFileName, [StringComparison]::Ordinal)) {
+        throw "The makensis payload proof names an unexpected snapshot: '$($proof.snapshotFileName)'."
+    }
+    [DateTime]$generatedAt = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse(
+            [string]$proof.generatedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$generatedAt
+        )) {
+        throw "The makensis payload proof has an invalid generation time: $($proofFingerprint.Path)"
+    }
+
+    $snapshotFingerprint = Get-TrustedRegularFileFingerprint -Path $Descriptor.PayloadSnapshotPath -Description 'immutable makensis payload snapshot'
+    if (
+        -not [string]::Equals($snapshotFingerprint.Sha256, $payloadSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        $snapshotFingerprint.Length -ne $payloadLength
+    ) {
+        throw "The immutable makensis payload snapshot does not match its proof: $($snapshotFingerprint.Path)"
+    }
+    $freshnessFloor = $NotBefore.AddSeconds(-5)
+    if (
+        $proofFingerprint.LastWriteUtc -lt $freshnessFloor -or
+        $snapshotFingerprint.LastWriteUtc -lt $freshnessFloor -or
+        $generatedAt.ToUniversalTime() -lt $freshnessFloor
+    ) {
+        throw 'The makensis payload proof or immutable snapshot predates this packaging run.'
+    }
+
+    return [pscustomobject]@{
+        Path                = $proofFingerprint.Path
+        Fingerprint         = $proofFingerprint
+        SnapshotFingerprint = $snapshotFingerprint
+        PayloadSha256       = $payloadSha256
+        PayloadLength       = $payloadLength
+        Nonce               = $nonce
+        GeneratedAt         = $generatedAt.ToUniversalTime()
+    }
+}
+
 function Get-NsisPackageState {
     param([Parameter(Mandatory)]$Descriptor)
 
     Assert-NoReparsePointsBelowRoot -Path $Descriptor.NsisRoot -Root $Descriptor.RepositoryRoot -Description 'NSIS package path'
-    if (-not (Test-Path -LiteralPath $Descriptor.InstallerPath -PathType Leaf) -or -not (Test-Path -LiteralPath $Descriptor.SignaturePath -PathType Leaf)) {
+    Assert-NoReparsePointsBelowRoot -Path $Descriptor.NsisBuildRoot -Root $Descriptor.RepositoryRoot -Description 'NSIS payload proof path'
+    if (
+        -not (Test-Path -LiteralPath $Descriptor.InstallerPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Descriptor.SignaturePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Descriptor.PayloadProofPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Descriptor.PayloadSnapshotPath -PathType Leaf)
+    ) {
         return $null
     }
 
     $installer = Get-Item -LiteralPath $Descriptor.InstallerPath -Force
     $signature = Get-Item -LiteralPath $Descriptor.SignaturePath -Force
-    foreach ($item in @($installer, $signature)) {
+    $payloadProof = Get-Item -LiteralPath $Descriptor.PayloadProofPath -Force
+    $payloadSnapshot = Get-Item -LiteralPath $Descriptor.PayloadSnapshotPath -Force
+    foreach ($item in @($installer, $signature, $payloadProof, $payloadSnapshot)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Refusing an NSIS package artifact behind a reparse point: $($item.FullName)"
         }
@@ -532,9 +628,13 @@ function Get-NsisPackageState {
         SignaturePath          = $signature.FullName
         InstallerLength        = [int64]$installer.Length
         SignatureLength        = [int64]$signature.Length
+        PayloadProofLength     = [int64]$payloadProof.Length
+        PayloadSnapshotLength  = [int64]$payloadSnapshot.Length
         InstallerLastWriteUtc  = $installer.LastWriteTimeUtc
         SignatureLastWriteUtc  = $signature.LastWriteTimeUtc
-        Fingerprint            = "$($installer.Length):$($installer.LastWriteTimeUtc.Ticks):$($signature.Length):$($signature.LastWriteTimeUtc.Ticks)"
+        PayloadProofLastWriteUtc = $payloadProof.LastWriteTimeUtc
+        PayloadSnapshotLastWriteUtc = $payloadSnapshot.LastWriteTimeUtc
+        Fingerprint            = "$($installer.Length):$($installer.LastWriteTimeUtc.Ticks):$($signature.Length):$($signature.LastWriteTimeUtc.Ticks):$($payloadProof.Length):$($payloadProof.LastWriteTimeUtc.Ticks):$($payloadSnapshot.Length):$($payloadSnapshot.LastWriteTimeUtc.Ticks)"
     }
 }
 
@@ -542,14 +642,18 @@ function Clear-ExpectedNsisArtifacts {
     param([Parameter(Mandatory)]$Descriptor)
 
     Assert-NoReparsePointsBelowRoot -Path $Descriptor.NsisRoot -Root $Descriptor.RepositoryRoot -Description 'NSIS artifact cleanup path'
+    Assert-NoReparsePointsBelowRoot -Path $Descriptor.NsisBuildRoot -Root $Descriptor.RepositoryRoot -Description 'NSIS proof cleanup path'
     # A failed Tauri signing pass can leave a freshly bundled installer beside
-    # an older .sig.  Only remove the two exact, descriptor-derived paths
-    # before a new build; never glob or recurse through the bundle directory.
+    # an older .sig or proof. Only remove exact descriptor-derived paths before
+    # a new build; never glob or recurse through either output directory.
     foreach ($artifact in @(
-            [pscustomobject]@{ Name = 'NSIS installer'; Path = [string]$Descriptor.InstallerPath },
-            [pscustomobject]@{ Name = 'NSIS updater signature'; Path = [string]$Descriptor.SignaturePath }
+            [pscustomobject]@{ Name = 'NSIS installer'; Path = [string]$Descriptor.InstallerPath; Root = [string]$Descriptor.NsisRoot },
+            [pscustomobject]@{ Name = 'NSIS updater signature'; Path = [string]$Descriptor.SignaturePath; Root = [string]$Descriptor.NsisRoot },
+            [pscustomobject]@{ Name = 'NSIS payload snapshot'; Path = [string]$Descriptor.PayloadSnapshotPath; Root = [string]$Descriptor.NsisBuildRoot },
+            [pscustomobject]@{ Name = 'NSIS payload proof'; Path = [string]$Descriptor.PayloadProofPath; Root = [string]$Descriptor.NsisBuildRoot },
+            [pscustomobject]@{ Name = 'NSIS payload proof include'; Path = [string]$Descriptor.PayloadIncludePath; Root = [string]$Descriptor.NsisBuildRoot }
         )) {
-        $artifactPath = Assert-PathIsChildOf -Path $artifact.Path -Root $Descriptor.NsisRoot -Description $artifact.Name
+        $artifactPath = Assert-PathIsChildOf -Path $artifact.Path -Root $artifact.Root -Description $artifact.Name
         if (-not (Test-Path -LiteralPath $artifactPath)) {
             continue
         }
@@ -580,7 +684,13 @@ function Wait-ForCurrentNsisPackage {
 
     while ([DateTime]::UtcNow -lt $deadline) {
         $state = Get-NsisPackageState -Descriptor $Descriptor
-        if ($null -ne $state -and $state.InstallerLastWriteUtc -ge $minimumWriteTime -and $state.SignatureLastWriteUtc -ge $minimumWriteTime) {
+        if (
+            $null -ne $state -and
+            $state.InstallerLastWriteUtc -ge $minimumWriteTime -and
+            $state.SignatureLastWriteUtc -ge $minimumWriteTime -and
+            $state.PayloadProofLastWriteUtc -ge $minimumWriteTime.AddSeconds(-5) -and
+            $state.PayloadSnapshotLastWriteUtc -ge $minimumWriteTime.AddSeconds(-5)
+        ) {
             if ($state.SignatureLastWriteUtc.AddSeconds(2) -lt $state.InstallerLastWriteUtc) {
                 # Tauri writes the updater signature as a separate artifact. Do
                 # not install an installer while its matching sidecar is stale.
@@ -606,7 +716,7 @@ function Wait-ForCurrentNsisPackage {
         Start-Sleep -Milliseconds 750
     }
 
-    throw "Timed out waiting for a fresh, stable signed NSIS package. Expected exactly '$($Descriptor.InstallerPath)' and '$($Descriptor.SignaturePath)'. No installer was started."
+    throw "Timed out waiting for a fresh, stable signed NSIS package and payload proof. Expected '$($Descriptor.InstallerPath)', '$($Descriptor.SignaturePath)', and '$($Descriptor.PayloadProofPath)'. No installer was started."
 }
 
 function Build-CurrentSignedNsisPackage {
@@ -629,20 +739,30 @@ function Build-CurrentSignedNsisPackage {
     # Re-read the configuration so a concurrent source edit cannot make us
     # silently install a package addressed by an older config value.
     $after = Get-CurrentNsisPackageDescriptor -RepositoryRoot $RepositoryRoot
-    if (-not [string]::Equals($before.InstallerPath, $after.InstallerPath, [StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals($before.SignaturePath, $after.SignaturePath, [StringComparison]::OrdinalIgnoreCase)) {
+    if (
+        -not [string]::Equals($before.InstallerPath, $after.InstallerPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($before.SignaturePath, $after.SignaturePath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($before.PayloadProofPath, $after.PayloadProofPath, [StringComparison]::OrdinalIgnoreCase)
+    ) {
         throw 'Tauri installer identity changed while packaging. No installer was started; rerun after the configuration is stable.'
     }
 
     $state = Wait-ForCurrentNsisPackage -Descriptor $after -NotBefore $packagingStartedAt
-    $releaseExecutableAfter = Get-TrustedRegularFileFingerprint -Path $after.ReleaseExecutablePath -Description 'Tauri release executable produced by this packaging run'
-    Write-Host "Release executable SHA-256 after packaging:  $($releaseExecutableAfter.Sha256)"
+    $payloadProof = Get-TrustedNsisPayloadProof -Descriptor $after -NotBefore $packagingStartedAt
+    $releaseExecutableAfter = Get-TrustedRegularFileFingerprint -Path $after.ReleaseExecutablePath -Description 'Tauri release executable restored after packaging'
+    Write-Host "Restored unbundled executable SHA-256:       $($releaseExecutableAfter.Sha256)"
+    Write-Host "Immutable makensis payload SHA-256:         $($payloadProof.PayloadSha256)"
     return [pscustomobject]@{
         Descriptor              = $after
         State                   = $state
         Sha256                  = (Get-FileHash -LiteralPath $state.InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        PackagingStartedAt      = $packagingStartedAt
         ReleaseExecutableBefore = $releaseExecutableBefore
         ReleaseExecutableAfter  = $releaseExecutableAfter
-        PayloadSha256           = $releaseExecutableAfter.Sha256
+        PayloadProof            = $payloadProof
+        PayloadSha256           = $payloadProof.PayloadSha256
+        PayloadLength           = $payloadProof.PayloadLength
+        PayloadNonce            = $payloadProof.Nonce
     }
 }
 
@@ -686,9 +806,11 @@ function Get-ExactInstalledTarget {
             throw "Refusing to install through a reparse-point iHub executable: $executablePath"
         }
     }
+    $proofPath = Assert-PathIsChildOf -Path (Join-Path $installRoot '.ihub-install-proof.json') -Root $installRoot -Description 'Installed iHub payload proof path'
     return [pscustomobject]@{
         InstallRoot    = $installRoot
         ExecutablePath = $executablePath
+        ProofPath      = $proofPath
     }
 }
 
@@ -1071,6 +1193,88 @@ function Assert-ExactInstalledExecutableIsNotRunning {
     }
 }
 
+function Get-TrustedInstalledNsisPayloadProof {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][DateTime]$NotBefore
+    )
+
+    $normalizedPath = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $normalizedPath -PathType Leaf)) {
+        throw "The installed NSIS payload proof marker is missing: $normalizedPath"
+    }
+    $item = Get-Item -LiteralPath $normalizedPath -Force
+    if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "The installed NSIS payload proof marker is unsafe: $normalizedPath"
+    }
+    if ($item.Length -le 0 -or $item.Length -gt 65536) {
+        throw "The installed NSIS payload proof marker has an invalid size: $normalizedPath"
+    }
+    if ($item.LastWriteTimeUtc -lt $NotBefore.AddSeconds(-5)) {
+        throw "The installed NSIS payload proof marker predates this installer run: $normalizedPath"
+    }
+
+    try {
+        $proof = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "The installed NSIS payload proof marker is not valid JSON: $normalizedPath. $($_.Exception.Message)"
+    }
+    if ([string]$proof.managedBy -ne 'iHub NSIS payload proof v1' -or [string]$proof.schemaVersion -ne '1') {
+        throw "The installed NSIS payload proof marker has no trusted iHub schema marker: $normalizedPath"
+    }
+
+    $payloadSha256 = ([string]$proof.payloadSha256).ToLowerInvariant()
+    if ($payloadSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "The installed NSIS payload proof marker contains an invalid SHA-256: $normalizedPath"
+    }
+    $nonce = ([string]$proof.nonce).ToLowerInvariant()
+    if ($nonce -notmatch '^[0-9a-f]{32}$') {
+        throw "The installed NSIS payload proof marker contains an invalid build nonce: $normalizedPath"
+    }
+    [int64]$payloadLength = 0
+    if (-not [int64]::TryParse([string]$proof.payloadLength, [ref]$payloadLength) -or $payloadLength -le 0) {
+        throw "The installed NSIS payload proof marker contains an invalid payload length: $normalizedPath"
+    }
+
+    return [pscustomobject]@{
+        Path             = $item.FullName
+        LastWriteUtc     = $item.LastWriteTimeUtc
+        PayloadSha256    = $payloadSha256
+        PayloadLength    = $payloadLength
+        Nonce            = $nonce
+    }
+}
+
+function Clear-InstalledNsisPayloadProof {
+    param([Parameter(Mandatory)]$Target)
+
+    if (-not (Test-Path -LiteralPath $Target.ProofPath)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Target.ProofPath -PathType Leaf)) {
+        throw "Refusing to replace a non-file installed payload proof path: $($Target.ProofPath)"
+    }
+    $item = Get-Item -LiteralPath $Target.ProofPath -Force
+    if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $item.Length -le 0 -or $item.Length -gt 65536) {
+        throw "Refusing to replace an unsafe installed payload proof marker: $($Target.ProofPath)"
+    }
+    try {
+        $existingProof = Get-Content -LiteralPath $item.FullName -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Refusing to remove an untrusted installed payload proof marker: $($Target.ProofPath)"
+    }
+    if ([string]$existingProof.managedBy -ne 'iHub NSIS payload proof v1' -or [string]$existingProof.schemaVersion -ne '1') {
+        throw "Refusing to remove an installed payload proof marker without the iHub ownership schema: $($Target.ProofPath)"
+    }
+
+    Remove-Item -LiteralPath $item.FullName -Force
+    if (Test-Path -LiteralPath $item.FullName) {
+        throw "Could not clear the previous installed payload proof marker: $($Target.ProofPath)"
+    }
+}
+
 function Install-CurrentNsisPackage {
     param(
         [Parameter(Mandatory)]$Package,
@@ -1084,6 +1288,14 @@ function Install-CurrentNsisPackage {
     Write-Host "Expected installed executable SHA-256: $($Package.PayloadSha256)"
     Write-Host "Validated per-user target: $($Target.ExecutablePath)"
 
+    $currentPayloadProof = Get-TrustedNsisPayloadProof -Descriptor $Package.Descriptor -NotBefore $Package.PackagingStartedAt
+    if (
+        -not [string]::Equals($currentPayloadProof.PayloadSha256, [string]$Package.PayloadSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        $currentPayloadProof.PayloadLength -ne [int64]$Package.PayloadLength -or
+        -not [string]::Equals($currentPayloadProof.Nonce, [string]$Package.PayloadNonce, [StringComparison]::Ordinal)
+    ) {
+        throw 'The makensis payload proof changed after packaging. No installer was started.'
+    }
     Assert-NoReparsePointsBelowRoot -Path $Package.State.InstallerPath -Root $Package.Descriptor.RepositoryRoot -Description 'NSIS installer immediately before launch'
     $currentInstallerFingerprint = Get-TrustedRegularFileFingerprint -Path $Package.State.InstallerPath -Description 'NSIS installer immediately before launch'
     Assert-NoReparsePointsBelowRoot -Path $Package.State.InstallerPath -Root $Package.Descriptor.RepositoryRoot -Description 'NSIS installer after hashing'
@@ -1091,8 +1303,9 @@ function Install-CurrentNsisPackage {
         throw "The NSIS installer changed after packaging. Expected SHA-256 '$($Package.Sha256)', found '$($currentInstallerFingerprint.Sha256)'. No installer was started."
     }
     if ([string]$Package.PayloadSha256 -notmatch '^[0-9a-f]{64}$') {
-        throw 'The current package has no valid release-executable SHA-256. No installer was started.'
+        throw 'The current package has no valid makensis-payload SHA-256. No installer was started.'
     }
+    Clear-InstalledNsisPayloadProof -Target $Target
 
     $authenticode = Get-AuthenticodeSignature -LiteralPath $Package.State.InstallerPath
     if ($authenticode.Status -eq 'Valid') {
@@ -1102,6 +1315,7 @@ function Install-CurrentNsisPackage {
         Write-Warning "Local installer Authenticode status is '$($authenticode.Status)'. Its required Tauri updater signature sidecar is present; configure Authenticode signing separately for a signed Windows publisher identity."
     }
 
+    $installerStartedAt = [DateTime]::UtcNow
     $installerProcess = Start-Process -FilePath $Package.State.InstallerPath -ArgumentList @('/S') -Wait -PassThru
     if ($installerProcess.ExitCode -notin @(0, 3010)) {
         throw "The local NSIS installer exited with code $($installerProcess.ExitCode)."
@@ -1114,8 +1328,19 @@ function Install-CurrentNsisPackage {
     if (-not [string]::Equals([string]$postInstallTarget.ExecutablePath, [string]$Target.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The local NSIS installer returned success, but the configured installed executable path changed from '$($Target.ExecutablePath)' to '$($postInstallTarget.ExecutablePath)'."
     }
+    $installedProof = Get-TrustedInstalledNsisPayloadProof -Path $postInstallTarget.ProofPath -NotBefore $installerStartedAt
+    if (
+        -not [string]::Equals($installedProof.PayloadSha256, [string]$Package.PayloadSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        $installedProof.PayloadLength -ne [int64]$Package.PayloadLength -or
+        -not [string]::Equals($installedProof.Nonce, [string]$Package.PayloadNonce, [StringComparison]::Ordinal)
+    ) {
+        throw 'The local NSIS installer returned success, but its new installed-payload proof does not match this packaging run.'
+    }
     $installedExecutable = Get-TrustedRegularFileFingerprint -Path $postInstallTarget.ExecutablePath -Description 'Executable installed by the local NSIS package'
-    if (-not [string]::Equals($installedExecutable.Sha256, [string]$Package.PayloadSha256, [StringComparison]::OrdinalIgnoreCase)) {
+    if (
+        -not [string]::Equals($installedExecutable.Sha256, [string]$Package.PayloadSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        $installedExecutable.Length -ne [int64]$Package.PayloadLength
+    ) {
         throw "The local NSIS installer returned success, but the installed executable does not match this packaging run. Expected SHA-256 '$($Package.PayloadSha256)', found '$($installedExecutable.Sha256)' at '$($Target.ExecutablePath)'."
     }
     $confirmedTarget = Get-ExactInstalledTarget -Descriptor $Package.Descriptor
@@ -1125,6 +1350,14 @@ function Install-CurrentNsisPackage {
     $confirmedInstalledExecutable = Get-TrustedRegularFileFingerprint -Path $confirmedTarget.ExecutablePath -Description 'Installed executable stability confirmation'
     if (-not [string]::Equals($confirmedInstalledExecutable.Sha256, $installedExecutable.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The installed executable changed during post-install verification at '$($confirmedTarget.ExecutablePath)'."
+    }
+    $confirmedInstalledProof = Get-TrustedInstalledNsisPayloadProof -Path $confirmedTarget.ProofPath -NotBefore $installerStartedAt
+    if (
+        -not [string]::Equals($confirmedInstalledProof.PayloadSha256, $installedProof.PayloadSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        $confirmedInstalledProof.PayloadLength -ne $installedProof.PayloadLength -or
+        -not [string]::Equals($confirmedInstalledProof.Nonce, $installedProof.Nonce, [StringComparison]::Ordinal)
+    ) {
+        throw "The installed payload proof changed during post-install verification at '$($confirmedTarget.ProofPath)'."
     }
 
     Write-Host "Installed current worktree package at $($Target.ExecutablePath)"

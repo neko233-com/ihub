@@ -45,7 +45,9 @@ bash ./scripts/dev.sh --update-if-clean
 bash ./scripts/dev.sh --verify-only
 ```
 
-`-Build` / `--build` 构建当前源码但不生成安装包；`-Package` / `--package` 生成本机安装包，并把产物放在 `src-tauri/target/release/bundle/`。Windows 需要把**当前工作树**安装到本机时，使用 `-InstallLatest`：它会先仅清除当前配置精确推导出的 NSIS installer 与 `.sig`（拒绝目录和 reparse point），再打包；只有同一次构建重新生成与当前 `tauri.conf.json` 完全对应的 `nsis/<product>_<version>_x64-setup.exe` 及其 Tauri updater `.sig`，才会校验固定的 `%LOCALAPPDATA%\<product>\<mainBinary>.exe` 目标后以 `/S` 安装。打包完成后脚本记录本次 `target/release/<mainBinary>.exe` 的 SHA-256，并在启动安装器前重新计算安装包 SHA-256；安装器返回成功后，它再次散列精确安装目标，只有该 fingerprint 与本次 release 可执行文件完全一致才报告安装成功。它不拉取、重置、检出或清理 Git；若这个精确已安装路径正在运行，则会停止流程并要求你自行关闭，绝不会按进程名批量结束应用。
+`-Build` / `--build` 构建当前源码但不生成安装包；`-Package` / `--package` 生成本机安装包，并把产物放在 `src-tauri/target/release/bundle/`。Windows 需要把**当前工作树**安装到本机时，使用 `-InstallLatest`：它会先仅清除当前配置精确推导出的 NSIS installer、`.sig` 与证明文件（拒绝目录和 reparse point），再打包；只有同一次构建重新生成与当前 `tauri.conf.json` 完全对应的 `nsis/<product>_<version>_x64-setup.exe` 及其 Tauri updater `.sig`，才会校验固定的 `%LOCALAPPDATA%\<product>\<mainBinary>.exe` 目标后以 `/S` 安装。
+
+Tauri 为 NSIS 打包时会把主程序的 bundle marker 临时改为 `NSS`，makensis 结束后再把 `target/release/<mainBinary>.exe` 恢复为未打包标记；所以最终 release 文件与安装载荷的 SHA-256 按设计不同。iHub 的 installer hook 会在 makensis 读取载荷时，把这个 **NSS-patched 且保持 `<mainBinary>.exe` 文件名**的输入复制到同一受控构建目录的不可变快照，并生成包含 SHA-256、长度、随机 nonce 和时间的证明。安装器把相同三元组写入新的安装后 marker；`-InstallLatest` 在启动前复核快照与安装器，在返回后复核 marker 的新鲜度、nonce、长度，以及精确安装目标的 SHA-256，全部一致才报告成功。同名要求不可删除：Tauri 的 NSIS 模板不使用 `/oname`，改名快照会被安装成旁路文件而不能替换主程序。流程不拉取、重置、检出或清理 Git；若精确已安装路径正在运行，则会停止流程并要求你自行关闭，绝不会按进程名批量结束应用。
 
 ```powershell
 # 关闭已安装的 iHub 后执行；这会安装当前已保存的本地源码，不会同步 Git。

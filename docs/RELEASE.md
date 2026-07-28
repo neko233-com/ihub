@@ -44,6 +44,8 @@ SHA-256 清单保护首次安装器。它由工作流在所有平台资产上传
 
 Tauri 的应用内自动更新是另一条链路：`TAURI_SIGNING_PRIVATE_KEY` 对 updater 资产签名，客户端内置的公开密钥验证 `latest.json` 中的签名。`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 只在私钥加密时需要。私钥绝不能提交、上传到 Release 或复用为 macOS/Windows 的代码签名证书；丢失该私钥会使既有客户端无法信任后续更新。
 
+Windows 的本机开发安装还有一条独立的“本次构建确实落盘”证明：Tauri 交给 makensis 的 `NSS` 主程序会以原文件名复制为不可变输入，安装后再以 SHA-256、长度和随机 nonce 对照精确目标。它解决的是本地同版本重装与打包后 marker 恢复造成的误判，不替代 GitHub Release 的 updater 签名、`SHA256SUMS.txt` 或 Authenticode 信任链。
+
 macOS 的 Developer ID 签名和公证、Windows 的 Authenticode 签名与 Tauri updater 签名不同：
 
 - `install.sh --require-signature` 同时要求 `codesign` 和 Gatekeeper (`spctl`) 成功；未加该参数时，SHA-256 仍是强制项，但脚本会提示签名状态。

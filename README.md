@@ -83,7 +83,7 @@ bash ./scripts/dev.sh
 
 若需要让**已安装的开发副本**跟随本地保存源码，显式运行 `./scripts/dev.ps1 -WatchInstall`（Windows）或 `bash ./scripts/dev.sh --watch-install`（macOS）；它们不更新 Git、不启动或结束 iHub，只在稳定源码变更后走当前工作树的安全打包/安装路径。Windows 还可运行 `./scripts/install-dev.ps1`，在用户目录和开始菜单创建“iHub Development (Always Latest, Safe)”“Current Source”“Update & Launch”“Install Current Build”和“Watch & Install Current Build”入口；第一个入口会在安全条件满足时自动 fast-forward，条件不满足则直接运行当前保存源码。若明确需要登录后持续运行“安全同步 + 关闭 iHub 后安装”的开发服务，先创建启动器，再显式执行 `./scripts/install-dev.ps1 -EnablePersistentDevelopmentInstall`；macOS 则先运行 `bash ./scripts/install-dev.sh --install-launcher`，再显式使用 `--enable-persistent-development-install` 注册对应的当前用户 LaunchAgent。两种持久服务均默认关闭、只以当前用户的有限权限运行。完整规则见[开发机运行与更新](docs/DEVELOPMENT.md)。
 
-Windows 的本地安装流程还会对本次构建的 release 可执行文件和安装后的精确目标做 SHA-256 一致性验证；持久 watcher 只有拿到这个已验证 fingerprint 和成功时间后才会报告健康。升级过旧的开发启动器时须先重新运行 `.\scripts\install-dev.ps1 -NoLaunch` 刷新可信 marker。“Always Latest, Safe”只表示安全条件满足时跟随上游并安装已验证的本地快照；工作树脏、领先或分叉、网络／构建失败、或 iHub 仍在运行时都会保留现状。
+Windows 的本地安装流程会在 makensis 读取 Tauri 的 NSS-patched 主程序时创建同名不可变快照，并把它的 SHA-256、长度和随机 nonce 同时绑定到构建证明与安装后 marker；安装器返回后，脚本再核对安装器、本次证明和精确安装目标。Tauri 打包结束后会把 `target/release` 主程序恢复为未打包标记，因此它本来就不应与 NSIS 内的载荷散列相同。持久 watcher 只有拿到这个已验证 fingerprint 和成功时间后才会报告健康。升级过旧的开发启动器时须先重新运行 `.\scripts\install-dev.ps1 -NoLaunch` 刷新可信 marker。“Always Latest, Safe”只表示安全条件满足时跟随上游并安装已验证的本地快照；工作树脏、领先或分叉、网络／构建失败、或 iHub 仍在运行时都会保留现状。
 
 ~~~sh
 pnpm install
