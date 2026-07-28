@@ -97,7 +97,7 @@ function runPnpm(cwd, argumentsList) {
   const commandTokens = ["corepack", "pnpm", ...argumentsList];
   if (
     commandTokens.some(
-      (token) => !/^[A-Za-z0-9:._-]+$/.test(token),
+      (token) => !/^[A-Za-z0-9:=._-]+$/.test(token),
     )
   ) {
     throw new Error("Unsafe token in the fixed Corepack command.");
