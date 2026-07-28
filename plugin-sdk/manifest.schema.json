@@ -126,10 +126,12 @@
           "additionalProperties": false,
           "properties": {
             "read": { "type": "boolean" },
-            "write": { "type": "boolean" }
+            "write": { "type": "boolean" },
+            "history": { "type": "boolean" }
           }
         },
         "process": {
+          "description": "Reserved audit metadata for programs launched by a declared native backend. It does not enable a browser process.spawn bridge API.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -149,9 +151,40 @@
             "openPath": { "type": "boolean" }
           }
         },
+        "screenCapture": {
+          "type": "boolean",
+          "description": "Allows a short-lived focus-protection lease around the browser getDisplayMedia picker. It does not grant native screen capture or screen contents."
+        },
+        "cursorColor": {
+          "type": "boolean",
+          "description": "Allows one host-confirmed native sample of the pixel beneath the cursor. It never grants a screenshot, coordinates, recording, or background polling."
+        },
         "globalShortcut": { "type": "boolean" },
         "notifications": { "type": "boolean" },
-        "nativeApi": { "type": "boolean" }
+        "nativeApi": { "type": "boolean" },
+        "windowManagement": {
+          "type": "boolean",
+          "description": "Allows only fixed layout actions for iHub's own launcher window. It cannot enumerate or control other applications."
+        },
+        "launcherContext": {
+          "type": "object",
+          "description": "Allows only a host-issued, one-shot context after the user explicitly chooses this plugin command. It grants no clipboard polling, path resolution, or image-byte access.",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "boolean",
+              "description": "Receive bounded text explicitly handed off by the launcher."
+            },
+            "files": {
+              "type": "boolean",
+              "description": "Receive canonical selected-file metadata and opaque handles, never local paths or filesystem access."
+            },
+            "image": {
+              "type": "boolean",
+              "description": "Receive an opaque pasted-image handle and metadata, never image bytes or a recording stream."
+            }
+          }
+        }
       }
     },
     "update": {
@@ -182,10 +215,36 @@
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
         "title": { "type": "string", "minLength": 1 },
         "subtitle": { "type": "string" },
+        "execution": { "enum": ["frontend", "native"] },
+        "run": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timeoutMs"],
+          "properties": {
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 1800000
+            }
+          }
+        },
         "keywords": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "icon": { "$ref": "#/$defs/relativePath" },
         "shortcut": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["run"]
+          },
+          "then": {
+            "required": ["execution"],
+            "properties": {
+              "execution": { "const": "native" }
+            }
+          }
+        }
+      ]
     },
     "searchProvider": {
       "type": "object",

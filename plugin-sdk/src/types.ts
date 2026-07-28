@@ -56,6 +56,8 @@ export interface PluginPermissions {
   clipboard?: {
     read?: boolean;
     write?: boolean;
+    /** Read-only access to iHub's existing opt-in clipboard history. */
+    history?: boolean;
   };
   process?: {
     spawn?: boolean;
@@ -65,9 +67,37 @@ export interface PluginPermissions {
     openExternal?: boolean;
     openPath?: boolean;
   };
+  /**
+   * Allows a bounded focus-protection lease around the browser's
+   * `getDisplayMedia` picker. It never grants screen pixels or a native
+   * capture API.
+   */
+  screenCapture?: boolean;
+  /**
+   * Allows one host-confirmed native sample of the pixel beneath the cursor.
+   * It is not a screenshot, recording, coordinate, or background-polling
+   * capability.
+   */
+  cursorColor?: boolean;
   globalShortcut?: boolean;
   notifications?: boolean;
   nativeApi?: boolean;
+  /** Allows only fixed layout actions for iHub's own launcher window. */
+  windowManagement?: boolean;
+  /**
+   * Allows the host to attach a bounded, one-shot launcher selection to an
+   * explicitly chosen frontend command. This is not clipboard, filesystem,
+   * or image-read access: the plugin receives text only when declared, file
+   * metadata without paths, and opaque image handles without pixels.
+   */
+  launcherContext?: {
+    /** Receive text that the person explicitly chose to send to this command. */
+    text?: boolean;
+    /** Receive canonical metadata and opaque handles for explicit file/folder selections. */
+    files?: boolean;
+    /** Receive an opaque handle plus metadata for an explicit pasted image. */
+    image?: boolean;
+  };
 }
 
 export interface PluginContributions {
@@ -84,6 +114,23 @@ export interface CommandDefinition {
   keywords?: string[];
   icon?: string;
   shortcut?: string;
+  /**
+   * Opens the plugin iframe or starts its manifest-locked native worker.
+   * Omit it for the compatible default: native when the plugin has a worker,
+   * frontend otherwise.
+   */
+  execution?: "frontend" | "native";
+  /**
+   * Bounded execution policy for an explicitly native command. The desktop
+   * host remains authoritative: this only declares the command's requested
+   * deadline and cannot grant extra process or filesystem permissions.
+   */
+  run?: NativeCommandRunPolicy;
+}
+
+export interface NativeCommandRunPolicy {
+  /** Host-enforced native-worker deadline in milliseconds (1,000–1,800,000). */
+  timeoutMs: number;
 }
 
 export interface SearchProviderDefinition {
@@ -118,6 +165,14 @@ export interface HostRequest {
   params?: Json;
 }
 
+/**
+ * Browser-side wait options for one host call. They never change the host's
+ * permission checks, command deadline, or any other authority.
+ */
+export interface HostCallOptions {
+  timeoutMs?: number;
+}
+
 export type Unlisten = () => void | Promise<void>;
 
 /**
@@ -126,12 +181,12 @@ export type Unlisten = () => void | Promise<void>;
  * possible without a desktop host.
  */
 export interface HostBridge {
-  call<T = unknown>(request: HostRequest): Promise<T>;
+  call<T = unknown>(request: HostRequest, options?: HostCallOptions): Promise<T>;
   listen<T = unknown>(event: string, listener: (payload: T) => void | Promise<void>): Promise<Unlisten>;
 }
 
 export interface InjectedHostApi {
-  call<T = unknown>(request: HostRequest): Promise<T>;
+  call<T = unknown>(request: HostRequest, options?: HostCallOptions): Promise<T>;
   listen<T = unknown>(event: string, listener: (payload: T) => void | Promise<void>): Promise<Unlisten>;
 }
 
@@ -144,6 +199,57 @@ export interface CommandInvocation {
   commandId: string;
   input?: Json;
   context?: Record<string, Json>;
+  /**
+   * Present only when the trusted iHub parent deliberately attached a
+   * short-lived launcher-context transfer to this exact command invocation.
+   * It is an opaque ID, not user content. Call `ihub.launcherContext.consume`
+   * from the handler to take the payload exactly once.
+   */
+  launcherContext?: LauncherContextInvocation;
+}
+
+/** A host-issued, opaque reference to one deliberately attached launch context. */
+export interface LauncherContextInvocation {
+  contextId: string;
+  /** Fixed host deadline; an expired ID cannot be refreshed or replayed. */
+  expiresInMs: number;
+}
+
+/** Metadata for one canonical file or folder selected by the person. */
+export interface LauncherContextFileMetadata {
+  /** Opaque metadata identity. It is not a filesystem grant or path handle. */
+  handleId: string;
+  name: string;
+  kind: "file" | "folder";
+  /** Present for regular files only. */
+  size?: number;
+}
+
+/** Metadata for a bounded image paste. No image bytes are exposed by this API. */
+export interface LauncherContextImageHandle {
+  /** Opaque identity only; it cannot be resolved into a path or pixel stream. */
+  handleId: string;
+  name: string;
+  mimeType: "image/png";
+  width: number;
+  height: number;
+}
+
+/** The bounded payload returned only once from a valid context ID. */
+export interface LauncherContextPayload {
+  text?: string;
+  files: LauncherContextFileMetadata[];
+  image?: LauncherContextImageHandle;
+}
+
+export interface PluginLauncherContext {
+  /**
+   * Takes a host-issued launcher payload exactly once. The ID must come from
+   * `CommandInvocation.launcherContext` for the command the person selected.
+   * This never reads the live clipboard, resolves a local path, or returns
+   * image bytes.
+   */
+  consume(contextId: string): Promise<LauncherContextPayload>;
 }
 
 export interface CommandResult {
@@ -183,22 +289,6 @@ export interface NotificationOptions {
   level?: "info" | "success" | "warning" | "error";
 }
 
-export interface SpawnOptions {
-  command: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  input?: string;
-  timeoutMs?: number;
-}
-
-export interface SpawnResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
-
 export interface PluginCommands {
   register(definition: CommandDefinition, handler: CommandHandler): Promise<Disposable>;
   execute(commandId: string, input?: Json): Promise<void>;
@@ -210,12 +300,38 @@ export interface PluginSearch {
 
 export interface PluginSettings {
   get<T extends Json = Json>(key: string, fallback?: T): Promise<T>;
-  set(key: string, value: Json): Promise<void>;
+  /** `persistent` is false for manifest-declared `secret` keys. */
+  set(key: string, value: Json): Promise<PluginSettingWriteResult>;
+}
+
+export interface PluginSettingWriteResult {
+    saved: true;
+    persistent: boolean;
+}
+
+/** One text-only item from iHub's opt-in, host-owned clipboard history. */
+export interface ClipboardHistoryItem {
+  id: string;
+  text: string;
+  capturedAt: string;
+  pinned: boolean;
+}
+
+/** A bounded read-only snapshot; requesting it never enables capture. */
+export interface ClipboardHistorySnapshot {
+  enabled: boolean;
+  items: ClipboardHistoryItem[];
+}
+
+export interface PluginClipboardHistory {
+  /** Requires the explicit `clipboard.history` manifest permission. */
+  snapshot(): Promise<ClipboardHistorySnapshot>;
 }
 
 export interface PluginClipboard {
   readText(): Promise<string>;
   writeText(value: string): Promise<void>;
+  readonly history: PluginClipboardHistory;
 }
 
 export interface PluginShell {
@@ -223,8 +339,182 @@ export interface PluginShell {
   openPath(path: string): Promise<void>;
 }
 
-export interface PluginProcess {
-  spawn(options: SpawnOptions): Promise<SpawnResult>;
+/** An opaque host-owned lease that temporarily suspends launcher auto-hide. */
+export interface ScreenCaptureFocusLease {
+  leaseId: string;
+  /** Fixed host deadline; release in `finally` rather than waiting for it. */
+  expiresInMs: number;
+}
+
+export interface ScreenCaptureFocusLeaseRelease {
+  /** False means the lease was already expired or released. */
+  released: boolean;
+}
+
+export interface PluginScreenCapture {
+  /**
+   * Requires the explicit `screenCapture: true` manifest permission. Start
+   * this request, then call browser `getDisplayMedia()` synchronously without
+   * awaiting it so the user's transient activation is preserved.
+   */
+  acquireFocusLease(): Promise<ScreenCaptureFocusLease>;
+  /**
+   * Releases only a lease issued to this plugin. A lease from another plugin
+   * is rejected by the host and remains active for its owner.
+   */
+  releaseFocusLease(leaseId: string): Promise<ScreenCaptureFocusLeaseRelease>;
+}
+
+/** A deliberately narrow projection of one native cursor-pixel sample. */
+export interface CursorColorSample {
+  hex: string;
+  rgb: string;
+}
+
+export interface PluginCursorColor {
+  /**
+   * Requires `cursorColor: true`. The iHub host intercepts the call and asks
+   * the user to confirm before a fixed two-second, one-pixel native sample.
+   * It works only from the visible plugin surface, never a hidden runtime.
+   */
+  sampleOnce(): Promise<CursorColorSample>;
+}
+
+export type WindowManagementAction =
+  | "center"
+  | "snap-left"
+  | "snap-right"
+  | "toggle-always-on-top";
+
+/** The result of a fixed layout action on iHub's own launcher window. */
+export interface WindowManagementResult {
+  action: WindowManagementAction;
+  alwaysOnTop: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PluginWindowManagement {
+  /** Requires `windowManagement: true`; never controls other applications. */
+  manageLauncher(action: WindowManagementAction): Promise<WindowManagementResult>;
+}
+
+/** A short-lived directory capability issued only after the native picker. */
+export type FilesystemDirectorySelection =
+  | { cancelled: true }
+  | { cancelled: false; grantId: string; directory: string };
+
+/** Metadata for a user-selected file. The host keeps the canonical path private. */
+export interface FilesystemSelectedFile {
+  name: string;
+  size: number;
+}
+
+/** A short-lived file capability that can be passed only to `native.runCommand`. */
+export type FilesystemFileSelection =
+  | { cancelled: true }
+  | { cancelled: false; grantId: string; files: FilesystemSelectedFile[] };
+
+export interface BatchRenameItem {
+  from: string;
+  to: string;
+}
+
+/**
+ * This preview is generated by the native host. `previewId` is absent when
+ * validation found no safe batch to apply, and cannot be forged from items.
+ */
+export interface BatchRenamePreview {
+  previewId: string | null;
+  directory: string;
+  items: BatchRenameItem[];
+  canApply: boolean;
+  errors: string[];
+}
+
+export interface BatchRenameResult {
+  renamed: number;
+  items: BatchRenameItem[];
+}
+
+/**
+ * The host-created project path and the starter's local next steps. Creating
+ * a project only writes a new directory; it never installs dependencies,
+ * starts a dev server, or runs a generated/native script. The generated
+ * `pnpm build` command includes a read-only pre-link check before a user
+ * explicitly links the project in iHub.
+ */
+export interface PluginProjectCreated {
+  projectPath: string;
+  pluginId: string;
+  nextSteps: string[];
+}
+
+export interface PluginFilesystem {
+  /** Requires `filesystem.read: ["user-selected"]`. */
+  selectDirectory(): Promise<FilesystemDirectorySelection>;
+  /**
+   * Requires `filesystem.read: ["user-selected"]`. The opaque grant can be
+   * consumed only once by this plugin's `native.runCommand`; browser code
+   * receives names and sizes, never local file paths.
+   */
+  selectFiles(): Promise<FilesystemFileSelection>;
+  /** Requires a live directory grant and `filesystem.read: ["user-selected"]`. */
+  previewBatchRename(options: {
+    grantId: string;
+    find: string;
+    replace: string;
+    useRegex?: boolean;
+    /**
+     * When `replace` contains `{n}`, the host substitutes a deterministic
+     * sequence before applying literal or regex replacement. Defaults to 1.
+     */
+    sequenceStart?: number;
+    /**
+     * Minimum digit width for `{n}` (0–12). Defaults to 3, so `{n}` becomes
+     * `001`, `002`, … and keeps lexical file order useful.
+     */
+    sequencePadding?: number;
+  }): Promise<BatchRenamePreview>;
+  /** Requires the same live grant, preview token, and write permission. */
+  applyBatchRename(options: { grantId: string; previewId: string }): Promise<BatchRenameResult>;
+}
+
+/** The host waits for the plugin's one-shot declared worker and returns its bounded output. */
+export interface PluginNativeCommandResult {
+  pluginId: string;
+  commandId: string;
+  success: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  output?: Json;
+}
+
+export interface PluginNative {
+  /**
+   * Requires `nativeApi: true`. With a file grant, the worker receives an
+   * envelope `{ input, files }` containing canonical paths; the iframe never
+   * sees those paths and the grant is consumed whether the worker succeeds or
+   * fails.
+   */
+  runCommand(options: {
+    commandId: string;
+    input?: Json;
+    fileGrantId?: string;
+  }): Promise<PluginNativeCommandResult>;
+}
+
+export interface PluginDeveloper {
+  /**
+   * Requires both `filesystem.read` and `filesystem.write` for the exact
+   * `user-selected` scope. The host resolves the opaque grant; it never
+   * accepts a parent path from the plugin. The caller must present the
+   * returned next steps and let the developer choose whether to run them.
+   */
+  createProject(options: { grantId: string; pluginId: string }): Promise<PluginProjectCreated>;
 }
 
 export interface PluginEvents {
@@ -245,7 +535,13 @@ export interface PluginContext {
   readonly settings: PluginSettings;
   readonly clipboard: PluginClipboard;
   readonly shell: PluginShell;
-  readonly process: PluginProcess;
+  readonly screenCapture: PluginScreenCapture;
+  readonly cursorColor: PluginCursorColor;
+  readonly windowManagement: PluginWindowManagement;
+  readonly launcherContext: PluginLauncherContext;
+  readonly filesystem: PluginFilesystem;
+  readonly native: PluginNative;
+  readonly developer: PluginDeveloper;
   readonly events: PluginEvents;
   readonly notifications: {
     show(options: NotificationOptions): Promise<void>;

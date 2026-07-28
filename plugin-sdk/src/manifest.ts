@@ -16,6 +16,8 @@ const pluginIdPattern = /^[a-z0-9][a-z0-9-]{1,62}$/;
 const semverPattern = /^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const relativePathPattern = /^(?![\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/;
 const targets = new Set(["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"]);
+const minNativeCommandTimeoutMs = 1_000;
+const maxNativeCommandTimeoutMs = 30 * 60 * 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -79,6 +81,19 @@ export function validateManifest(value: unknown): ManifestValidationResult {
 
   if (!isRecord(value.permissions)) {
     issues.push({ path: "$.permissions", message: "must be an object (use {} when no host capability is needed)" });
+  } else if (value.permissions.launcherContext !== undefined) {
+    const launcherContext = value.permissions.launcherContext;
+    if (!isRecord(launcherContext)) {
+      issues.push({ path: "$.permissions.launcherContext", message: "must be an object when declared" });
+    } else {
+      for (const [key, declared] of Object.entries(launcherContext)) {
+        if (!(["text", "files", "image"] as const).includes(key as "text" | "files" | "image")) {
+          issues.push({ path: `$.permissions.launcherContext.${key}`, message: "is not supported" });
+        } else if (typeof declared !== "boolean") {
+          issues.push({ path: `$.permissions.launcherContext.${key}`, message: "must be a boolean" });
+        }
+      }
+    }
   }
 
   if (value.backend !== undefined) {
@@ -120,6 +135,47 @@ export function validateManifest(value: unknown): ManifestValidationResult {
       if (["commands", "searchProviders", "settings", "quickActions"].includes(key) && !Array.isArray(value)) {
         issues.push({ path: `$.contributes.${key}`, message: "must be an array" });
       }
+    }
+
+    if (Array.isArray(contributions.commands)) {
+      contributions.commands.forEach((command, index) => {
+        const path = `$.contributes.commands[${index}]`;
+        if (!isRecord(command)) {
+          issues.push({ path, message: "must be an object" });
+          return;
+        }
+
+        if (command.run === undefined) {
+          return;
+        }
+        const runPath = `${path}.run`;
+        if (!isRecord(command.run)) {
+          issues.push({ path: runPath, message: "must be an object" });
+          return;
+        }
+
+        for (const key of Object.keys(command.run)) {
+          if (key !== "timeoutMs") {
+            issues.push({ path: `${runPath}.${key}`, message: "is not supported" });
+          }
+        }
+
+        const timeoutMs = command.run.timeoutMs;
+        const validTimeout =
+          typeof timeoutMs === "number" &&
+          Number.isInteger(timeoutMs) &&
+          timeoutMs >= minNativeCommandTimeoutMs &&
+          timeoutMs <= maxNativeCommandTimeoutMs;
+        if (!validTimeout) {
+          issues.push({
+            path: `${runPath}.timeoutMs`,
+            message: `must be an integer between ${minNativeCommandTimeoutMs} and ${maxNativeCommandTimeoutMs} milliseconds`,
+          });
+        }
+        if (command.execution !== "native") {
+          issues.push({ path: `${path}.execution`, message: "must be native when run.timeoutMs is declared" });
+        }
+      });
     }
   }
 

@@ -4,14 +4,29 @@ import type {
   CommandHandler,
   CommandInvocation,
   CommandResult,
+  BatchRenamePreview,
+  BatchRenameResult,
+  ClipboardHistorySnapshot,
+  CursorColorSample,
   DevelopmentBridge,
   Disposable,
+  PluginProjectCreated,
+  HostCallOptions,
   HostBridge,
   HostRequest,
   InjectedHostApi,
   Json,
+  LauncherContextPayload,
+  FilesystemDirectorySelection,
+  FilesystemFileSelection,
   NotificationOptions,
+  PluginNativeCommandResult,
   PluginContext,
+  ScreenCaptureFocusLease,
+  ScreenCaptureFocusLeaseRelease,
+  PluginSettingWriteResult,
+  WindowManagementAction,
+  WindowManagementResult,
   SearchHandler,
   SearchProviderDefinition,
   SearchRequest,
@@ -30,6 +45,15 @@ const json = (value: unknown): Json => value as Json;
 const FRAME_REQUEST_CHANNEL = "ihub-plugin-bridge/v1";
 const FRAME_RESPONSE_CHANNEL = "ihub-host-bridge/v1";
 const FRAME_CALL_TIMEOUT_MS = 30_000;
+// The host asks for a visible confirmation and macOS may show its first
+// Screen Recording permission panel. This changes only the iframe's wait; it
+// does not make the host sample more than one user-approved pixel.
+const CURSOR_COLOR_FRAME_CALL_TIMEOUT_MS = 2 * 60 * 1_000;
+const MIN_NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS = 1_000;
+// The host caps command policy at 30 minutes. The iframe grace only keeps the
+// response channel alive long enough to receive the host's result; it never
+// extends the host-owned deadline or any permission.
+const NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS = 30 * 60 * 1_000 + 10_000;
 
 const eventName = (pluginId: string, kind: "command" | "search") => `ihub://plugin/${pluginId}/${kind}`;
 
@@ -45,10 +69,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
 }
 
+function frameCallTimeout(request: HostRequest, options?: HostCallOptions): number {
+  if (request.method === "cursorColor.sampleOnce") {
+    return CURSOR_COLOR_FRAME_CALL_TIMEOUT_MS;
+  }
+
+  // A plugin may only alter its own browser-side wait for a native command.
+  // Every other bridge call remains at the normal 30-second timeout.
+  if (request.method !== "native.runCommand") {
+    return FRAME_CALL_TIMEOUT_MS;
+  }
+
+  const requested = options?.timeoutMs;
+  if (typeof requested !== "number" || !Number.isFinite(requested)) {
+    return NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS;
+  }
+
+  return Math.min(
+    NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS,
+    Math.max(MIN_NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS, Math.floor(requested)),
+  );
+}
+
 /**
- * Creates the production bridge used by a plugin asset loaded in the host
- * iframe. The parent window fixes the plugin id and only forwards this small
- * request envelope to Rust, so plugin bundles never need the Tauri API.
+ * Creates the production bridge used by a plugin iframe. The parent window
+ * fixes the plugin id and forwards only this small request envelope to Rust,
+ * so normal plugin bundles do not need the Tauri API. iHub serves each iframe
+ * from a separate loopback remote origin and verifies that origin in the
+ * parent; native plugin workers remain outside that TypeScript boundary.
  */
 function createFrameBridge(): HostBridge {
   const hostWindow = window.parent;
@@ -90,7 +138,7 @@ function createFrameBridge(): HostBridge {
   window.addEventListener("message", onMessage);
 
   return {
-    call<T>(request: HostRequest): Promise<T> {
+    call<T>(request: HostRequest, options?: HostCallOptions): Promise<T> {
       return new Promise<T>((resolve, reject) => {
         const id =
           "frame-" +
@@ -100,7 +148,7 @@ function createFrameBridge(): HostBridge {
         const timeout = window.setTimeout(() => {
           pending.delete(id);
           reject(new Error("iHub host call timed out."));
-        }, FRAME_CALL_TIMEOUT_MS);
+        }, frameCallTimeout(request, options));
         pending.set(id, {
           resolve: (value) => resolve(value as T),
           reject,
@@ -179,9 +227,28 @@ export function createDevelopmentBridge(): DevelopmentBridge {
           return (settings.get(String(params.key)) ?? params.fallback) as T;
         case "settings.set":
           settings.set(String(params.key), params.value);
-          return undefined as T;
+          return { saved: true, persistent: false } as T;
         case "clipboard.readText":
           return "" as T;
+        case "clipboard.history.snapshot":
+          return { enabled: false, items: [] } as T;
+        case "filesystem.selectDirectory":
+        case "filesystem.selectFiles":
+        case "filesystem.batchRename.preview":
+        case "filesystem.batchRename.apply":
+        case "developer.createProject":
+          throw new Error("Filesystem bridge calls require the iHub desktop host.");
+        case "screenCapture.acquireFocusLease":
+        case "screenCapture.releaseFocusLease":
+          throw new Error("Screen-capture focus leases require the iHub desktop host.");
+        case "cursorColor.sampleOnce":
+          throw new Error("Native cursor color sampling requires the iHub desktop host.");
+        case "native.runCommand":
+          throw new Error("Native plugin commands require the iHub desktop host.");
+        case "window.manageLauncher":
+          throw new Error("Launcher layout actions require the iHub desktop host.");
+        case "launcherContext.consume":
+          throw new Error("Launcher context transfers require an explicit iHub desktop-host action.");
         default:
           return undefined as T;
       }
@@ -230,18 +297,49 @@ class Runtime implements Disposable {
       },
       settings: {
         get: <T extends Json>(key: string, fallback?: T) => this.getSetting(key, fallback),
-        set: (key, value) => this.call("settings.set", { key, value }),
+        set: (key, value) => this.call<PluginSettingWriteResult>("settings.set", { key, value }),
       },
       clipboard: {
         readText: () => this.call<string>("clipboard.readText"),
         writeText: (value) => this.call("clipboard.writeText", { value }),
+        history: {
+          snapshot: () => this.call<ClipboardHistorySnapshot>("clipboard.history.snapshot"),
+        },
       },
       shell: {
         openExternal: (url) => this.call("shell.openExternal", { url }),
         openPath: (path) => this.call("shell.openPath", { path }),
       },
-      process: {
-        spawn: (options) => this.call("process.spawn", options),
+      screenCapture: {
+        acquireFocusLease: () => this.call<ScreenCaptureFocusLease>("screenCapture.acquireFocusLease"),
+        releaseFocusLease: (leaseId) =>
+          this.call<ScreenCaptureFocusLeaseRelease>("screenCapture.releaseFocusLease", { leaseId }),
+      },
+      cursorColor: {
+        sampleOnce: () => this.call<CursorColorSample>("cursorColor.sampleOnce"),
+      },
+      windowManagement: {
+        manageLauncher: (action: WindowManagementAction) =>
+          this.call<WindowManagementResult>("window.manageLauncher", { action }),
+      },
+      launcherContext: {
+        consume: (contextId) =>
+          this.call<LauncherContextPayload>("launcherContext.consume", { contextId }),
+      },
+      filesystem: {
+        selectDirectory: () => this.call<FilesystemDirectorySelection>("filesystem.selectDirectory"),
+        selectFiles: () => this.call<FilesystemFileSelection>("filesystem.selectFiles"),
+        previewBatchRename: (options) => this.call<BatchRenamePreview>("filesystem.batchRename.preview", options),
+        applyBatchRename: (options) => this.call<BatchRenameResult>("filesystem.batchRename.apply", options),
+      },
+      native: {
+        runCommand: (options) =>
+          this.call<PluginNativeCommandResult>("native.runCommand", options, {
+            timeoutMs: NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS,
+          }),
+      },
+      developer: {
+        createProject: (options) => this.call<PluginProjectCreated>("developer.createProject", options),
       },
       events: {
         on: (name, listener) => this.on(name, listener),
@@ -414,9 +512,12 @@ class Runtime implements Disposable {
     void this.call("log", { level, message, details: details ?? null }).catch(this.onError);
   }
 
-  private async call<T = void>(method: string, params?: unknown): Promise<T> {
+  private async call<T = void>(method: string, params?: unknown, options?: HostCallOptions): Promise<T> {
     this.assertActive();
-    return this.bridge.call<T>({ pluginId: this.pluginId, method, params: params ? json(params) : undefined });
+    return this.bridge.call<T>(
+      { pluginId: this.pluginId, method, params: params ? json(params) : undefined },
+      options,
+    );
   }
 
   private assertActive(): void {
