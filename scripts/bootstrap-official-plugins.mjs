@@ -221,6 +221,7 @@ function cloneCheckout(mapping, checkoutPath, lockedPackage) {
         mapping.url,
         temporaryPath,
       ], { capture: false });
+      configureFreshCheckout(temporaryPath);
       runGit(
         temporaryPath,
         [
@@ -251,9 +252,19 @@ function cloneCheckout(mapping, checkoutPath, lockedPackage) {
     } else {
       runGit(
         officialRoot,
-        ["clone", "--branch", "main", "--single-branch", mapping.url, temporaryPath],
+        [
+          "clone",
+          "--branch",
+          "main",
+          "--single-branch",
+          "--no-checkout",
+          mapping.url,
+          temporaryPath,
+        ],
         { capture: false },
       );
+      configureFreshCheckout(temporaryPath);
+      runGit(temporaryPath, ["checkout", "main"], { capture: false });
     }
     renameSync(temporaryPath, checkoutPath);
     console.log(`cloned: ${mapping.id}`);
@@ -262,6 +273,16 @@ function cloneCheckout(mapping, checkoutPath, lockedPackage) {
       rmSync(temporaryPath, { recursive: true, force: true });
     }
   }
+}
+
+function configureFreshCheckout(checkoutPath) {
+  // Git for Windows commonly defaults to core.autocrlf=true. Generated web
+  // artifacts are committed and rebuilt as LF on every platform, so configure
+  // the independent checkout before its first checkout. Otherwise a build can
+  // replace an equivalent CRLF worktree file with LF and leave a false-positive
+  // dirty status even though `git diff` has no content changes.
+  runGit(checkoutPath, ["config", "core.autocrlf", "false"]);
+  runGit(checkoutPath, ["config", "core.eol", "lf"]);
 }
 
 const repositories = readJson(repositoriesPath).repositories;
