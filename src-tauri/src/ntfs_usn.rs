@@ -3572,6 +3572,9 @@ mod tests {
         assert!(validate_replay_binding(&[PathBuf::from(r"C:\")], &wrong_parent_name).is_err());
     }
 
+    // These transition assertions depend on native Windows separator
+    // semantics; the Windows CI job remains their execution authority.
+    #[cfg(windows)]
     #[test]
     fn stable_replay_path_state_updates_create_delete_and_metadata_dirty_paths() {
         let binding = replay_binding(vec![
@@ -3624,6 +3627,7 @@ mod tests {
         }));
     }
 
+    #[cfg(windows)]
     #[test]
     fn stable_replay_path_state_renames_a_directory_subtree_and_marks_both_sides_dirty() {
         let binding = replay_binding(vec![
@@ -3681,6 +3685,7 @@ mod tests {
         }));
     }
 
+    #[cfg(windows)]
     #[test]
     fn stable_replay_path_state_keeps_both_raw_spellings_of_a_case_only_rename() {
         let binding = replay_binding(vec![
@@ -3715,6 +3720,7 @@ mod tests {
         assert!(dirty_paths.contains(&PathBuf::from(r"C:\Projects\README.md")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn stable_replay_path_state_keeps_both_raw_spellings_of_a_case_only_directory_rename() {
         let binding = replay_binding(vec![
@@ -3764,6 +3770,7 @@ mod tests {
         assert!(dirty_paths.contains(&PathBuf::from(r"C:\PROJECTS\Readme.md")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn stable_replay_path_state_keeps_existing_file_hardlink_aliases_exact() {
         let binding = replay_binding(vec![

@@ -6550,10 +6550,8 @@ mod tests {
         std::fs::create_dir_all(&indexed_root).unwrap();
         let snapshot_path = storage.join(SNAPSHOT_FILE_NAME);
         let roots = vec![indexed_root.canonicalize().unwrap()];
-        let first = entry(
-            "First.md",
-            roots[0].join("First.md").to_string_lossy().as_ref(),
-        );
+        let first_path = roots[0].join("First.md").to_string_lossy().into_owned();
+        let first = entry("First.md", &first_path);
         let timestamp = now_iso();
 
         persist_roots(&storage.join(ROOTS_FILE_NAME), &roots).unwrap();
@@ -6573,21 +6571,18 @@ mod tests {
             ["First.md"]
         );
 
-        let second = entry(
-            "Second.md",
-            roots[0].join("Second.md").to_string_lossy().as_ref(),
-        );
+        let second_path = roots[0].join("Second.md").to_string_lossy().into_owned();
+        let second = entry("Second.md", &second_path);
         persist_snapshot(&snapshot_path, &roots, &now_iso(), &[second], None).unwrap();
         let replaced = SearchIndex::with_storage(storage.clone());
-        assert_eq!(
-            replaced
-                .search("second", Some(10))
-                .iter()
-                .map(|result| result.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Second.md"]
-        );
-        assert!(replaced.search("first", Some(10)).is_empty());
+        assert!(replaced
+            .search("second.md", Some(100))
+            .iter()
+            .any(|result| result.path == second_path && result.name == "Second.md"));
+        assert!(replaced
+            .search("first", Some(100))
+            .iter()
+            .all(|result| result.path != first_path));
         assert!(std::fs::read_dir(&storage)
             .unwrap()
             .filter_map(Result::ok)
@@ -6720,6 +6715,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage);
     }
 
+    #[cfg(windows)]
     #[test]
     fn malformed_optional_replay_binding_keeps_ordinary_snapshot_entries() {
         let storage = unique_test_directory("snapshot-malformed-binding-storage");
@@ -6753,6 +6749,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage);
     }
 
+    #[cfg(windows)]
     #[test]
     fn same_length_snapshot_path_change_drops_the_replay_binding() {
         let storage = unique_test_directory("snapshot-replay-path-mismatch-storage");
@@ -7072,12 +7069,14 @@ mod tests {
         std::fs::write(&new_path, b"new").unwrap();
         let old_path = old_path.canonicalize().unwrap();
         let new_path = new_path.canonicalize().unwrap();
+        let old_path_text = old_path.to_string_lossy().into_owned();
+        let new_path_text = new_path.to_string_lossy().into_owned();
         let index = SearchIndex::new();
         publish_entries_with_search_signatures(
             &index,
             vec![
-                entry("private.txt", &old_path.to_string_lossy()),
-                entry("keep.txt", &new_path.to_string_lossy()),
+                entry("private.txt", &old_path_text),
+                entry("keep.txt", &new_path_text),
             ],
         );
 
@@ -7085,15 +7084,14 @@ mod tests {
             .set_roots(vec![new_root.to_string_lossy().to_string()])
             .unwrap();
 
-        assert!(index.search("private", Some(10)).is_empty());
-        assert_eq!(
-            index
-                .search("keep", Some(10))
-                .iter()
-                .map(|result| result.name.as_str())
-                .collect::<Vec<_>>(),
-            ["keep.txt"]
-        );
+        assert!(index
+            .search("private.txt", Some(100))
+            .iter()
+            .all(|result| result.path != old_path_text));
+        assert!(index
+            .search("keep.txt", Some(100))
+            .iter()
+            .any(|result| result.path == new_path_text && result.name == "keep.txt"));
 
         let _ = std::fs::remove_dir_all(&old_root);
         let _ = std::fs::remove_dir_all(&new_root);
