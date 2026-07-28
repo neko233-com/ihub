@@ -1473,7 +1473,14 @@ mod tests {
 
         let result = create_plugin_project(&parent_text, "ihub-plugin-demo").expect("template");
         let project = parent.join("ihub-plugin-demo");
-        assert_eq!(result.project_path, project.to_string_lossy());
+        assert_eq!(
+            PathBuf::from(&result.project_path)
+                .canonicalize()
+                .expect("reported project path should resolve"),
+            project
+                .canonicalize()
+                .expect("expected project path should resolve")
+        );
         assert_eq!(result.plugin_id, "ihub-plugin-demo");
         assert!(project.join("plugin.json").is_file());
         assert!(project.join("src/main.ts").is_file());

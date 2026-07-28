@@ -56,6 +56,7 @@ pub fn sample_cursor_color(delay_ms: u64) -> Result<CursorColorSample, String> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn sample_from_colorref(colorref: u32, x: i32, y: i32) -> CursorColorSample {
     // A Windows COLORREF stores red in the low byte, then green, then blue.
     let red = (colorref & 0xff) as u8;

@@ -97,7 +97,18 @@ pub fn try_with_bounded_background_clipboard<T>(
     #[cfg(target_os = "windows")]
     let sequence = windows_background_clipboard_preflight(limits)?;
     #[cfg(not(target_os = "windows"))]
-    let _ = limits;
+    let _ = (
+        limits.max_text_source_bytes,
+        limits.image.map(|image| {
+            (
+                image.max_source_bytes,
+                image.max_edge,
+                image.max_pixels,
+                image.max_rgba_bytes,
+            )
+        }),
+        limits.max_file_list_source_bytes,
+    );
 
     #[cfg(target_os = "windows")]
     if windows_clipboard_sequence() != Some(sequence) {
@@ -116,6 +127,7 @@ pub fn try_with_bounded_background_clipboard<T>(
     Some(result)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn image_dimensions_within_limits(
     width: u32,
     height: u32,
@@ -140,6 +152,7 @@ fn image_dimensions_within_limits(
         .is_some_and(|bytes| bytes <= limits.max_rgba_bytes)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn png_dimensions_from_header(bytes: &[u8]) -> Option<(u32, u32)> {
     const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
     const PNG_IHDR_PREFIX: [u8; 8] = [0, 0, 0, 13, b'I', b'H', b'D', b'R'];

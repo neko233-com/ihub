@@ -83,7 +83,9 @@ const CONTENT_MATCH_BASE_SCORE: f64 = 720.0;
 // discovery is deliberately separate from content indexing so it can become
 // searchable before a large Documents/Desktop scan has completed.
 const MAX_APPLICATION_ENTRIES: usize = 2_000;
+#[cfg(any(windows, test))]
 const MAX_APPLICATION_DIRECTORIES: usize = 1_000;
+#[cfg(any(windows, test))]
 const MAX_START_MENU_DEPTH: usize = 8;
 // v3 atomically binds a complete path snapshot to a Windows P1e stable-path
 // projection.  The former v2 file is deliberately left untouched and is not
@@ -340,7 +342,9 @@ struct IndexInner {
     roots_lock: Mutex<()>,
     /// Windows-only metadata cache for the explicit NTFS USN P1a probe. It
     /// contains volume IDs/watermarks only, never file paths or records.
+    #[cfg(windows)]
     usn_checkpoint_path: Option<PathBuf>,
+    #[cfg(windows)]
     usn_checkpoint_lock: Mutex<()>,
     // The watcher owns its native handle in a dedicated thread. Keeping only
     // this small control sender in the shared index makes root changes
@@ -881,7 +885,9 @@ impl SearchIndex {
                 configured_roots: RwLock::new(configured_roots),
                 roots_path,
                 roots_lock: Mutex::new(()),
+                #[cfg(windows)]
                 usn_checkpoint_path,
+                #[cfg(windows)]
                 usn_checkpoint_lock: Mutex::new(()),
                 watcher_control: Mutex::new(None),
                 watcher_requested: AtomicBool::new(false),
@@ -1775,6 +1781,8 @@ impl SearchIndex {
                 } else {
                     None
                 };
+                #[cfg(not(windows))]
+                let _ = &candidate_usn_binding;
                 // A root-scope transition is serialized with the final
                 // publication. Without this guard an older scan can pass the
                 // generation check, then race a user removing its root and
@@ -2549,6 +2557,7 @@ fn schedule_content_index_rebuild(inner: &Arc<IndexInner>, generation: u64) {
 /// Menu applications are a separate OS-owned source, so refresh them after a
 /// resumed content snapshot without changing that snapshot or its binding on
 /// disk.
+#[cfg(windows)]
 fn schedule_application_entry_refresh(inner: &Arc<IndexInner>, generation: u64) {
     let worker_inner = Arc::clone(inner);
     if let Err(error) = thread::Builder::new()
@@ -2559,6 +2568,7 @@ fn schedule_application_entry_refresh(inner: &Arc<IndexInner>, generation: u64) 
     }
 }
 
+#[cfg(windows)]
 fn refresh_application_entries(inner: Arc<IndexInner>, generation: u64) {
     let applications = collect_application_entries();
     if inner.generation.load(Ordering::SeqCst) != generation {
@@ -4243,6 +4253,7 @@ fn reconcile_replayed_snapshot_entries(
     Ok(next_entries)
 }
 
+#[cfg(windows)]
 fn entry_path_is_within_any_root(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_within_root(path, root))
 }
@@ -4961,6 +4972,7 @@ fn windows_start_menu_roots() -> Vec<ApplicationRoot> {
 /// resolve a `.lnk` target, follow directory links, or scan Program Files;
 /// that keeps discovery fast and means every surfaced entry is something the
 /// user can already see and launch from Start Menu.
+#[cfg(any(windows, test))]
 fn collect_start_menu_entries(roots: &[ApplicationRoot], limit: usize) -> Vec<IndexedEntry> {
     let mut applications = Vec::new();
     let mut pending = VecDeque::new();
@@ -5018,6 +5030,7 @@ fn collect_start_menu_entries(roots: &[ApplicationRoot], limit: usize) -> Vec<In
     applications
 }
 
+#[cfg(any(windows, test))]
 fn is_start_menu_launch_item(path: &Path) -> bool {
     matches!(
         path.extension()

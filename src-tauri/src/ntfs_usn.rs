@@ -1,4 +1,12 @@
+#![cfg_attr(not(windows), allow(dead_code))]
+
 //! Windows NTFS USN Journal support.
+//!
+//! Non-Windows builds retain the serialized replay model and validators so a
+//! portable snapshot can be rejected safely, while native journal operations
+//! remain Windows-only. The replay/parser implementation also stays available
+//! to cross-platform tests, so expected non-Windows dead code is allowed only
+//! inside this platform module.
 //!
 //! P1a verifies that an explicitly authorised root belongs to a local NTFS
 //! volume, captures the volume serial plus live journal watermarks, and
