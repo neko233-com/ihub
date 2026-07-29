@@ -41,6 +41,8 @@ const releaseNotes = {
     "Published v1.1.0. Launcher file/image handoff contains metadata only; pixels are processed locally only after explicit file selection or drop. The plugin has no network, arbitrary filesystem, clipboard, or native capability.",
   "ihub-plugin-text-tools":
     "Published v1.1.0 with a vendored @ihub/plugin-sdk 0.2.0 snapshot. Explicit launcher text is consumed once and only prefilled for an offline operation; it is not transformed, persisted, or uploaded automatically.",
+  "ihub-plugin-screen-record":
+    "Published v1.0.4. Display capture and optional microphone access are separately declared and delegated only to the current native-validated visible Surface lease; hidden runtimes receive neither. Recording stays user-started, local, bounded to 30 minutes or 512 MiB, and user-saved.",
   "ihub-plugin-batch-rename":
     "Published v1.1.0. Launcher file handoff contains metadata only; rename preview and apply still require an owner-scoped user-selected directory grant and the exact one-shot native preview token.",
   "ihub-plugin-window-manager":

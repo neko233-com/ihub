@@ -168,17 +168,17 @@
     {
       "id": "ihub-plugin-screen-record",
       "name": "Screen Recorder",
-      "description": "Self-contained local WebM recorder; asks for display sharing only after the user starts, protects launcher focus only around the browser picker, and stops at 30 minutes or 512 MiB.",
+      "description": "Self-contained local WebM recorder; requests display sharing and optional microphone access only after the user starts, then stops at 30 minutes or 512 MiB.",
       "icon": "icons/screen-record.svg",
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-screen-record",
-        "defaultRef": "v1.0.3",
+        "defaultRef": "v1.0.4",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "v1.0.3" },
+      "channels": { "stable": "v1.0.4" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
-      "capabilities": ["screenCapture"],
+      "capabilities": ["screenCapture", "microphone"],
       "status": "available"
     },
     {

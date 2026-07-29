@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
   "lockState": "resolved",
-  "generatedAt": "2026-07-28T21:12:13.416Z",
+  "generatedAt": "2026-07-29T15:32:23.434Z",
   "packages": [
     {
       "id": "ihub-plugin-ocr",
@@ -400,14 +400,14 @@
       "id": "ihub-plugin-screen-record",
       "source": {
         "url": "https://github.com/neko233-com/ihub-plugin-screen-record",
-        "requestedRef": "v1.0.3"
+        "requestedRef": "v1.0.4"
       },
       "resolved": {
-        "commit": "f2c83361fffa87d624f6ff2834df6e6ba506cdcb",
-        "version": "1.0.3"
+        "commit": "0ac7e07afbf049e15776d9e98498d38ea27dfbc2",
+        "version": "1.0.4"
       },
       "integrity": {
-        "manifestSha256": "7252887632d469ecc8292dae82858f880d5e168b99dd91692cb504318a6b9705",
+        "manifestSha256": "82ce219f5f790b390f8a75f576f0105c622af66df574d9a70d49b565c6064fee",
         "artifacts": [
           {
             "target": "web",
@@ -422,10 +422,11 @@
         ]
       },
       "permissions": {
-        "screenCapture": true
+        "screenCapture": true,
+        "microphone": true
       },
       "verified": true,
-      "note": "Published v1.0.3 source tag. Commit and manifest/frontend SHA-256 values were verified from a clean standalone clone and GitHub raw contents. The local WebM recorder stops at 30 minutes or 512 MiB and remains user-started/user-saved. screenCapture only grants a short-lived, owner-bound focus lease around the browser getDisplayMedia picker; it grants no screen pixels, native capture, file access, or background recording. No native artifacts or publisher signature are present."
+      "note": "Published v1.0.4. Display capture and optional microphone access are separately declared and delegated only to the current native-validated visible Surface lease; hidden runtimes receive neither. Recording stays user-started, local, bounded to 30 minutes or 512 MiB, and user-saved."
     },
     {
       "id": "ihub-plugin-batch-rename",
