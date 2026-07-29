@@ -80,6 +80,21 @@ struct LauncherRevealLayout {
     size: PhysicalSize<u32>,
 }
 
+fn physical_point_in_monitor(
+    point: PhysicalPosition<f64>,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> bool {
+    if !point.x.is_finite() || !point.y.is_finite() || size.width == 0 || size.height == 0 {
+        return false;
+    }
+    let left = f64::from(position.x);
+    let top = f64::from(position.y);
+    let right = left + f64::from(size.width);
+    let bottom = top + f64::from(size.height);
+    point.x >= left && point.x < right && point.y >= top && point.y < bottom
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LauncherInvocationSource {
     Hotkey,
@@ -4084,14 +4099,23 @@ fn apply_launcher_visibility(app: &AppHandle, source: LauncherInvocationSource) 
 }
 
 fn apply_launcher_reveal_geometry<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
-    // A hidden window retains the monitor it was last dragged onto. That is
-    // the natural target for the next launch; a disconnected monitor falls
-    // back to the primary display. No drag position or window geometry is
-    // persisted, so every visible session starts centered again.
+    // Spotlight/uTools-style invocation follows the person's current pointer
+    // across displays. The hidden window's previous monitor and the primary
+    // display remain deterministic fallbacks when the runtime cannot report a
+    // cursor or display topology. No drag position is persisted.
     let monitor = window
-        .current_monitor()
+        .cursor_position()
         .ok()
-        .flatten()
+        .and_then(|cursor| {
+            window
+                .available_monitors()
+                .ok()?
+                .into_iter()
+                .find(|monitor| {
+                    physical_point_in_monitor(cursor, *monitor.position(), *monitor.size())
+                })
+        })
+        .or_else(|| window.current_monitor().ok().flatten())
         .or_else(|| window.primary_monitor().ok().flatten());
     let Some(monitor) = monitor else {
         // Without any display, moving/resizing is neither useful nor safe.
@@ -4298,7 +4322,7 @@ mod tests {
         get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
         issue_plugin_launcher_context_transfer, launcher_visibility_action,
         native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
-        optional_u32, optional_u8, plugin_clipboard_history_snapshot,
+        optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, validate_system_icon_request, CaptureFocusLease,
@@ -4534,6 +4558,43 @@ mod tests {
             assert!(optional_u32(&params, "sequenceStart").is_err());
         }
         assert!(optional_u8(&json!({ "sequencePadding": 256 }), "sequencePadding").is_err());
+    }
+
+    #[test]
+    fn launcher_monitor_hit_test_handles_negative_displays_and_edges() {
+        let position = PhysicalPosition::new(-1_920, -120);
+        let size = PhysicalSize::new(1_920, 1_080);
+
+        assert!(physical_point_in_monitor(
+            PhysicalPosition::new(-1_919.5, -119.5),
+            position,
+            size
+        ));
+        assert!(physical_point_in_monitor(
+            PhysicalPosition::new(-1.0, 959.0),
+            position,
+            size
+        ));
+        assert!(!physical_point_in_monitor(
+            PhysicalPosition::new(0.0, 200.0),
+            position,
+            size
+        ));
+        assert!(!physical_point_in_monitor(
+            PhysicalPosition::new(-1_000.0, 960.0),
+            position,
+            size
+        ));
+        assert!(!physical_point_in_monitor(
+            PhysicalPosition::new(f64::NAN, 0.0),
+            position,
+            size
+        ));
+        assert!(!physical_point_in_monitor(
+            PhysicalPosition::new(-1_000.0, 0.0),
+            position,
+            PhysicalSize::new(0, 1_080)
+        ));
     }
 
     #[test]
