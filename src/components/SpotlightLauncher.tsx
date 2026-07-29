@@ -41,10 +41,12 @@ export interface SpotlightLauncherItem {
   detail?: string;
   /** Optional right-aligned status, e.g. "内置" or a real plugin version. */
   badge?: string;
-  /** Defaults to a neutral app glyph when omitted. */
+  /** Built-in vector artwork. Non-native omissions use a neutral app glyph. */
   icon?: LucideIcon;
   /** Optional local or plugin-owned artwork; Lucide remains the built-in fallback. */
   iconSrc?: string;
+  /** Keeps the native-app slot transparent until host-owned artwork is ready. */
+  nativeIconPending?: boolean;
   /** Keeps the visual system restrained while making quick scanning easier. */
   tone?: "mint" | "violet" | "amber" | "blue" | "slate";
   disabled?: boolean;
@@ -1079,6 +1081,11 @@ const spotlightLauncherStyles = `
     object-fit: contain;
   }
 
+  .ihub-spotlight__tile-icon.is-loading-native {
+    background: transparent;
+    box-shadow: none;
+  }
+
   .ihub-spotlight__tile-label {
     color: #e6e6e6;
     font-size: 13px;
@@ -1133,6 +1140,10 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__result-icon.is-native img {
     border-radius: 0;
     object-fit: contain;
+  }
+  .ihub-spotlight__result-icon.is-loading-native {
+    background: transparent;
+    box-shadow: none;
   }
   .ihub-spotlight__result-label { color: #e6e6e6; font-size: 11px; font-weight: 520; }
   .ihub-spotlight__result-detail { color: #9fa0a0; font-size: 8px; }
@@ -1859,6 +1870,8 @@ export function SpotlightLauncher({
                       <div className="ihub-spotlight__result-list" id={`ihub-spotlight-${group.id}-items`}>
                         {group.items.map((item, itemIndex) => {
                           const Icon = item.icon ?? AppWindow;
+                          const nativeIconPending = !item.iconSrc
+                            && item.nativeIconPending === true;
                           const canTogglePinned = Boolean(item.canPinFromSearch && onTogglePinned);
                           const baseLabel = item.detail ? `${item.label}：${item.detail}` : item.label;
                           const pinHint = canTogglePinned
@@ -1890,8 +1903,15 @@ export function SpotlightLauncher({
                                 : { delay: Math.min(.1, itemIndex * .012), duration: .16, ease: [0.16, 1, 0.3, 1] }}
                               type="button"
                             >
-                              <span className={`ihub-spotlight__result-icon${item.iconSrc ? " is-native" : ""}`}>
-                                {item.iconSrc ? <img alt="" src={item.iconSrc} /> : <Icon size={17} strokeWidth={1.9} />}
+                              <span
+                                aria-hidden="true"
+                                className={`ihub-spotlight__result-icon${item.iconSrc ? " is-native" : ""}${nativeIconPending ? " is-loading-native" : ""}`}
+                              >
+                                {item.iconSrc
+                                  ? <img alt="" src={item.iconSrc} />
+                                  : nativeIconPending
+                                    ? null
+                                    : <Icon size={17} strokeWidth={1.9} />}
                               </span>
                               <span className="ihub-spotlight__result-copy">
                                 <span className="ihub-spotlight__result-label">{item.label}</span>
@@ -1907,6 +1927,8 @@ export function SpotlightLauncher({
                       <div className="ihub-spotlight__grid" id={`ihub-spotlight-${group.id}-items`}>
                         {group.items.map((item, itemIndex) => {
                           const Icon = item.icon ?? AppWindow;
+                          const nativeIconPending = !item.iconSrc
+                            && item.nativeIconPending === true;
                           const canTogglePinned = group.id !== "pasted"
                             && group.id !== "context"
                             && (group.id !== "search" || item.canPinFromSearch)
@@ -1946,8 +1968,15 @@ export function SpotlightLauncher({
                                 : { delay: Math.min(.12, (groupIndex * 6 + itemIndex) * .012), duration: .18, ease: [0.16, 1, 0.3, 1] }}
                               type="button"
                             >
-                              <span className={`ihub-spotlight__tile-icon ihub-spotlight__tile-icon--${item.tone ?? "slate"}${item.iconSrc ? " is-native" : ""}`}>
-                                {item.iconSrc ? <img alt="" src={item.iconSrc} /> : <Icon size={19} strokeWidth={1.85} />}
+                              <span
+                                aria-hidden="true"
+                                className={`ihub-spotlight__tile-icon ihub-spotlight__tile-icon--${item.tone ?? "slate"}${item.iconSrc ? " is-native" : ""}${nativeIconPending ? " is-loading-native" : ""}`}
+                              >
+                                {item.iconSrc
+                                  ? <img alt="" src={item.iconSrc} />
+                                  : nativeIconPending
+                                    ? null
+                                    : <Icon size={19} strokeWidth={1.85} />}
                               </span>
                               <span className="ihub-spotlight__tile-label">{item.label}</span>
                               {item.detail ? <span className="ihub-spotlight__tile-detail">{item.detail}</span> : null}

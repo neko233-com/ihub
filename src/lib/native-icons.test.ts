@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  mergeNativeIconCache,
   MAX_NATIVE_ICON_DATA_URL_BYTES,
+  nativeIconForLauncherShortcut,
+  nativeIconForResult,
   safeNativeIconSrc,
   sanitizeSystemIconMap,
   systemIconRequestChunks,
@@ -38,5 +41,74 @@ describe("native icon IPC boundaries", () => {
       searchResultIds: ["search-12"],
       launcherShortcutIds: ["shortcut-1"],
     });
+  });
+
+  it("retains a native application icon across refreshed IDs for the same local path", () => {
+    const original = {
+      id: "application:C:\\Program Files\\Example\\Example.exe",
+      kind: "application",
+      path: "C:\\Program Files\\Example\\Example.exe",
+    };
+    const cache = mergeNativeIconCache(
+      {},
+      { [original.id]: onePixelPng },
+      [original],
+    );
+
+    expect(nativeIconForResult(cache, original)).toBe(onePixelPng);
+    expect(nativeIconForResult(cache, {
+      ...original,
+      id: "refreshed-result-id",
+      path: "c:/program files/example/example.exe",
+    })).toBe(onePixelPng);
+  });
+
+  it("does not reuse an ID-only icon after that result points at a different path", () => {
+    const cache = mergeNativeIconCache(
+      {},
+      { reused: onePixelPng },
+      [{
+        id: "reused",
+        kind: "application",
+        path: "C:\\Apps\\First.exe",
+      }],
+    );
+
+    expect(nativeIconForResult(cache, {
+      id: "reused",
+      kind: "application",
+      path: "C:\\Apps\\Second.exe",
+    })).toBeUndefined();
+  });
+
+  it("keeps shortcut artwork stable and bounds retained icon entries", () => {
+    const first = {
+      id: "first",
+      kind: "application",
+      path: "C:\\Apps\\First.exe",
+    };
+    const second = {
+      id: "second",
+      kind: "application",
+      path: "C:\\Apps\\Second.exe",
+    };
+    const firstCache = mergeNativeIconCache({}, { first: onePixelPng }, [first]);
+    const boundedCache = mergeNativeIconCache(
+      firstCache,
+      { second: onePixelPng },
+      [second],
+      [],
+      2,
+    );
+    const shortcutCache = mergeNativeIconCache(
+      boundedCache,
+      { "shortcut-1": onePixelPng },
+      [],
+      ["shortcut-1"],
+    );
+
+    expect(nativeIconForResult(boundedCache, first)).toBeUndefined();
+    expect(nativeIconForResult(boundedCache, second)).toBe(onePixelPng);
+    expect(nativeIconForLauncherShortcut(shortcutCache, "shortcut-1")).toBe(onePixelPng);
   });
 });

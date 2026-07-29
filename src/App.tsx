@@ -2,7 +2,6 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  AppWindow,
   Braces,
   Calculator,
   Camera,
@@ -71,6 +70,9 @@ import {
   launcherHotkeyResetAction,
 } from "./lib/launcher-hotkey-status";
 import {
+  mergeNativeIconCache,
+  nativeIconForLauncherShortcut,
+  nativeIconForResult,
   safeNativeIconSrc,
   sanitizeSystemIconMap,
   systemIconRequestChunks,
@@ -332,6 +334,7 @@ function spotlightItemForSearchResult(
   result: SearchResult,
   nativeIconSrc?: string,
 ): SpotlightLauncherItem {
+  const normalizedNativeIconSrc = safeNativeIconSrc(nativeIconSrc);
   const isCalculatorResult = typeof result.calculatorExpression === "string";
   const isTimeResult = result.commandId === "ihub.tool.time";
   const isSettingsResult = result.commandId === "ihub.open-settings";
@@ -346,7 +349,7 @@ function spotlightItemForSearchResult(
           : result.kind === "folder"
             ? Folder
             : result.kind === "application"
-              ? AppWindow
+              ? undefined
               : result.kind === "plugin"
                 ? Puzzle
                 : Zap;
@@ -387,7 +390,8 @@ function spotlightItemForSearchResult(
     detail: result.metadata ?? result.path ?? undefined,
     badge,
     icon,
-    iconSrc: safeNativeIconSrc(nativeIconSrc),
+    iconSrc: normalizedNativeIconSrc,
+    nativeIconPending: result.kind === "application" && !normalizedNativeIconSrc,
     tone,
     canPinFromSearch: result.pinEligible === true,
     pinnedShortcutId: result.pinnedShortcutId,
@@ -926,7 +930,7 @@ export function App() {
   const [pastedFileResults, setPastedFileResults] = useState<SearchResult[]>([]);
   const [pastedImage, setPastedImage] = useState<LauncherPastedImage | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>(mockResults);
-  const [searchIconSrcById, setSearchIconSrcById] = useState<SystemIconMap>({});
+  const [searchIconCache, setSearchIconCache] = useState<SystemIconMap>({});
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
@@ -958,7 +962,7 @@ export function App() {
   const [launcherShortcuts, setLauncherShortcuts] = useState<LauncherShortcutView[]>([]);
   const [recentItemIds, setRecentItemIds] = useState<string[]>(() => readStoredStringArray(launcherRecentStorageKey));
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
-  const [homeIconSrcById, setHomeIconSrcById] = useState<SystemIconMap>({});
+  const [homeIconCache, setHomeIconCache] = useState<SystemIconMap>({});
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
   const [spaceActivates, setSpaceActivates] = useState(() => readStoredBoolean(launcherSpaceActivatesStorageKey, true));
   const [autoInstallSignedUpdates, setAutoInstallSignedUpdates] = useState(() =>
@@ -1171,9 +1175,10 @@ export function App() {
   const spotlightSearchResults = useMemo<SpotlightLauncherItem[]>(
     () => results.map((result) => spotlightItemForSearchResult(
       result,
-      searchIconSrcById[result.id] ?? homeIconSrcById[result.id],
+      nativeIconForResult(searchIconCache, result)
+        ?? nativeIconForResult(homeIconCache, result),
     )),
-    [homeIconSrcById, results, searchIconSrcById],
+    [homeIconCache, results, searchIconCache],
   );
   const pastedFileItems = useMemo<SpotlightLauncherItem[]>(
     () => pastedFileResults.map((result) => spotlightItemForSearchResult(result)),
@@ -1213,13 +1218,20 @@ export function App() {
   );
   const launcherShortcutItems = useMemo<SpotlightLauncherItem[]>(
     () => launcherShortcuts.map((shortcut) =>
-      spotlightItemForLauncherShortcut(shortcut, homeIconSrcById[shortcut.id])),
-    [homeIconSrcById, launcherShortcuts],
+      spotlightItemForLauncherShortcut(
+        shortcut,
+        nativeIconForLauncherShortcut(homeIconCache, shortcut.id),
+      )),
+    [homeIconCache, launcherShortcuts],
   );
   const recentApplicationItems = useMemo(
     () => recentApplications.map((result) =>
-      spotlightItemForSearchResult(result, homeIconSrcById[result.id])),
-    [homeIconSrcById, recentApplications],
+      spotlightItemForSearchResult(
+        result,
+        nativeIconForResult(homeIconCache, result)
+          ?? nativeIconForResult(searchIconCache, result),
+      )),
+    [homeIconCache, recentApplications, searchIconCache],
   );
   const pluginCommandItems = useMemo(() => plugins.flatMap((plugin) => {
       if (plugin.enabled === false || !Array.isArray(plugin.commands)) {
@@ -1880,7 +1892,6 @@ export function App() {
     if (searchResponse.status === "fulfilled") {
       const nativeResults = searchResponse.value;
       setSearchResults(nativeResults);
-      setSearchIconSrcById({});
       const searchResultIds = nativeResults
         .filter((result) => (
           result.kind === "application"
@@ -1893,16 +1904,16 @@ export function App() {
         void requestSystemIconMap(searchResultIds, [])
           .then((icons) => {
             if (requestId === searchRequestRef.current) {
-              setSearchIconSrcById(icons);
+              setSearchIconCache((current) =>
+                mergeNativeIconCache(current, icons, nativeResults));
             }
           })
           .catch(() => {
-            // Shell icon extraction is optional; Lucide fallbacks remain usable.
+            // A transparent reserved slot is preferable to a false app glyph.
           });
       }
     } else {
       setSearchResults([]);
-      setSearchIconSrcById({});
       showToast(
         searchResponse.reason instanceof Error
           ? searchResponse.reason.message
@@ -1927,7 +1938,6 @@ export function App() {
     }
     if (surface !== "launcher" || !normalizedQuery) {
       setSearchResults([]);
-      setSearchIconSrcById({});
       setPluginSearchResults([]);
       setRequestedSearchRuntimePluginIds((current) => (current.length === 0 ? current : []));
       if (!isDesktop()) {
@@ -1971,7 +1981,6 @@ export function App() {
     const generation = homeIconRequestRef.current + 1;
     homeIconRequestRef.current = generation;
     if (!isDesktop()) {
-      setHomeIconSrcById({});
       return;
     }
     const searchResultIds = recentApplications
@@ -1981,20 +1990,23 @@ export function App() {
       .filter((shortcut) => shortcut.status === "ready")
       .map((shortcut) => shortcut.id);
     if (searchResultIds.length === 0 && launcherShortcutIds.length === 0) {
-      setHomeIconSrcById({});
       return;
     }
 
     void requestSystemIconMap(searchResultIds, launcherShortcutIds)
       .then((icons) => {
         if (generation === homeIconRequestRef.current) {
-          setHomeIconSrcById(icons);
+          setHomeIconCache((current) =>
+            mergeNativeIconCache(
+              current,
+              icons,
+              recentApplications,
+              launcherShortcutIds,
+            ));
         }
       })
       .catch(() => {
-        if (generation === homeIconRequestRef.current) {
-          setHomeIconSrcById({});
-        }
+        // Keep already-rendered artwork stable when an optional refresh fails.
       });
   }, [launcherShortcuts, recentApplications]);
 

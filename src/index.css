@@ -702,6 +702,18 @@ kbd {
   color: #9fe9d7;
 }
 
+.result-icon img {
+  display: block;
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.result-icon.is-native,
+.result-icon.is-loading-native {
+  background: transparent;
+}
+
 .result-row__text {
   display: grid;
   gap: 3px;
