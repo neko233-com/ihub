@@ -19,11 +19,14 @@ iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿
 ## 现在能做什么
 
 - Rust 后台并行扫描用户常用目录；搜索过程不在 WebView 中访问文件系统。
-- Windows 只读扫描当前用户与所有用户的 Start Menu 快捷方式，macOS 只读扫描 `/Applications` 与 `~/Applications` 的 `.app`；它们以真实“应用”结果与文件、文件夹、命令和插件并列，只有显式选择才会启动。Windows 的命中结果和固定项会由专用 Shell STA worker 异步补齐 48px 系统图标；文字搜索不等待图标，路径也不会因图标 IPC 新增暴露面。
+- Windows 只读扫描当前用户与所有用户的 Start Menu 快捷方式，macOS 只读扫描系统与用户 Applications/PreferencePanes 中的 `.app`、`.prefPane`；它们以真实“应用”结果与文件、文件夹、命令和插件并列，只有显式选择才会启动。Windows 会为当前原生搜索结果（普通文件／目录、`.exe`、`.lnk`、`.url`）和已固定启动项异步读取 48px Shell 原生图标：WebView 只能提交当前结果 ID 或不透明的固定项 ID，宿主解析真实路径后由专用 STA worker 优先读取 `.lnk` 的 `IconLocation`／目标或 `.url` 的 `IconFile`／`IconIndex`，再回退到 Shell 提取。macOS 当前只为 `.app`、`.prefPane` 应用包读取 PNG-backed ICNS 并归一化为 48px，普通文件与目录仍显示中性宿主占位。文字搜索不等待图标，提取失败也不会用伪造的通用 EXE 图标冒充原图。
 - **文件启动**：在搜索结果中右键真实、可固定的本地文件、文件夹或应用即可固定到启动页“已固定”。最多保存 18 个此类快捷项；路径和索引来源只保存在 iHub 原生 app-data，前端只拿不透明 ID。打开时 Rust 会从当前索引重新解析、检查类型/授权范围并 canonicalize；失效、链接重定向或不受支持的目标会安全报错而不会猜测替代目标。Windows Start Menu 的 `.lnk/.url` 仍可即时搜索打开，但不会作为持久启动项固定。
 - 通过 Tauri v2 的单实例、托盘、全局快捷键与开机自启能力保持随叫随到。默认使用 `Alt+Space`（macOS 为 `Option+Space`）：后台时居中唤出，已显示且聚焦时再次按下隐藏；可见但失焦时只恢复焦点并保留当前查询/工具表面。原生层会抑制按键自动重复；托盘与第二实例始终只显示，不会误触反向隐藏。设置页可直接录制跨平台自定义组合；若启动时被其他应用占用，会明确显示备用键和“重新尝试 Alt + Space”，占用者退出后无需重启即可取回默认键。标题栏关闭、Esc 和失焦只隐藏；托盘或设置页的“退出 iHub”才会结束驻留进程并释放全局键。
+- 设置中可显式启用仅支持 Windows / macOS 的 dTools 风格“超级面板”：在其他应用里静止长按右键 460ms，物理位移超过 10px 即取消，iHub 会在指针附近、当前显示器工作区内打开同一个 800×380 紧凑启动器；macOS 需要为 iHub 开启 Input Monitoring。宿主只读观察右键按下／移动／释放，不拦截或合成输入；一次只保留一个 8 秒、仅可消费一次的随机 token，消费后才读取**当前剪贴板**，最多返回 32 个文件 metadata、经尺寸／像素／内存／12MiB PNG 上限重新编码的一张图片，或 4KiB 文本。事件队列、线程启动／停止等待和所有载荷都有硬上限，上下文与 token 只驻留内存且不写历史；关闭功能会停止系统监听并撤销待用 token。监听器在启动或恢复时失败会回退并持久化为 disabled，而不会留下假开启状态。
+- 启动器会在一次动作成功打开或交付后更新本地自适应顺序：“最近使用”按 14 天半衰期的频率／时效权重排列，搜索结果只获得最高 480 分的有界加成；这项加成本身不能跨越 exact／prefix 之间的 1,000 分相关性层级。排序账本最多 256 项、保留 180 天，只在本机保存计数、时间戳和由原始结果 ID 映射出的 `usage-v1` 128-bit 伪匿名键；这份账本不保存路径、查询、剪贴板内容或插件 payload。
 - 从 GitHub URL、<code>github:owner/repo@tag</code> 或 <code>owner/repo@tag</code> 导入插件。安装器先解析远端 ref，再锁定实际 commit，且不执行仓库的 npm、Git hook、PowerShell 或 shell 脚本。
 - 为插件提供自包含 TypeScript iframe bridge、manifest schema、stdio JSON-RPC worker 协议和前端 + Rust worker 模板。
+- 可见插件可从宿主标题栏或 `Ctrl+D` 分离为原生 800×600 可调整窗口；新窗口只加载 iHub 同源、可信 React host，真实插件仍位于独立 loopback iframe 与同一受限 Bridge 中。可信 host 的本地 capability 只有 7 条专用 custom-command ACL（bootstrap、close、frontend URL、一次取色批准、release、touch、Bridge call）和 event listen/unlisten；loopback iframe 本身没有任何 Tauri capability。原生注册表把精确 `pluginId` 绑定到唯一窗口 label 与活动 lease，命令、搜索选择和前端快捷键只用 `emit_to` 发给该 owner；搜索选择还必须消费原生端保存的短期、一次性 issued snapshot。关闭时由原生窗口事件兜底释放 lease；分离 host 不获得 Electron、Node、任意 URL 或直接 Tauri shell capability，插件声明的 `shell.*` 仍只能经过同一受限 Bridge。
 - 已接入 Tauri 签名 updater 的客户端配置与发布管线；Windows 与 macOS 各自产出原生包。生产更新仍需实际私钥、签名／公证凭据和已发布的 HTTPS `latest.json`。
 
 ### 内置工具（现在可用）
@@ -49,7 +52,7 @@ flowchart TB
   FS["Native file index<br/>parallel scan → persisted index"]
   PUI["Plugin UI (TypeScript)<br/>独立 loopback 来源 + iHub Bridge"]
   WORKER["Plugin worker<br/>Binary / ffmpeg / Rust / Go / Python"]
-  GH["GitHub repository / release<br/>manifest · hash · signature"]
+  GH["GitHub repository / release<br/>manifest · source/integrity lock"]
 
   UI <--> CORE
   CORE <--> FS
@@ -58,7 +61,7 @@ flowchart TB
   GH -->|"pinned source + verification"| CORE
 ~~~
 
-每个 TypeScript 插件 iframe 都使用独立、短生命周期的 `127.0.0.1` 来源，并只读取声明入口所在的专用构建目录；它不使用 Tauri `asset:` 协议或直接 `invoke`。同一插件只保留一个当前租约，父窗口以精确的 iframe `source`、`origin` 和宿主签发的租约验证 Bridge 消息；更新、停用、解除链接或异常 renderer 超时会使旧租约失效，因此前端只能通过声明的宿主 Bridge 请求能力。用户要求“无沙箱”仍然适用于原生 worker：含二进制的插件必须按本机代码信任，只导入你审阅并信任的发布者。iHub 会把来源、请求 ref、实际 commit、manifest、完整前端资产目录、声明图标和原生二进制的 SHA-256 写入安装锁，并在加载、执行、检查更新与应用更新前复核；发布者签名、权限 diff、第三方静默自动更新与回滚仍是下一阶段能力，不能被当作已经实现。
+每个 TypeScript 插件 iframe 都使用独立、短生命周期的 `127.0.0.1` 来源，并只读取声明入口所在的专用构建目录；它不使用 Tauri `asset:` 协议或直接 `invoke`。同一插件只保留一个当前租约，父窗口以精确的 iframe `source`、`origin` 和宿主签发的租约验证 Bridge 消息；更新、停用、解除链接或异常 renderer 超时会使旧租约失效，因此前端只能通过声明的宿主 Bridge 请求能力。未声明非空 `network.allow` 时，iframe CSP 会禁止外部 connect、image 和 media；一旦存在非空声明，当前执行边界只粗粒度开放 HTTPS/WSS connect 与 HTTPS image/media，声明的 destination 会进入安装审计、source lock 和更新比较，但尚不是逐 origin 的运行时网络过滤器。跨 origin 插件也不会继承宿主的屏幕或麦克风能力：只有 Rust 验证为可见 `Surface`、活动 lease 且清单分别声明 `screenCapture: true` / `microphone: true` 时，可信 host 才为该 iframe 分别委派 `display-capture` / `microphone`；隐藏搜索 runtime 和未声明插件没有委派。这仍不能跳过浏览器／系统选择器或 OS 权限，浏览器布局 QA 也不能证明真机权限、实际画面或音频采集成功。用户要求“无沙箱”仍然适用于原生 worker：含二进制的插件必须按本机代码信任，只导入你审阅并信任的发布者。iHub 会把来源、请求 ref、实际 commit、manifest、完整前端资产目录、声明图标和原生二进制的 SHA-256 写入安装锁，并在加载、执行、检查更新与应用更新前复核；发布者签名、界面中的逐字段权限／哈希 diff、第三方静默自动更新与回滚仍是下一阶段能力，不能被当作已经实现。
 
 ## 快速开始
 
@@ -125,19 +128,19 @@ bash /tmp/ihub-install.sh
 
 ## 插件：去中心化，但不轻率
 
-用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会解析 <code>owner/repo@tag</code> 或 URL <code>#ref</code>，在下载前锁定远端的实际 commit，并锁定 manifest、整个可服务前端目录与清单声明二进制的 SHA-256，绝不执行仓库脚本。同一插件 ID 首次安装后会绑定其来源与 ref，其他仓库不能借同名 ID 覆盖它；更新必须走已安装来源的只读检查与用户确认。生产级的 <code>.ihubpkg</code> 发布者签名、权限 diff、自动更新与回滚仍是下一阶段安装器的目标。
+用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会解析 <code>owner/repo@tag</code> 或 URL <code>#ref</code>，在下载前锁定远端的实际 commit，并为 canonical <code>plugin.json</code>、整个可服务前端目录、声明图标和原生二进制写入并复核 SHA-256，绝不执行仓库脚本。同一插件 ID 首次安装后会绑定其来源与 ref，其他仓库不能借同名 ID 覆盖它；更新必须走已安装来源的只读检查与用户确认。<code>ihub.plugin.json</code> 仅作为旧包的导入兼容别名，新插件与生成模板都使用 <code>plugin.json</code>。发布者签名、界面中的逐字段权限／哈希 diff 和锁定版本回滚尚未实现，属于后续安装器能力。
 
 ~~~text
-GitHub source → pinned commit/tag → manifest / integrity / signature check
+GitHub source → resolved immutable commit → manifest / integrity lock
               → immutable local store → consent → on-demand worker
 ~~~
 
-插件包的核心文件为 <code>ihub.plugin.json</code>，声明：
+插件包的 canonical 清单为 <code>plugin.json</code>（<code>ihub.plugin.json</code> 只作兼容别名），声明：
 
-- TypeScript UI 的入口和贡献的命令；
+- ID、版本、iHub/API 兼容范围、TypeScript UI 入口和贡献的命令；
 - 每个 OS / CPU 对应的原生 worker；
 - 需要的 iHub Bridge 权限；
-- 发布者公钥、hash 与更新源。
+- 可选图标、激活事件与更新通道偏好。
 
 完整规范、风险模型、协议与开发模板位于：
 
@@ -148,7 +151,7 @@ GitHub source → pinned commit/tag → manifest / integrity / signature check
 
 ### 官方插件 catalog
 
-内置工具已经提供本地搜索、颜色、截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
+内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入或保存历史。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
 
 [ihub-plugin-window-manager@v1.0.2](https://github.com/neko233-com/ihub-plugin-window-manager/tree/v1.0.2) 只可对 iHub 自己的主启动器执行居中、左右贴靠和切换置顶，不能枚举、读取、聚焦或控制其他应用窗口。图片、OCR 和批量重命名的 `launcherContext` 只交接一次性元数据，仍要求用户重新选择文件／目录；文本工具与翻译只预填显式交接文本，不自动处理或发送。PDF、ZIP 和网页动作均在最小权限下提供正式 Git fallback。完整源码 checkout 中的 18 个官方项目都带固定 ID 的 `workspaceProject` 开发入口：开发安装器验证 `sourceRoot` 后优先链接当前构建产物，普通安装则全部回退到锁定 commit 的 Git 包。
 
@@ -168,13 +171,14 @@ GitHub source → pinned commit/tag → manifest / integrity / signature check
 ## 自动更新与开机自启
 
 - 开机自启为显式用户设置，不在首次运行时静默开启。
+- 托盘始终提供显示、偏好设置、刷新索引、关于、帮助、反馈、重启和退出。帮助／反馈只能打开编译进宿主的 iHub HTTPS 地址；重启使用 Tauri 的安全进程重启 API，不拼接 shell 命令。
 - 更新使用 Tauri 官方 updater，生产构建必须提供签名公钥、HTTPS endpoint 和私钥环境变量。应用侧默认只检查；设置中可由用户明确开启“自动安装已签名正式版”，它只接受版本更高且签名验证通过的 iHub Release，不拉取开发源码或插件。Windows 会移交系统安装程序、可能关闭并重新打开 iHub，macOS 在下次启动时应用；在签名 Release 发布 `latest.json` 前，它不会把本机开发包伪装为可自动更新的正式版本。插件中心会对已启用且显式选择 `stable` / `autoUpdate` 的官方锁定 Git 源做有界只读发现，仍须用户点击后才更新。候选若改变权限、网络目标或原生二进制声明会被拒绝，不能把第三方二进制的静默自动更新伪装成已完成能力。
 - Windows 建议采用用户范围的 passive NSIS 安装；macOS 需要 Developer ID 签名和 notarization。
 - GitHub Actions 在 Windows 和 macOS runner 上构建；发布 secrets 不会写入仓库。
 
 ## 视觉系统
 
-界面采用低干扰的深石墨命令面板：一个高对比搜索平面、一种青绿强调色、紧凑信息密度与键盘优先流。启动器分组标题接入了固定版本的 React Bits BlurText（保留其许可通知），Motion 负责进入、列表和抽屉过渡；所有动画尊重 <code>prefers-reduced-motion</code>。
+界面以当前 uTools / Spotlight 参考为浅色基线：`#f4f4f4` 主表面、`#d2d2d2` 细边、`#d7d7d7` 选中态、深灰文字、8px 圆角和紧凑的键盘优先密度，不再以深石墨作为默认主题。启动器分组标题接入了固定版本的 React Bits BlurText（保留其许可通知），Motion 负责进入、列表和抽屉过渡；所有动画尊重 <code>prefers-reduced-motion</code>。
 
 ## 项目结构
 

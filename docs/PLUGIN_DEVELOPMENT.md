@@ -20,6 +20,8 @@ iHub 插件是一个可发布的目录：前端使用 TypeScript（推荐 Vite�
 
 浏览器中的 `pnpm dev` 只验证页面自身，不等于在 iHub 中运行。开发期请使用上面的“链接本地插件”入口验证宿主 Bridge；它要求绝对目录、验证清单及包内相对路径，并拒绝把 iHub 托管插件目录再次链接为源码。GitHub 直装仍导入构建产物的 Git 快照，不会监听本地文件变更。
 
+链接并打开插件后，可从 iHub 绘制的标题栏点击“分离窗口”（或在该宿主表面激活时按 `Ctrl+D`）。桌面端创建的是 800×600、可调整大小的普通 Tauri 窗口，但插件仍在原来的 loopback iframe/Bridge 边界里；它不会得到 Electron、Node、任意 shell 或 Tauri API。关闭分离窗口会释放该 iframe lease。只检查布局与安全文案时，可在浏览器打开 `http://127.0.0.1:1420/?ihubDetachedPlugin=browser.preview&ihubDetachedPreview=1`；这个专用 QA 路由不会加载你的插件、创建窗口或签发 lease，不能代替桌面端 Bridge 验证。
+
 生成器故意**不**在 `.gitignore` 中忽略 `dist/`。GitHub 导入只读取所选 ref 已提交的文件，不会运行 `pnpm install`、`pnpm build`、CI 配置或 worker 构建脚本；可导入的发布提交必须包含实际的 `dist/` 输出、根目录 `plugin.json` 和每个清单已声明的 `bin/<target>/` 工件。
 
 发布包的最小结构：
@@ -95,6 +97,37 @@ ihub-plugin-my-feature/
 
 每个 `contributes.commands[]` 的 `id` 必须唯一，并可选 `execution: "frontend" | "native"`。不写时保持兼容行为：含原生 worker 的插件默认启动 native 命令，其余插件默认打开前端。带 worker 的插件若要先显示自己的 UI（例如 OCR 先让用户选图），应在该入口命令明确写 `"execution": "frontend"`；原生命令只能通过清单锁定的 worker 执行。原生命令还可显式写 `"run": { "timeoutMs": 900000 }`：该字段只能与 `execution: "native"` 一起使用，范围为 1,000–1,800,000 ms；省略时保持兼容的 60 秒上限。
 
+### 清单全局快捷键
+
+全局快捷键完全由 Rust 驻留宿主注册，运行中的 iframe 不能申请、修改或移除系统快捷键。插件必须先声明 `"permissions": { "globalShortcut": true }`，再使用命令上的 `shortcut` 简写，或 `contributes.globalShortcuts[]` 把一个快捷键映射到已声明命令／启动器关键词（二选一）：
+
+```json
+{
+  "contributes": {
+    "commands": [{
+      "id": "open-my-feature",
+      "title": "Open My feature",
+      "keywords": ["my feature"],
+      "shortcut": "Alt+KeyM"
+    }],
+    "globalShortcuts": [{
+      "id": "search-my-files",
+      "shortcut": "CmdOrCtrl+Alt+KeyM",
+      "keyword": "my files"
+    }, {
+      "id": "open-feature-explicitly",
+      "shortcut": "Alt+Shift+KeyM",
+      "commandId": "open-my-feature"
+    }]
+  },
+  "permissions": { "globalShortcut": true }
+}
+```
+
+宿主只接受 `CmdOrCtrl`、`Alt`、`Shift` 加受限物理键名的跨平台语法；至少包含 `CmdOrCtrl` 或 `Alt`。`Alt+F4`、`Alt+Space`、恢复用 `Alt+Shift+Space`、当前启动器快捷键、同一插件内重复项以及跨插件重复项都不会注册。每个插件的命令简写和插件级映射合计最多 16 个，整个宿主最多激活 128 个。跨插件重复时全部失败关闭，不按安装顺序抢占；操作系统占用也只把该项标记为失败，不会移除或影响主 `Alt+Space`。插件中心会显示每项 `registered`、`blocked`、`unavailable` 或 `inactive` 状态及失败原因。
+
+命令映射仍走普通可见激活流程：前端命令打开受约束 iframe，原生命令保留首次执行的二进制信任确认。关键词映射只打开启动器并填入有界关键词，不直接执行模糊结果。安装后的常规 Git 更新不能静默更换快捷键目标；这类信任声明变化必须重新导入审阅。
+
 ## 前端 SDK
 
 SDK 不序列化 JavaScript 回调给 Rust；它在插件 iframe 中保留回调，并由宿主桥把一次命令或搜索请求送回该 iframe。最小用法：
@@ -130,10 +163,12 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | --- | --- | --- |
 | `commands.register` | 无 | 注册命令处理器。 |
 | `search.register` | 无 | 注册低延迟搜索提供器。 |
+| `subInput.set/setValue/remove` | 无（仅可见 surface 租约） | 控制由可信 iHub 宿主绘制的有界文本输入。回调留在 iframe 内；隐藏搜索 runtime、原生 worker 和失效租约不能创建或修改输入。关闭、替换、禁用或 dispose 插件页会清除值和回调。 |
 | `settings.get/set` | 无 | 插件命名空间下的设置存储。密钥设置必须在清单上标注 `secret`。 |
 | `clipboard.readText/writeText` | `clipboard.read/write` | 读写剪贴板文本。 |
 | `clipboard.history.snapshot` | `clipboard.history` | 仅在插件主动调用时返回最多 36 条、已经由用户启用的内置纯文本历史；不会开启采集、读取当前系统剪贴板或修改全局历史。 |
-| `screenCapture.acquireFocusLease/releaseFocusLease` | `screenCapture: true` | 仅在浏览器 `getDisplayMedia` 系统选择器显示期间临时阻止启动器因焦点丢失而隐藏；不授予屏幕像素、录制、全局快捷键或原生捕获 API。 |
+| `screenCapture.acquireFocusLease/releaseFocusLease` | `screenCapture: true` | 仅在可见 `Surface` 的活动原生租约上，可信 host 才向跨 origin iframe 委派 `display-capture`；隐藏搜索 runtime 和未声明插件没有委派。焦点租约只在浏览器 `getDisplayMedia` 系统选择器显示期间阻止启动器因失焦隐藏，不授予屏幕像素、录制、全局快捷键或原生捕获 API。 |
+| 浏览器 `getUserMedia({ audio: true })` | `microphone: true` | 仅向 Rust 验证的可见 `Surface` 活动租约委派 `microphone`；它与 `screenCapture` 独立，不授予后台、隐藏 runtime 或原生 worker 录音能力，也不会跳过浏览器／OS 同意。 |
 | `cursorColor.sampleOnce` | `cursorColor: true` | 仅当前可见插件页可请求。iHub 宿主必须先由用户确认，再固定等待 2 秒读取光标下一个像素；只返回 `hex`/`rgb`，不返回坐标、截图、显示器/窗口信息，也不支持后台轮询。 |
 | `launcherContext.consume` | `launcherContext.text/files/image` | 仅在用户明确选择一次已声明的前端插件命令后，按该次动作签发的不透明 `contextId` 可消费一次。文本有上限；文件只有 canonical 名称/类型/大小与无路径 handle；图片只有 PNG 元数据与无像素 handle。不会读取剪贴板、解析路径或变成文件授权。 |
 | `windowManagement.manageLauncher` | `windowManagement: true` | 仅对 iHub 标签为 `main` 的主启动器执行固定动作：居中、贴靠左侧、贴靠右侧或切换置顶。不会读取、枚举、聚焦或控制其他应用窗口，也不接受任意坐标。 |
@@ -146,6 +181,10 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | `native.runCommand` | `nativeApi` | 运行清单中声明的当前平台 worker；若传入文件授权，路径只放入 worker 的 JSON 输入，网页不可见。默认最多 60 秒，原生命令可通过受审阅的 `run.timeoutMs` 将前台等待上限提高至最多 30 分钟。 |
 | `events.on` | 取决于事件 | 订阅宿主发送给当前插件的事件。 |
 | `logger` | 无 | 写入带插件 ID 的宿主日志。 |
+
+`bootstrapPlugin` 运行期间还会安装一个冻结的最小兼容对象，并让 `window.utools === window.rubick`。兼容对象提供 `setSubInput`、`removeSubInput`、`setSubInputValue`，以及映射到上表既有权限检查的 `copyText`、`showNotification`、`shellOpenExternal`、`shellOpenPath`、`screenColorPick`；另有只读的主题、平台和 `"main"` 窗口类型查询。同步 `boolean` 返回值只表示参数已通过 SDK 本地校验且异步宿主请求已排队，真正的权限或租约拒绝仍写入 `BootstrapOptions.onError`。兼容层不会覆盖页面已有的同名全局，并在 runtime dispose 时恢复原值。
+
+这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 
@@ -242,7 +281,9 @@ const result = await ihub.native.runCommand({
 
 ### 浏览器屏幕选择器与焦点租约
 
-若插件在用户点击后调用浏览器的 `navigator.mediaDevices.getDisplayMedia()`，可在**同一个用户手势处理流程中**用 `screenCapture: true` 申请临时焦点租约，防止系统屏幕选择器短暂夺走焦点时 iHub 自动隐藏。它不是录屏授权，也不会给插件任何额外的屏幕内容或系统 API：浏览器仍会显示并管理系统选择器。
+若插件在用户点击后调用浏览器的 `navigator.mediaDevices.getDisplayMedia()`，必须声明 `screenCapture: true`；调用 `getUserMedia({ audio: true })` 则必须另外声明 `microphone: true`。Rust 只有在对应清单权限、可见 `Surface` purpose 和当前活动 lease 都匹配时，才让可信 React host 为这个跨 origin iframe 添加对应 Permissions Policy 委派；隐藏搜索 runtime、未声明插件、过期 lease 与浏览器安全预览都没有这些委派。在**同一个用户手势处理流程中**还可申请临时焦点租约，防止系统屏幕选择器短暂夺走焦点时 iHub 自动隐藏。
+
+委派和焦点租约都不是录屏授权，也不会给插件额外屏幕内容或原生捕获 API：浏览器仍会显示并管理系统选择器，操作系统仍可要求自己的权限（例如 macOS Screen Recording）。浏览器 QA 最多验证 host 属性条件和安全文案，不能证明系统权限、选择器或实际媒体帧在桌面端可用。
 
 ```json
 {
@@ -274,6 +315,20 @@ try {
 ```
 
 每个插件同一时间最多保留一个租约；新申请会替换该插件旧租约。宿主全局最多保留 4 个，固定在 90 秒后过期，并会在插件 iframe 销毁、停用、更新、解除链接或卸载时撤销。`releaseFocusLease()` 只能释放本插件持有的随机不透明 ID；其他插件的 ID 会被拒绝，未知或已经过期的 ID 仅返回 `{ released: false }`，便于 `finally` 安全重试。获取租约失败不应阻断浏览器选择器，也不能造成未处理的 Promise rejection。不要把租约 ID 写入设置、日志、剪贴板或网络。
+
+### 浏览器麦克风权限
+
+麦克风与屏幕捕获是两项独立声明。插件必须在 `permissions` 中写入严格布尔值 `"microphone": true`，Rust 才会把这项能力投影到当前可见 `Surface` lease，可信 React host 才会为对应 iframe 添加 `allow="microphone"`。未声明插件、隐藏搜索 `Runtime`、过期 lease 和浏览器安全预览都不带这项委派；renderer 或插件消息不能自报、补充或升级它。声明不会隐式授予 `screenCapture`，也不会绕过 Chromium／操作系统的麦克风授权提示或提供原生录音 API。
+
+```json
+{
+  "permissions": {
+    "microphone": true
+  }
+}
+```
+
+插件应只在清晰的用户动作后调用浏览器媒体 API，并正常处理拒绝或设备缺失。浏览器测试可以验证 iframe 的条件属性，但不能证明桌面端系统授权或实际音频采集成功。
 
 ### 原生单像素取色
 
@@ -394,4 +449,4 @@ iHub 的插件中心只是一个可选发现源，不是唯一下载源。当前
 - Windows 与 macOS 的每个已声明 target 都有可执行文件并完成真机冒烟测试。
 - 二进制 stdout 没有非 JSON-RPC 日志；崩溃、取消、网络离线和超时有明确行为。
 - 最小化权限，并在 changelog 中写出新增权限和数据流向。
-- 为生产分发准备发布 tag、提交 SHA 与包/二进制 SHA-256；待 lock 机制落地后再将它们记录为不可变安装版本，不要以可变分支作为生产锁定版本。
+- 为生产分发准备发布 tag、提交 SHA 与包／二进制 SHA-256；iHub 现有 source/integrity lock 会在导入时锁定实际 commit 并复核产物，不要以可变分支或发布者签名尚未存在为理由弱化审阅。

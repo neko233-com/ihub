@@ -6,7 +6,7 @@ iHub 的插件系统要同时满足两类需求：轻量的 TypeScript 前端扩
 
 v1 的核心不变量：
 
-- 每个插件包根目录都有一个经过 schema 校验的 `plugin.json`。
+- 每个插件包根目录都有一个经过 schema 校验的 canonical `plugin.json`；`ihub.plugin.json` 只作为既有包的导入兼容别名。
 - 前端的受支持调用面是版本化的 SDK/IPC 合同；插件不应依赖宿主私有代码。
 - 每一次已安装版本都有来源、固定 revision、内容哈希、权限快照和安装时间的 lock 记录。
 - 插件可以含原生二进制，因此安装信任模型必须诚实地假设“插件就是本机代码”。
@@ -35,7 +35,7 @@ flowchart LR
 
 ### 插件包
 
-包是独立 Git 仓库或本地目录。包内 `plugin.json` 是作者的声明；构建后 `dist/` 和可选 `bin/` 是可执行内容。包本身不应依赖主仓的 node_modules，也不应通过相对路径读取主应用的源码。
+包是独立 Git 仓库或本地目录。包内 canonical `plugin.json` 是作者的声明；导入器也接受旧包使用的 `ihub.plugin.json` 兼容文件名，但生成器、SDK 文档与新发布都以 `plugin.json` 为准。构建后 `dist/` 和可选 `bin/` 是可执行内容。包本身不应依赖主仓的 node_modules，也不应通过相对路径读取主应用的源码。
 
 ### `plugins/registry.json`
 
@@ -48,7 +48,7 @@ flowchart LR
 lock 文件是解析结果，不是仅有版本号的缓存。每项固定：
 
 - canonical Git URL、请求的 ref 与不可变 commit；
-- `plugin.json` 的 SHA-256，以及每个平台二进制/归档的 SHA-256；
+- canonical 清单、完整可服务前端目录、声明图标，以及每个平台原生二进制的 SHA-256；
 - 安装时批准的权限快照、API 版本和目标平台；
 - 发布/解析时间与更新通道。
 
@@ -56,9 +56,23 @@ lock 文件是解析结果，不是仅有版本号的缓存。每项固定：
 
 ## 前端与宿主
 
-已安装或显式链接的插件，其 `entry.frontend` 会先被解析为包内 canonical 文件；入口必须位于 `plugin.json` 所在目录下的专用构建子目录（通常是 `dist/`），宿主仅将该入口所在目录作为只读资源根。这样 `plugin.json`、源码、`.env`、Git 元数据与 `bin/` 不会被 iframe 同源读取。每个 iframe 绑定随机 `127.0.0.1` 端口和随机路径令牌；服务只接受 `GET` / `HEAD`，拒绝路径穿越、符号链接逃逸、目录列举和跨目录访问，并以 `no-store`、`no-referrer`、`nosniff` 与最小 CSP 返回资源。Tauri `asset:` 协议已不用于插件前端，本地开发链接也不会扩大 Tauri 的 asset scope。默认 capability 仅匹配主窗口且没有 remote URL capability，因此该 loopback iframe 不能把自身当作本地 Tauri IPC 调用方。
+已安装或显式链接的插件，其 `entry.frontend` 会先被解析为包内 canonical 文件；入口必须位于清单所在目录下的专用构建子目录（通常是 `dist/`），宿主仅将该入口所在目录作为只读资源根。这样清单、源码、`.env`、Git 元数据与 `bin/` 不会被 iframe 同源读取。每个 iframe 绑定随机 `127.0.0.1` 端口和随机路径令牌；服务只接受 `GET` / `HEAD`，拒绝路径穿越、符号链接逃逸、目录列举和跨目录访问，并以 `no-store`、`no-referrer`、`nosniff` 与最小 CSP 返回资源。iframe 还带 `sandbox="allow-scripts allow-same-origin"` 和 `no-referrer`，不开放 top navigation、popup、download、form 或 modal。Tauri `asset:` 协议已不用于插件前端，本地开发链接也不会扩大 Tauri 的 asset scope；loopback iframe 不匹配任何本地或 remote Tauri capability，不能把自身当作 Tauri IPC 调用方。
+
+网络声明目前是明确的粗粒度执行门。没有非空 `permissions.network.allow` 时，CSP 的 `connect-src` 只有 `'self'`，`img-src` / `media-src` 只有本地、`data:` / `blob:`，因此外部 connect、image 和 media 都被阻断；存在任意非空声明时，CSP 才开放 `connect-src https: wss:` 以及 HTTPS image/media。`network.allow` 中的 destination 会进入安装告知、source/integrity lock 和例行更新的安全比较，但当前 CSP 尚未按每个声明 destination 生成逐 origin 白名单；不能把它描述成完整的 egress 防火墙。原生 worker 也不受这条 iframe CSP 约束。
+
+跨 origin iframe 的 display-capture / microphone Permissions Policy 也由原生租约决定，而不是由 renderer 自报。只有 Rust 已验证插件仍启用、清单分别声明 `screenCapture: true` / `microphone: true`、租约 purpose 为可见 `Surface` 且该 lease 仍活动时，可信 React host 才按原生 lease 为对应 iframe 分别委派 `display-capture` / `microphone`；隐藏搜索 `Runtime`、未声明权限、过期租约和浏览器安全预览都不带该委派。两项权限彼此独立，只让可见跨 origin iframe 有资格在真实用户手势里调用相应浏览器 API，不会绕过浏览器／系统选择器、macOS Screen Recording 或麦克风等 OS 权限，也不会授予原生捕获 API。浏览器 QA 可以检查 host 文案和属性条件，却不能证明系统权限提示、窗口／屏幕选择或实际帧／音频采集在桌面端成功。
 
 默认生产桥是 parent-frame `postMessage`：`@ihub/plugin-sdk` 在 iframe 内把 `{ pluginId, method, params }` 作为关联 ID 的请求发送给父窗口，父窗口同时验证当前 iframe 的 `contentWindow` **和它的精确 loopback `origin`**，忽略请求中自报的插件 ID，并以当前已打开插件的 ID 和**宿主签发的前端租约**重建请求。随后父窗口调用 Rust 的 `plugin_host_call({ request })`，再将结果或错误以该精确 origin 回传 iframe。租约在更新、停用、重新链接、解除链接或卸载时失效；Rust 侧会在同一状态转换锁内再次校验，因此已加载的旧文档不能继续借 Bridge 调用新版本的能力。它为 TypeScript 前端建立了直接 Tauri IPC 之外的窄 Bridge；原生 worker 仍不是沙箱，必须只从可信发布者导入。
+
+### 插件分离窗口
+
+可见插件标题栏提供“分离窗口”，宿主表面处于激活状态时也可按 `Ctrl+D`。这个动作不会把插件页面升级成原生权限主体：Rust 只接受由 `main` 窗口提交、满足同一严格 ID 语法且当前已启用并通过前端入口完整性校验的插件 ID；窗口标签由该 ID 的 SHA-256 派生，URL 固定为 iHub 自己的 `index.html?ihubDetachedPlugin=<id>`，IPC 没有 label、scheme、host、path 或任意 URL 参数。窗口为原生、可调整大小的 800×600 普通窗口，但其中加载的仍是同源 iHub React host；真实插件继续位于该 host 内的独立 loopback iframe，并复用完全相同的 `PluginFrontendFrame`、精确 origin 验证和 Bridge。
+
+只有 iHub 自己的可信 React host 匹配 `plugin-detached-*` 本地 capability。它获得的 custom-command ACL 精确只有 7 条：`get_detached_plugin_window_bootstrap`、`close_detached_plugin_window`、`get_plugin_frontend_url`、`issue_plugin_cursor_color_approval`、`release_plugin_frontend_url`、`touch_plugin_frontend_lease`、`plugin_host_call`，外加 Tauri event 的 listen/unlisten；没有 updater、窗口创建、shell、文件系统、进程、Node/Electron 或 remote URL capability。该 host 内的 loopback iframe 仍没有 Tauri capability，只能走经过边界校验的父窗口 Bridge。
+
+原生注册表维护精确的 `pluginId → window label + active lease` 绑定；分离窗口不能为其他插件取入口、触碰或释放其他窗口的 lease，`plugin_host_call` 与一次取色确认也重复检查调用窗口。主窗口发起的普通前端命令和搜索查询会在原生层解析 owner，并只用 `emit_to` 投递到该 label；前端命令的全局快捷键同样只投递给分离 owner，keyword 与原生 worker 快捷键则只回到可信主窗口，不广播给所有 WebView。搜索 provider 的 readiness 由原生快照及变更事件同步给主窗口；一次查询响应最多在原生端保留 60 秒、总计最多 64 份 issued snapshot，选择时必须同时命中原始 plugin/provider/request/result ID，并在同一锁内消费一次，launcher renderer 不能自报任意 selection payload 重放。每个插件仍只有一个当前 runtime；分离期间主启动器和隐藏搜索 runtime 不会替换它。正常关闭、平台直接销毁和 React 卸载都走幂等清理，原生窗口事件会主动释放 loopback lease，因此 renderer 来不及执行异步 cleanup 时也不会留下活动表面。
+
+浏览器 QA 可显式打开 `?ihubDetachedPlugin=browser.preview&ihubDetachedPreview=1`。该路由只画可信 host chrome 和安全状态，明确不创建原生窗口、不签发 loopback lease、不挂载 iframe，也不授予 Tauri/Node/shell；重复字段、未知参数、路径、URL、fragment 注入和桌面端伪装 preview 都失败关闭到宿主错误页。
 
 启动器上下文交接使用这条桥的反向、一次性路径：可信父界面先以专用确认面板列出已启用、已安装、带 frontend 入口且声明精确 `launcherContext.*` 类别的命令；候选渲染和筛选本身不会创建记录。只有用户再次确认一个命令后，主界面才等待该 iframe 的 `lifecycle.ready`、命令注册及原生命令事件订阅完成，并用该**精确前端租约**调用 `issue_plugin_launcher_context` 暂存最多 60 秒的受限数据，再以同一租约把**不含内容**的 `contextId` 附到该命令事件。iframe 必须持有有效前端租约并主动调用 `launcherContext.consume` 才能取走一次。记录按插件、命令、租约和分派请求绑定，过期、重复、生命周期切换或跨插件/命令/租约使用都会失败；父界面还用确认 generation 和源码身份保护每个异步阶段，隐藏、关闭、焦点重开、来源更新或租约替换都会先作废 generation。父界面会把成功分派但尚未消费的 token 以精确 generation/租约保留为可撤销句柄，直到消费、TTL 或表面释放；因此任何取消边界都能同时撤销未发射和已发射未消费记录。文本受大小限制；文件只给规范化 metadata 和不透明 handle，不给 path 或读取权；图片只给 PNG metadata/handle，不给 pixels。该能力不是 ambient clipboard/filesystem 权限，也不会给原生 worker 自动追加路径或内容。
 
@@ -81,7 +95,7 @@ lock 文件是解析结果，不是仅有版本号的缓存。每项固定：
 - 在激活前校验 `engines`、入口文件、平台二进制与 lock 完整性；
 - 根据清单和用户授权执行桥接层能力检查；
 - 对命令/搜索设定超时、并发和结果大小限制，防止单个插件阻塞 launcher；
-- 为每个插件提供独立数据目录、日志标签、崩溃隔离与禁用/回滚入口；
+- 为每个插件提供独立数据目录、日志标签、崩溃隔离与禁用／移除入口；锁定版本回滚尚未实现；
 - 在自动启动恢复时只激活声明 `onStartup` 且用户允许的插件。
 
 插件负责：
@@ -103,11 +117,11 @@ lock 文件是解析结果，不是仅有版本号的缓存。每项固定：
 
 iHub 不把原生插件伪装成安全的脚本扩展。只要一个插件可执行本机二进制，它即可在用户权限范围内绕开前端 iframe 与 SDK，直接访问文件、网络和系统 API。因此：
 
-1. `permissions` 是安装告知和桥接层门禁；当前例行 Git 更新会在替换前比较其语义权限集和原生二进制声明，并在变化时拒绝。它尚未提供 UI 中逐字段的权限/哈希 diff，也不是原生代码的隔离边界。
-2. Git URL、owner、commit、哈希和签名构成可追溯来源链；缺失任一项的包不能被标为受信任官方包。
-3. 权限新增、二进制变化、来源迁移、签名失效和 owner 变化必须阻断自动更新并要求确认。
-4. 用户能在任意时刻禁用、移除或回滚到锁定版本；iHub 应显示数据目录、启动项与最近权限使用情况。
-5. 官方插件需要代码审查、受保护 tag、构建证明/签名、SBOM 与安全响应流程；社区插件必须清楚标识为第三方。
+1. `permissions` 是安装告知和桥接层门禁；当前例行 Git 更新会在替换前比较其语义权限集和原生二进制声明，并在变化时拒绝。它尚未提供 UI 中逐字段的权限／哈希 diff，也不是原生代码的隔离边界。
+2. 当前可追溯来源链由 canonical Git URL、owner、请求 ref、实际解析 commit 和加载前复核的 source/integrity lock 构成；它没有发布者签名语义。
+3. 权限或原生二进制声明变化、来源迁移和 owner 变化会阻断例行更新并要求重新审阅；发布者签名验证仍是未来能力。
+4. 用户当前能禁用、解除链接或移除受管快照；锁定旧版本回滚、最近权限使用界面和字段级 diff UI 尚未实现。
+5. 官方插件当前依赖代码审阅、不可变 commit/tag 与 registry lock；发布者签名、可验证构建证明和 SBOM 是后续正式分发目标。社区插件必须清楚标识为第三方。
 
 该取舍换来了真正的桌面扩展能力，同时把风险信息放在用户做出安装决定之前，而不是事后隐藏在技术术语中。
 
