@@ -26,6 +26,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { launcherInputUsesHorizontalGridNavigation } from "../lib/launcher-input-navigation";
 import { BlurText } from "./BlurText";
 
 /**
@@ -84,7 +85,7 @@ export interface SpotlightLauncherProps {
   recentItems?: readonly SpotlightLauncherItem[];
   /** Mirrors uTools' searchable-panel preference for showing recent items. */
   showRecent?: boolean;
-  /** Alt+H and a double-click in the search field toggle recent items. */
+  /** Alt+H toggles recent items without replacing native text-selection gestures. */
   onToggleRecent?: () => void;
   /** uTools-compatible preference: Space can execute the selected result. */
   spaceActivates?: boolean;
@@ -1683,6 +1684,9 @@ export function SpotlightLauncher({
       return;
     }
     if (event.key === "ArrowRight") {
+      if (!launcherInputUsesHorizontalGridNavigation(activeQuery)) {
+        return;
+      }
       event.preventDefault();
       if (hasSearchResultsGroup) {
         moveSelection(1);
@@ -1692,6 +1696,9 @@ export function SpotlightLauncher({
       return;
     }
     if (event.key === "ArrowLeft") {
+      if (!launcherInputUsesHorizontalGridNavigation(activeQuery)) {
+        return;
+      }
       event.preventDefault();
       if (hasSearchResultsGroup) {
         moveSelection(-1);
@@ -1769,7 +1776,6 @@ export function SpotlightLauncher({
                     aria-label="搜索 iHub"
                     autoComplete="off"
                     onChange={(event) => updateQuery(event.target.value)}
-                    onDoubleClick={onToggleRecent}
                     onKeyDown={handleSearchKeyDown}
                     onPaste={handleSearchPaste}
                     placeholder="搜索功能 / 粘贴文件、图片"
