@@ -6,6 +6,7 @@ import {
   Check,
   Clipboard,
   ChevronRight,
+  ChevronUp,
   Cloud,
   Code2,
   Download,
@@ -29,6 +30,10 @@ import {
 } from "lucide-react";
 import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { command, isDesktop } from "../lib/desktop";
+import {
+  pluginCatalogItemsForView,
+  pluginCatalogViewMode,
+} from "../lib/plugin-center-catalog-view";
 import {
   buildInstalledRailEntries,
   findCatalogEntry,
@@ -786,8 +791,27 @@ const pluginCenterStyles = `
 
   .plugin-center__featured-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 9px; }
   .plugin-center__featured-heading h3 { color: #e6e6e6; font-size: 16px; font-weight: 640; letter-spacing: 0; margin: 0; }
+  .plugin-center__featured-actions { align-items: center; display: flex; gap: 9px; }
   .plugin-center__featured-refresh { background: transparent; color: #d7d7d7; font-size: 10px; gap: 5px; padding: 3px; }
   .plugin-center__featured-refresh:hover { color: #fff; }
+  .plugin-center__catalog-toggle {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    color: #8dcaff;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 650;
+    gap: 4px;
+    min-height: 24px;
+    padding: 2px 5px;
+  }
+  .plugin-center__catalog-toggle:hover { background: rgba(255, 255, 255, .055); color: #b9dcff; }
+  .plugin-center__catalog-toggle:focus-visible { outline: 2px solid rgba(125, 228, 211, .76); outline-offset: 1px; }
+  .plugin-center__catalog-toggle-count { color: #7fddd0; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 500; }
 
   .plugin-center__market-grid {
     background: #303133;
@@ -1587,6 +1611,7 @@ export function PluginCenter({
       // catalog search that could make unrelated plugin actions look eligible.
       setFilter("all");
       setQuery("");
+      setIsAllCatalogExpanded(false);
       setSelectedInstalledId(null);
       setPendingLauncherContextTarget(null);
       setRequestingLauncherContext(false);
@@ -1598,6 +1623,7 @@ export function PluginCenter({
     }
     setFilter("all");
     setQuery(lookup);
+    setIsAllCatalogExpanded(false);
     setSelectedInstalledId(null);
   }, [initialSearch, launcherContext, open]);
 
@@ -1818,14 +1844,19 @@ export function PluginCenter({
       .sort((left, right) => Number(Boolean(right.installed)) - Number(Boolean(left.installed)));
   }, [filter, installedEntries, matchingPlugins, query]);
 
+  const catalogViewMode = pluginCatalogViewMode({
+    expanded: isAllCatalogExpanded,
+    filter,
+    query,
+  });
   const isDefaultMarketplace = filter === "all" && !query.trim();
-  const isCatalogPreview = isDefaultMarketplace && !isAllCatalogExpanded;
+  const isCatalogPreview = catalogViewMode === "preview";
   const displayedItems = useMemo<MarketplaceItem[]>(() => {
     const selectedItems = filter === "installed" && selectedInstalledId
       ? visibleItems.filter((item) => item.installed?.id === selectedInstalledId)
       : visibleItems;
-    return isCatalogPreview ? selectedItems.slice(0, 6) : selectedItems;
-  }, [filter, isCatalogPreview, selectedInstalledId, visibleItems]);
+    return pluginCatalogItemsForView(selectedItems, catalogViewMode);
+  }, [catalogViewMode, filter, selectedInstalledId, visibleItems]);
 
   const featuredEntries = useMemo<PluginCatalogEntry[]>(() => {
     const byId = new Map(pluginCatalog.map((entry) => [entry.id, entry]));
@@ -2249,6 +2280,7 @@ export function PluginCenter({
     setSelectedInstalledId(plugin.id);
     setFilter("installed");
     setQuery("");
+    setIsAllCatalogExpanded(false);
   };
 
   return (
@@ -2604,6 +2636,7 @@ export function PluginCenter({
                       setFilter("all");
                       setSelectedInstalledId(null);
                       setQuery("");
+                      setIsAllCatalogExpanded(true);
                     }}
                     type="button"
                   >
@@ -2616,6 +2649,7 @@ export function PluginCenter({
                       setFilter("installed");
                       setSelectedInstalledId(null);
                       setQuery("");
+                      setIsAllCatalogExpanded(false);
                     }}
                     type="button"
                   >
@@ -2630,6 +2664,7 @@ export function PluginCenter({
                         setFilter(category.id);
                         setSelectedInstalledId(null);
                         setQuery("");
+                        setIsAllCatalogExpanded(false);
                       }}
                       type="button"
                     >
@@ -2646,7 +2681,7 @@ export function PluginCenter({
                   <span className="plugin-center__market-count">{visibleItems.length} 项</span>
                 </div>
 
-                {!query && filter === "all" && featurePair.length ? (
+                {isCatalogPreview && featurePair.length ? (
                   <section aria-label="推荐插件">
                     <div className="plugin-center__feature-row">
                       {featurePair.map((entry) => {
@@ -2694,17 +2729,41 @@ export function PluginCenter({
                         );
                       })}
                     </div>
-                    <div className="plugin-center__featured-heading">
-                      <h3>精选</h3>
-                      <button className="plugin-center__featured-refresh" onClick={() => setFeatureOffset((value) => value + 1)} type="button">
-                        <Sparkles size={9} /> 换一批
-                      </button>
-                    </div>
                   </section>
                 ) : null}
 
+                {isDefaultMarketplace ? (
+                  <div className="plugin-center__featured-heading">
+                    <h3>{isCatalogPreview ? "精选" : "全部插件"}</h3>
+                    <div className="plugin-center__featured-actions">
+                      {isCatalogPreview ? (
+                        <button className="plugin-center__featured-refresh" onClick={() => setFeatureOffset((value) => value + 1)} type="button">
+                          <Sparkles size={9} /> 换一批
+                        </button>
+                      ) : null}
+                      <button
+                        aria-controls="plugin-center-catalog-items"
+                        aria-expanded={!isCatalogPreview}
+                        className="plugin-center__catalog-toggle"
+                        onClick={() => setIsAllCatalogExpanded((current) => !current)}
+                        type="button"
+                      >
+                        {isCatalogPreview ? "查看全部" : "收起"}
+                        <span className="plugin-center__catalog-toggle-count">{visibleItems.length}</span>
+                        {isCatalogPreview
+                          ? <ChevronRight aria-hidden="true" size={9} />
+                          : <ChevronUp aria-hidden="true" size={9} />}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 {displayedItems.length ? (
-                  <section aria-label="插件列表" className="plugin-center__market-grid">
+                  <section
+                    aria-label={isCatalogPreview ? "精选插件列表" : "插件列表"}
+                    className="plugin-center__market-grid"
+                    id="plugin-center-catalog-items"
+                  >
                     {displayedItems.map((item) => {
                       const Icon = iconForCatalog[item.entry.icon];
                       const plugin = item.installed;
@@ -2920,7 +2979,7 @@ export function PluginCenter({
                     换一个关键词，或使用右上角的 GitHub 导入安装你信任的项目。
                   </div>
                 )}
-                {isDefaultMarketplace ? (
+                {isCatalogPreview ? (
                   <section aria-label="排行榜" className="plugin-center__leaderboard">
                     <h3>排行榜</h3>
                     <div className="plugin-center__leaderboard-grid">
@@ -2930,7 +2989,12 @@ export function PluginCenter({
                           <button
                             className="plugin-center__leaderboard-card"
                             key={section.label}
-                            onClick={() => { setFilter(section.category); setQuery(""); setSelectedInstalledId(null); }}
+                            onClick={() => {
+                              setFilter(section.category);
+                              setQuery("");
+                              setSelectedInstalledId(null);
+                              setIsAllCatalogExpanded(false);
+                            }}
                             type="button"
                           >
                             <span className={`plugin-center__leaderboard-icon is-${section.tone}`}><Icon size={14} /></span>
