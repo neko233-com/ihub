@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { launcherResultRank, mergeLauncherSearchResults } from "./launcher-ranking";
+import {
+  launcherResultRank,
+  mergeLauncherSearchResults,
+  mergeLauncherSearchResultsWithUsage,
+} from "./launcher-ranking";
+import { recordLauncherUsage } from "./launcher-usage";
 import type { SearchResult } from "./types";
 
 function result(overrides: Partial<SearchResult> = {}): SearchResult {
@@ -90,5 +95,30 @@ describe("launcher result ranking", () => {
     expect(launcherResultRank(duplicateFile, "needle")).toBeGreaterThan(
       launcherResultRank(duplicateCommand, "needle"),
     );
+  });
+
+  it("uses local frequency only within the stronger text-relevance tiers", () => {
+    const now = 2_000_000_000_000;
+    let usage = recordLauncherUsage([], "often", now);
+    usage = recordLauncherUsage(usage, "often", now);
+    usage = recordLauncherUsage(usage, "often", now);
+
+    const ordered = mergeLauncherSearchResultsWithUsage(
+      "json",
+      usage,
+      now,
+      [result({ id: "exact", name: "json", kind: "command", score: 0 })],
+      [result({ id: "often", name: "json helper", kind: "command", score: 0 })],
+    );
+    expect(ordered.map((item) => item.id)).toEqual(["exact", "often"]);
+
+    const similarlyMatched = mergeLauncherSearchResultsWithUsage(
+      "json",
+      usage,
+      now,
+      [result({ id: "new", name: "json new", kind: "command", score: 0 })],
+      [result({ id: "often", name: "json helper", kind: "command", score: 0 })],
+    );
+    expect(similarlyMatched.map((item) => item.id)).toEqual(["often", "new"]);
   });
 });

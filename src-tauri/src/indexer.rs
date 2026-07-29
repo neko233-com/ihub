@@ -5124,14 +5124,32 @@ fn application_is_launcher_shortcut_eligible(path: &Path) -> bool {
 
 #[cfg(target_os = "macos")]
 fn collect_macos_application_entries() -> Vec<IndexedEntry> {
-    let mut roots = vec![ApplicationRoot {
-        path: PathBuf::from("/Applications"),
-        metadata: "应用程序",
-    }];
+    let mut roots = vec![
+        ApplicationRoot {
+            path: PathBuf::from("/System/Applications"),
+            metadata: "系统应用程序",
+        },
+        ApplicationRoot {
+            path: PathBuf::from("/Applications"),
+            metadata: "应用程序",
+        },
+        ApplicationRoot {
+            path: PathBuf::from("/System/Library/PreferencePanes"),
+            metadata: "系统偏好设置面板",
+        },
+        ApplicationRoot {
+            path: PathBuf::from("/Library/PreferencePanes"),
+            metadata: "偏好设置面板",
+        },
+    ];
     if let Some(home) = env::var_os("HOME") {
         roots.push(ApplicationRoot {
-            path: PathBuf::from(home).join("Applications"),
+            path: PathBuf::from(&home).join("Applications"),
             metadata: "应用程序 · 当前用户",
+        });
+        roots.push(ApplicationRoot {
+            path: PathBuf::from(home).join("Library/PreferencePanes"),
+            metadata: "偏好设置面板 · 当前用户",
         });
     }
 
@@ -5185,11 +5203,13 @@ fn collect_macos_application_entries() -> Vec<IndexedEntry> {
     applications
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn is_macos_app_bundle(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("app") || extension.eq_ignore_ascii_case("prefPane")
+        })
 }
 
 fn application_entry(path: PathBuf, metadata: &str) -> IndexedEntry {
@@ -7288,6 +7308,18 @@ mod tests {
         assert!(paths_are_real);
         assert!(kinds_are_applications);
         assert!(metadata_is_preserved);
+    }
+
+    #[test]
+    fn macos_application_bundle_shape_matches_apps_and_preference_panes() {
+        assert!(is_macos_app_bundle(Path::new("/Applications/Example.app")));
+        assert!(is_macos_app_bundle(Path::new(
+            "/System/Library/PreferencePanes/Displays.prefPane"
+        )));
+        assert!(is_macos_app_bundle(Path::new(
+            "/Library/PreferencePanes/Custom.PREFPANE"
+        )));
+        assert!(!is_macos_app_bundle(Path::new("/Applications/Archive.zip")));
     }
 
     #[test]

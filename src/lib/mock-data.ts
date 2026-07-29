@@ -1,6 +1,25 @@
 import type { SearchResult } from "./types";
+import browserPreviewApplicationIcon from "../../src-tauri/icons/64x64.png?inline";
+
+/**
+ * Browser QA cannot call the native Windows Shell service. This fixture uses
+ * iHub's own packaged raster icon and enters through the same strict PNG data
+ * URL map as a real `get_system_icons` response, so browser validation covers
+ * the renderer boundary without pretending to exercise Shell extraction.
+ */
+export const browserPreviewSystemIcons: Record<string, string> = {
+  "preview-application-ihub": browserPreviewApplicationIcon,
+};
 
 export const mockResults: SearchResult[] = [
+  {
+    id: "preview-application-ihub",
+    name: "iHub",
+    kind: "application",
+    score: 0.99,
+    metadata: "应用图标渲染预览 · 原生宿主在桌面端提供",
+    path: "C:\\Program Files\\iHub\\ihub.exe",
+  },
   {
     id: "welcome",
     name: "Welcome to iHub",

@@ -18,7 +18,7 @@ use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
 };
@@ -30,6 +30,7 @@ use crate::{
     clipboard_history::{
         ClipboardHistory, ClipboardHistoryRestoreResult, ClipboardHistorySnapshot,
     },
+    detached_plugin_window::DetachedPluginWindowRegistry,
     indexer::{default_root_strings, SearchIndex},
     launcher_hotkey::{normalize_launcher_hotkey, LauncherHotkeyStore, DEFAULT_LAUNCHER_HOTKEY},
     launcher_shortcuts::{LauncherShortcutStore, LauncherShortcutView},
@@ -43,8 +44,14 @@ use crate::{
     native_icons::NativeIconService,
     plugin_asset_server::{PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose},
     plugin_settings::PluginSettingsStore,
+    plugin_shortcuts::{
+        apply_plugin_shortcut_statuses, binding_is_current, binding_targets_frontend_command,
+        plan_plugin_shortcuts, PluginShortcutBinding, PluginShortcutEvent, PluginShortcutRegistry,
+        PluginShortcutStatus,
+    },
     plugins::PluginManager,
     project_template::create_plugin_project as create_plugin_project_template,
+    super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
 };
 
 const LAUNCHER_INITIAL_BLUR_GRACE: Duration = Duration::from_millis(700);
@@ -64,6 +71,9 @@ const MAX_SYSTEM_ICON_TARGETS: usize = 12;
 const MAX_SYSTEM_ICON_SEARCH_ID_BYTES: usize = 8 * 1024;
 const MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES: usize = 128;
 const MAX_SYSTEM_ICON_REQUEST_BYTES: usize = 32 * 1024;
+const MAX_SUPER_PANEL_TEXT_BYTES: usize = 4 * 1024;
+const IHUB_HELP_URL: &str = "https://github.com/neko233-com/ihub#readme";
+const IHUB_FEEDBACK_URL: &str = "https://github.com/neko233-com/ihub/issues";
 
 /// A small, platform-neutral work-area snapshot used to calculate the next
 /// launcher reveal. Keeping this calculation free of window APIs makes it
@@ -193,6 +203,46 @@ impl LauncherWorkArea {
             size,
         })
     }
+
+    fn super_panel_layout(
+        self,
+        scale_factor: f64,
+        trigger: PhysicalPosition<i32>,
+    ) -> Option<LauncherRevealLayout> {
+        if self.size.width == 0 || self.size.height == 0 {
+            return None;
+        }
+        let desired = PhysicalSize::new(
+            logical_dimension_to_physical(LAUNCHER_DESIGN_WIDTH_LOGICAL, scale_factor),
+            logical_dimension_to_physical(LAUNCHER_DESIGN_HEIGHT_LOGICAL, scale_factor),
+        );
+        let size = PhysicalSize::new(
+            desired.width.min(self.size.width),
+            desired.height.min(self.size.height),
+        );
+        let left = i64::from(self.position.x);
+        let top = i64::from(self.position.y);
+        let right = left + i64::from(self.size.width);
+        let bottom = top + i64::from(self.size.height);
+        let width = i64::from(size.width);
+        let height = i64::from(size.height);
+        let gap = i64::from(logical_dimension_to_physical(12.0, scale_factor));
+        let trigger_x = i64::from(trigger.x);
+        let trigger_y = i64::from(trigger.y);
+        let x = (trigger_x - width / 2).clamp(left, right.saturating_sub(width).max(left));
+        let below = trigger_y.saturating_add(gap);
+        let above = trigger_y.saturating_sub(gap).saturating_sub(height);
+        let y = if below.saturating_add(height) <= bottom {
+            below
+        } else {
+            above
+        }
+        .clamp(top, bottom.saturating_sub(height).max(top));
+        Some(LauncherRevealLayout {
+            position: PhysicalPosition::new(clamp_i64_to_i32(x), clamp_i64_to_i32(y)),
+            size,
+        })
+    }
 }
 
 fn logical_dimension_to_physical(logical_dimension: f64, scale_factor: f64) -> u32 {
@@ -226,12 +276,28 @@ pub struct AppState {
     launcher_hotkey_change: Mutex<()>,
     launcher_hotkey: Mutex<LauncherHotkeyStatus>,
     launcher_hotkey_toggle: Mutex<LauncherHotkeyToggleGate>,
+    /// Serializes best-effort plugin binding refreshes without ever sharing
+    /// the launcher's registration transaction or unregistering its recovery
+    /// accelerator.
+    plugin_shortcut_change: Mutex<()>,
+    plugin_shortcuts: Mutex<PluginShortcutRegistry>,
+    super_panel: Arc<SuperPanelState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum SuperPanelContextPayload {
+    Files { files: Vec<ClipboardFile> },
+    Image { image: ClipboardImage },
+    Text { text: String },
+    Empty,
 }
 
 impl AppState {
     fn new(app_data_dir: PathBuf) -> Self {
         let plugins = PluginManager::new();
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
+        let super_panel = Arc::new(SuperPanelState::with_storage(app_data_dir.clone()));
         // Older development builds persisted every setting. Before plugin
         // frontends can access the host, scrub any value now declared secret
         // from that JSON file in one atomic update.
@@ -255,6 +321,9 @@ impl AppState {
             launcher_hotkey_change: Mutex::new(()),
             launcher_hotkey: Mutex::new(LauncherHotkeyStatus::unavailable()),
             launcher_hotkey_toggle: Mutex::new(LauncherHotkeyToggleGate::default()),
+            plugin_shortcut_change: Mutex::new(()),
+            plugin_shortcuts: Mutex::new(PluginShortcutRegistry::default()),
+            super_panel,
         }
     }
 
@@ -291,6 +360,23 @@ impl AppState {
             .launcher_hotkey_toggle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = LauncherHotkeyToggleGate::default();
+    }
+
+    fn plugin_shortcut_binding(&self, shortcut: &str) -> Option<PluginShortcutBinding> {
+        self.plugin_shortcuts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .get(shortcut)
+            .cloned()
+    }
+
+    fn project_plugin_shortcut_statuses(&self, plugins: &mut [PluginInfo]) {
+        let registry = self
+            .plugin_shortcuts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        apply_plugin_shortcut_statuses(plugins, &registry.statuses);
     }
 }
 
@@ -342,6 +428,10 @@ struct PluginHostState {
     /// Query receivers are owned by the host, not the iframe. A response must
     /// match both its opaque request id and the iframe's fixed plugin id.
     pending_searches: Mutex<HashMap<String, PendingPluginSearch>>,
+    /// Bounded, short-lived search snapshots let the trusted launcher select
+    /// an exact result without resubmitting plugin-controlled payload data
+    /// when the owning frontend lives in a detached host.
+    issued_search_results: Mutex<HashMap<String, IssuedPluginSearchResults>>,
     /// A frontend can access only a directory selected through the native
     /// picker during its own session. The opaque id is scoped to the plugin
     /// and expires quickly; it is never a reusable filesystem path grant.
@@ -385,6 +475,7 @@ impl Default for PluginHostState {
             search_providers: RwLock::new(HashMap::new()),
             secret_settings: RwLock::new(HashMap::new()),
             pending_searches: Mutex::new(HashMap::new()),
+            issued_search_results: Mutex::new(HashMap::new()),
             filesystem_grants: Mutex::new(HashMap::new()),
             file_grants: Mutex::new(HashMap::new()),
             launcher_contexts: Mutex::new(HashMap::new()),
@@ -765,12 +856,22 @@ struct PendingPluginSearch {
     response: SyncSender<Result<Vec<PluginSearchResult>, String>>,
 }
 
+#[derive(Debug)]
+struct IssuedPluginSearchResults {
+    plugin_id: String,
+    provider_id: String,
+    results: Vec<PluginSearchResult>,
+    issued_at: Instant,
+}
+
 const PLUGIN_SEARCH_TIMEOUT: Duration = Duration::from_millis(280);
 const MAX_PENDING_PLUGIN_SEARCHES: usize = 24;
 const MAX_PLUGIN_SEARCH_RESULTS: usize = 6;
 const MAX_PLUGIN_SEARCH_QUERY_BYTES: usize = 512;
 const MAX_PLUGIN_SEARCH_TEXT_CHARS: usize = 320;
 const MAX_PLUGIN_SEARCH_PAYLOAD_BYTES: usize = 8 * 1024;
+const PLUGIN_SEARCH_SELECTION_TTL: Duration = Duration::from_secs(60);
+const MAX_ISSUED_PLUGIN_SEARCHES: usize = 64;
 const FILESYSTEM_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const BATCH_RENAME_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_FILESYSTEM_GRANTS: usize = 48;
@@ -856,6 +957,33 @@ pub struct PluginHostRequest {
 #[derive(Debug, Deserialize)]
 pub struct PluginHostCall {
     request: PluginHostRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum DetachedPluginFrontendEventRequest {
+    Command {
+        plugin_id: String,
+        command_id: String,
+    },
+    SearchSelection {
+        plugin_id: String,
+        provider_id: String,
+        request_id: String,
+        result_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredPluginSearchProvider {
+    plugin_id: String,
+    provider_id: String,
 }
 
 #[tauri::command]
@@ -1050,34 +1178,81 @@ pub async fn unpin_launcher_shortcut(
 
 #[tauri::command]
 pub fn list_plugins(state: State<'_, AppState>) -> Vec<PluginInfo> {
-    state.plugins.list()
+    let mut plugins = state.plugins.list();
+    state.project_plugin_shortcut_statuses(&mut plugins);
+    plugins
 }
 
 #[tauri::command]
 pub async fn get_plugin_frontend_url(
     plugin_id: String,
     purpose: Option<PluginFrontendPurpose>,
+    window: tauri::WebviewWindow,
+    detached: State<'_, DetachedPluginWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<PluginFrontendLease, String> {
+    if !is_plugin_id(&plugin_id) {
+        return Err("Invalid plugin ID.".to_owned());
+    }
+    let caller_label = window.label().to_owned();
+    let purpose = purpose.unwrap_or(PluginFrontendPurpose::Surface);
+    let detached_caller = caller_label != "main";
+    if detached_caller {
+        detached.validate_window_plugin(&caller_label, &plugin_id)?;
+        if purpose != PluginFrontendPurpose::Surface {
+            return Err(
+                "A detached plugin window can request only its visible surface lease.".to_owned(),
+            );
+        }
+    } else if detached.plugin_is_detached(&plugin_id) {
+        // One plugin runtime owns one set of command/provider registrations.
+        // A launcher surface or hidden search runtime must not silently
+        // replace the loopback lease of an already detached window.
+        return Err(format!(
+            "Plugin '{plugin_id}' is already open in its detached window."
+        ));
+    }
+
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let purpose = purpose.unwrap_or(PluginFrontendPurpose::Surface);
-    tauri::async_runtime::spawn_blocking(move || {
+    let lease_plugin_id = plugin_id.clone();
+    let lease = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
-        plugin_assets.with_plugin_operation(&plugin_id, || {
-            let bundle = plugins.frontend_asset_bundle(&plugin_id)?;
+        plugin_assets.with_plugin_operation(&lease_plugin_id, || {
+            let bundle = plugins.frontend_asset_bundle(&lease_plugin_id)?;
             let resolved_plugin_id = bundle.plugin_id.clone();
             let lease = server.issue(bundle, purpose)?;
             // A visible surface and hidden search runtime hand off ownership
             // for one plugin. A fresh lease therefore starts with no stale
             // command/provider/grant state from a prior document.
             clear_plugin_runtime_state(&host, &resolved_plugin_id);
-            Ok(lease)
+            Ok::<PluginFrontendLease, String>(lease)
         })
     })
     .await
-    .map_err(|error| format!("Plugin frontend bundle task failed: {error}"))?
+    .map_err(|error| format!("Plugin frontend bundle task failed: {error}"))??;
+
+    // Lease issuance atomically cleared the prior runtime registrations.
+    // Project that native state change before the replacement iframe can
+    // register its declarations, including when ownership moves to/from a
+    // detached window.
+    emit_plugin_search_providers_changed(window.app_handle(), &plugin_id, None, false);
+    if detached_caller {
+        if let Err(error) = detached.bind_lease(&caller_label, &plugin_id, &lease.lease_id) {
+            if let Some(released_plugin_id) = release_plugin_frontend_lease(&lease.lease_id, &state)
+            {
+                emit_plugin_search_providers_changed(
+                    window.app_handle(),
+                    &released_plugin_id,
+                    None,
+                    false,
+                );
+            }
+            return Err(error);
+        }
+    }
+    Ok(lease)
 }
 
 /// Stages one launcher-context transfer after the trusted iHub parent has
@@ -1151,6 +1326,27 @@ pub fn revoke_plugin_launcher_context(
     revoke_plugin_launcher_context_transfer(&state.host, &plugin_id, &context_id)
 }
 
+fn validate_plugin_renderer_lease_caller(
+    window: &tauri::WebviewWindow,
+    detached: &DetachedPluginWindowRegistry,
+    plugin_id: &str,
+    lease_id: &str,
+) -> Result<(), String> {
+    if window.label() == "main" {
+        if detached.plugin_is_detached(plugin_id) {
+            return Err(format!(
+                "Plugin '{plugin_id}' is owned by its detached window."
+            ));
+        }
+        return Ok(());
+    }
+    detached.validate_window_plugin(window.label(), plugin_id)?;
+    if !detached.owns_lease(window.label(), lease_id) {
+        return Err("This plugin lease does not belong to the calling window.".to_owned());
+    }
+    Ok(())
+}
+
 /// Creates a one-time cursor-color approval only for the trusted React host
 /// after it has shown its own visible confirmation overlay. Plugin iframes are
 /// remote loopback origins and cannot call this Tauri command directly; they
@@ -1159,11 +1355,14 @@ pub fn revoke_plugin_launcher_context(
 pub fn issue_plugin_cursor_color_approval(
     plugin_id: String,
     lease_id: String,
+    window: tauri::WebviewWindow,
+    detached: State<'_, DetachedPluginWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<PluginCursorColorApproval, String> {
     if !is_plugin_id(&plugin_id) {
         return Err("Invalid plugin ID.".to_owned());
     }
+    validate_plugin_renderer_lease_caller(&window, &detached, &plugin_id, &lease_id)?;
     let plugin_assets = state.plugin_assets.clone();
     plugin_assets.with_plugin_bridge_operation(&plugin_id, || {
         if !plugin_assets.is_active_surface_for(&lease_id, &plugin_id) {
@@ -1192,40 +1391,63 @@ pub fn issue_plugin_cursor_color_approval(
 /// Releases the unique loopback source issued for an iframe. The URL never
 /// points at Tauri's asset protocol, so WebView2 subframe initialization cannot
 /// make a plugin frontend a local Tauri IPC caller.
-#[tauri::command]
-pub fn release_plugin_frontend_url(lease_id: String, state: State<'_, AppState>) {
+fn release_plugin_frontend_lease(lease_id: &str, state: &AppState) -> Option<String> {
     // Use the same transition lock as bridge calls and plugin replacement.
     // Without it, a close/reload could remove a lease between `is_active_for`
     // and a sensitive host operation that had already begun.
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
     plugin_assets.with_plugin_operation("frontend-release", || {
-        if let Some(plugin_id) = plugin_assets.release(&lease_id) {
-            // Closing a surface is a cancellation boundary. In particular,
-            // a just-dispatched launcher-context token must not remain
-            // consumable while no matching iframe is alive.
-            clear_plugin_runtime_state(&host, &plugin_id);
-        }
-    });
+        let plugin_id = plugin_assets.release(lease_id)?;
+        // Closing a surface is a cancellation boundary. In particular,
+        // a just-dispatched launcher-context token must not remain
+        // consumable while no matching iframe is alive.
+        clear_plugin_runtime_state(&host, &plugin_id);
+        Some(plugin_id)
+    })
+}
+
+#[tauri::command]
+pub fn release_plugin_frontend_url(
+    lease_id: String,
+    window: tauri::WebviewWindow,
+    detached: State<'_, DetachedPluginWindowRegistry>,
+    state: State<'_, AppState>,
+) {
+    if window.label() != "main" && !detached.unbind_owned_lease(window.label(), &lease_id) {
+        return;
+    }
+    if let Some(plugin_id) = release_plugin_frontend_lease(&lease_id, &state) {
+        emit_plugin_search_providers_changed(window.app_handle(), &plugin_id, None, false);
+    }
 }
 
 /// Renews a renderer-owned frontend lease. The main React host sends a small
 /// heartbeat while its iframe exists so a crashed/reloaded renderer cannot
 /// permanently consume a loopback listener.
 #[tauri::command]
-pub fn touch_plugin_frontend_lease(lease_id: String, state: State<'_, AppState>) -> bool {
+pub fn touch_plugin_frontend_lease(
+    lease_id: String,
+    window: tauri::WebviewWindow,
+    detached: State<'_, DetachedPluginWindowRegistry>,
+    state: State<'_, AppState>,
+) -> bool {
+    if window.label() != "main" && !detached.owns_lease(window.label(), &lease_id) {
+        return false;
+    }
     state.plugin_assets.touch(&lease_id)
 }
 
 #[tauri::command]
 pub async fn install_plugin_from_git(
     source: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PluginInfo, String> {
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.install_from_git(&source)?;
@@ -1236,7 +1458,10 @@ pub async fn install_plugin_from_git(
         })
     })
     .await
-    .map_err(|error| format!("Plugin installation task failed: {error}"))?
+    .map_err(|error| format!("Plugin installation task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
+    state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    Ok(plugin)
 }
 
 /// Resolves an installed Git plugin's saved source/ref without changing its
@@ -1275,6 +1500,7 @@ pub async fn check_automatic_plugin_updates(
 pub async fn update_plugin_from_git(
     plugin_id: String,
     expected_commit: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PluginUpdateResult, String> {
     let plugins = state.plugins.clone();
@@ -1342,6 +1568,9 @@ pub async fn update_plugin_from_git(
     // `update_from_git` may return an unchanged result after re-resolving a
     // moving ref. In either case the caller refreshes the catalog and may
     // explicitly reopen a newly issued frontend lease.
+    let mut update = update;
+    refresh_plugin_shortcuts(&app);
+    state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
     Ok(update)
 }
 
@@ -1351,12 +1580,13 @@ pub async fn update_plugin_from_git(
 #[tauri::command]
 pub async fn link_plugin_from_local(
     directory: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PluginInfo, String> {
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.link_from_local(&directory)?;
@@ -1370,7 +1600,10 @@ pub async fn link_plugin_from_local(
         })
     })
     .await
-    .map_err(|error| format!("Local plugin link task failed: {error}"))?
+    .map_err(|error| format!("Local plugin link task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
+    state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    Ok(plugin)
 }
 
 /// Lists the fixed native allowlist of first-party projects physically
@@ -1393,12 +1626,13 @@ pub async fn list_official_workspace_plugins(
 #[tauri::command]
 pub async fn link_official_workspace_plugin(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PluginInfo, String> {
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.link_official_workspace_plugin(&plugin_id)?;
@@ -1409,7 +1643,10 @@ pub async fn link_official_workspace_plugin(
         })
     })
     .await
-    .map_err(|error| format!("Official workspace plugin link task failed: {error}"))?
+    .map_err(|error| format!("Official workspace plugin link task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
+    state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    Ok(plugin)
 }
 
 /// Removes iHub's local-development link metadata without deleting or editing
@@ -1417,6 +1654,7 @@ pub async fn link_official_workspace_plugin(
 #[tauri::command]
 pub async fn unlink_plugin_from_local(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let plugins = state.plugins.clone();
@@ -1433,7 +1671,9 @@ pub async fn unlink_plugin_from_local(
         })
     })
     .await
-    .map_err(|error| format!("Local plugin unlink task failed: {error}"))?
+    .map_err(|error| format!("Local plugin unlink task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
+    Ok(())
 }
 
 /// Persists a plugin's enabled state. Disabling clears registered iframe
@@ -1449,7 +1689,7 @@ pub async fn set_plugin_enabled(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let update = tauri::async_runtime::spawn_blocking(move || {
+    let mut update = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let update = plugins.set_enabled(&plugin_id, enabled)?;
@@ -1463,6 +1703,8 @@ pub async fn set_plugin_enabled(
     })
     .await
     .map_err(|error| format!("Plugin lifecycle task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
+    state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
     let _ = app.emit(
         &format!("ihub://plugin/{}/lifecycle", update.plugin.id),
         json!({ "state": if enabled { "enabled" } else { "disabled" } }),
@@ -1505,6 +1747,7 @@ pub async fn uninstall_managed_plugin(
     })
     .await
     .map_err(|error| format!("Plugin uninstall task failed: {error}"))??;
+    refresh_plugin_shortcuts(&app);
     let _ = app.emit(
         &format!("ihub://plugin/{}/lifecycle", removed.plugin_id),
         json!({ "state": "uninstalled" }),
@@ -1568,19 +1811,69 @@ pub async fn sample_cursor_color(
     .map_err(|error| format!("Cursor color sampling task failed: {error}"))?
 }
 
+/// Starts one explicit, short-lived live magnifier session for the built-in
+/// color tool. The opaque capability expires after 30 seconds and is never
+/// projected into a plugin frontend.
+#[tauri::command]
+pub fn begin_cursor_color_picker(
+) -> Result<crate::native_color_picker::CursorColorPickerSession, String> {
+    crate::native_color_picker::begin_cursor_color_picker()
+}
+
+/// Reads one bounded 9×9 cursor neighborhood under the session rate limit.
+/// Native code only observes pixels and current button/key state; it never
+/// posts, moves, clicks, or otherwise injects input.
+#[tauri::command]
+pub async fn sample_cursor_color_neighborhood(
+    session_id: String,
+) -> Result<crate::native_color_picker::CursorColorNeighborhoodSample, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::native_color_picker::sample_cursor_color_neighborhood(&session_id)
+    })
+    .await
+    .map_err(|error| format!("Live cursor color sampling task failed: {error}"))?
+}
+
+/// Ends a live magnifier capability. Repeating cleanup is harmless.
+#[tauri::command]
+pub fn end_cursor_color_picker(session_id: String) -> Result<(), String> {
+    crate::native_color_picker::end_cursor_color_picker(&session_id)
+}
+
 /// Captures exactly one requested monitor as a bounded PNG payload. The host
 /// UI may call this after a direct click; it is intentionally not made
 /// available to plugin bridges, timers, or background services.
 #[tauri::command]
 pub async fn capture_native_screenshot(
+    window: tauri::WebviewWindow,
     request: Option<crate::native_screenshot::NativeScreenshotRequest>,
 ) -> Result<crate::native_screenshot::NativeScreenshot, String> {
     let request = request.unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || {
+    window
+        .hide()
+        .map_err(|error| format!("iHub could not hide its own window before capture: {error}"))?;
+    let capture_result = match tauri::async_runtime::spawn_blocking(move || {
+        // Let the compositor finish removing only iHub's own window. This does
+        // not move the pointer or inject any desktop input.
+        std::thread::sleep(std::time::Duration::from_millis(120));
         crate::native_screenshot::capture_native_screenshot(request)
     })
     .await
-    .map_err(|error| format!("Native screenshot task failed: {error}"))?
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("Native screenshot task failed: {error}")),
+    };
+
+    let show_result = window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| format!("iHub could not restore its window after capture: {error}"));
+    match (capture_result, show_result) {
+        (Ok(capture), Ok(())) => Ok(capture),
+        (Err(capture_error), Ok(())) => Err(capture_error),
+        (Ok(_), Err(show_error)) => Err(show_error),
+        (Err(capture_error), Err(show_error)) => Err(format!("{capture_error}; {show_error}")),
+    }
 }
 
 /// Returns display-only profile metadata. Reading this list never touches the
@@ -1745,6 +2038,9 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<AutostartStatus, S
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
+    if let Err(error) = app.state::<AppState>().super_panel.shutdown_listener() {
+        eprintln!("iHub could not stop the Super Panel listener before exit: {error}");
+    }
     app.exit(0);
 }
 
@@ -1755,7 +2051,9 @@ pub fn set_launcher_hotkey(
     accelerator: String,
 ) -> Result<LauncherHotkeyStatus, String> {
     let accelerator = normalize_launcher_hotkey(&accelerator)?;
-    replace_launcher_hotkey(&app, &state, accelerator.clone(), Some(accelerator))
+    let status = replace_launcher_hotkey(&app, &state, accelerator.clone(), Some(accelerator))?;
+    refresh_plugin_shortcuts(&app);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1763,7 +2061,9 @@ pub fn reset_launcher_hotkey(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<LauncherHotkeyStatus, String> {
-    replace_launcher_hotkey(&app, &state, LAUNCHER_PRIMARY_HOTKEY.to_owned(), None)
+    let status = replace_launcher_hotkey(&app, &state, LAUNCHER_PRIMARY_HOTKEY.to_owned(), None)?;
+    refresh_plugin_shortcuts(&app);
+    Ok(status)
 }
 
 /// Replaces a launcher binding without first dropping the working one.
@@ -2000,6 +2300,75 @@ fn plugin_clipboard_history_snapshot(history: &ClipboardHistory) -> ClipboardHis
     history.text_snapshot(Some(MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS))
 }
 
+#[tauri::command]
+pub fn get_super_panel_status(state: State<'_, AppState>) -> SuperPanelStatus {
+    state.super_panel.status()
+}
+
+#[tauri::command]
+pub fn set_super_panel_enabled(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SuperPanelStatus, String> {
+    // Persist and project the opt-in before touching the OS listener. This
+    // makes an unwritable preference a hard no-op instead of an orphaned hook.
+    state.super_panel.set_enabled_persisted(enabled)?;
+    if enabled {
+        ensure_super_panel_listener(&app)?;
+    }
+    Ok(state.super_panel.status())
+}
+
+/// Consumes exactly one recent, host-issued long-right-click token and then
+/// snapshots only the current clipboard payload. This deliberately does not
+/// inject Ctrl/Cmd+C or inspect another application's selection. File paths
+/// are canonicalized metadata, images are bounded/re-encoded, and text is
+/// truncated before it can cross IPC.
+#[tauri::command]
+pub fn consume_super_panel_context(
+    context_token: String,
+    state: State<'_, AppState>,
+) -> Result<SuperPanelContextPayload, String> {
+    state.super_panel.consume_context(&context_token)?;
+
+    if let Ok(paths) =
+        crate::clipboard_access::with_clipboard(|clipboard| clipboard.get().file_list())
+    {
+        let files = clipboard_files_from_paths(paths);
+        if !files.is_empty() {
+            return Ok(SuperPanelContextPayload::Files { files });
+        }
+    }
+
+    if let Ok(image) = crate::clipboard_access::with_clipboard(|clipboard| clipboard.get_image()) {
+        if let Ok(image) = clipboard_image_from_rgba(image) {
+            return Ok(SuperPanelContextPayload::Image { image });
+        }
+    }
+
+    if let Ok(text) = crate::clipboard_access::with_clipboard(|clipboard| clipboard.get_text()) {
+        let text = truncate_utf8_bytes(text, MAX_SUPER_PANEL_TEXT_BYTES);
+        if !text.trim().is_empty() {
+            return Ok(SuperPanelContextPayload::Text { text });
+        }
+    }
+
+    Ok(SuperPanelContextPayload::Empty)
+}
+
+fn truncate_utf8_bytes(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
 /// Reads only native clipboard file-list metadata after the user explicitly
 /// pastes a file payload into the launcher. Text and image clipboard contents
 /// stay in the renderer's standard paste flow; no background clipboard scan
@@ -2162,13 +2531,21 @@ impl Write for LimitedPngBuffer {
 #[tauri::command]
 pub async fn plugin_host_call(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     request: PluginHostCall,
+    detached: State<'_, DetachedPluginWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let request = request.request;
     if !is_plugin_id(&request.plugin_id) {
         return Err("Invalid plugin ID.".to_owned());
     }
+    validate_plugin_renderer_lease_caller(
+        &window,
+        &detached,
+        &request.plugin_id,
+        &request.lease_id,
+    )?;
     let request_plugin_id = request.plugin_id.clone();
     let plugin_assets = state.plugin_assets.clone();
     let server = plugin_assets.clone();
@@ -2258,6 +2635,31 @@ pub async fn plugin_host_call(
     })
 }
 
+fn emit_plugin_search_providers_changed(
+    app: &AppHandle,
+    plugin_id: &str,
+    provider_id: Option<&str>,
+    registered: bool,
+) {
+    let payload = plugin_search_providers_changed_payload(plugin_id, provider_id, registered);
+    let _ = app.emit_to("main", "ihub://plugin-search-providers-changed", payload);
+}
+
+fn plugin_search_providers_changed_payload(
+    plugin_id: &str,
+    provider_id: Option<&str>,
+    registered: bool,
+) -> Value {
+    let mut payload = json!({
+        "pluginId": plugin_id,
+        "registered": registered,
+    });
+    if let Some(provider_id) = provider_id {
+        payload["providerId"] = Value::String(provider_id.to_owned());
+    }
+    payload
+}
+
 /// Handles a request only after the parent-bound frontend lease has been
 /// checked under the same transition lock used by plugin updates and links.
 fn plugin_host_call_for_active_lease(
@@ -2275,6 +2677,15 @@ fn plugin_host_call_for_active_lease(
                 .ok_or_else(|| "commands.register requires definition.id.".to_owned())?;
             if !is_plugin_id(command_id) {
                 return Err("Invalid plugin command ID.".to_owned());
+            }
+            state
+                .plugins
+                .ensure_frontend_command(&request.plugin_id, command_id)?;
+            if definition.get("shortcut").is_some() || definition.get("icon").is_some() {
+                return Err(
+                    "Runtime command registration cannot add artwork or global shortcuts; declare them in plugin.json."
+                        .to_owned(),
+                );
             }
             state
                 .host
@@ -2300,7 +2711,10 @@ fn plugin_host_call_for_active_lease(
             }
             let request_id = next_request_id();
             let event_name = format!("ihub://plugin/{}/command", request.plugin_id);
-            app.emit(
+            emit_plugin_event_to_owner(
+                app,
+                state,
+                &request.plugin_id,
                 &event_name,
                 json!({
                     "requestId": request_id,
@@ -2349,6 +2763,12 @@ fn plugin_host_call_for_active_lease(
                     host_key(&request.plugin_id, provider_id),
                     definition.clone(),
                 );
+            emit_plugin_search_providers_changed(
+                app,
+                &request.plugin_id,
+                Some(provider_id),
+                true,
+            );
             Ok(json!({ "registered": true }))
         }
         "search.unregister" => {
@@ -2359,6 +2779,12 @@ fn plugin_host_call_for_active_lease(
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&host_key(&request.plugin_id, provider_id));
+            emit_plugin_search_providers_changed(
+                app,
+                &request.plugin_id,
+                Some(provider_id),
+                false,
+            );
             Ok(json!({ "unregistered": true }))
         }
         "settings.get" => {
@@ -2407,6 +2833,7 @@ fn plugin_host_call_for_active_lease(
         "lifecycle.ready" => Ok(json!({ "ok": true })),
         "lifecycle.dispose" => {
             clear_plugin_runtime_state(&state.host, &request.plugin_id);
+            emit_plugin_search_providers_changed(app, &request.plugin_id, None, false);
             Ok(json!({ "ok": true }))
         }
         "launcherContext.consume" => {
@@ -2645,6 +3072,218 @@ fn ensure_plugin_host_request_is_allowed(
     Ok(())
 }
 
+fn detached_plugin_event_target(
+    app: &AppHandle,
+    state: &AppState,
+    plugin_id: &str,
+) -> Result<Option<String>, String> {
+    let detached = app.state::<DetachedPluginWindowRegistry>();
+    let Some((label, lease_id)) = detached.window_label_and_lease_for_plugin(plugin_id) else {
+        return if detached.plugin_is_detached(plugin_id) {
+            Err(format!(
+                "Plugin '{plugin_id}' detached window is still loading; try the action again."
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    if !state
+        .plugin_assets
+        .is_active_surface_for(&lease_id, plugin_id)
+    {
+        return Err(format!(
+            "Plugin '{plugin_id}' detached surface lease is no longer active."
+        ));
+    }
+    if app.get_webview_window(&label).is_none() {
+        return Err(format!(
+            "Plugin '{plugin_id}' detached window is no longer available."
+        ));
+    }
+    Ok(Some(label))
+}
+
+fn emit_plugin_event_to_owner(
+    app: &AppHandle,
+    state: &AppState,
+    plugin_id: &str,
+    event_name: &str,
+    payload: Value,
+) -> Result<(), String> {
+    let target =
+        detached_plugin_event_target(app, state, plugin_id)?.unwrap_or_else(|| "main".to_owned());
+    app.emit_to(&target, event_name, payload)
+        .map_err(|error| format!("Could not deliver plugin event: {error}"))
+}
+
+fn resolve_issued_plugin_search_selection(
+    host: &PluginHostState,
+    plugin_id: &str,
+    provider_id: &str,
+    request_id: &str,
+    result_id: &str,
+    now: Instant,
+) -> Result<Value, String> {
+    let mut issued = host
+        .issued_search_results
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_expired_issued_plugin_searches(&mut issued, now);
+    let search = issued.get(request_id).ok_or_else(|| {
+        "This plugin search result has expired; search again before selecting it.".to_owned()
+    })?;
+    if search.plugin_id != plugin_id || search.provider_id != provider_id {
+        return Err("This plugin search result belongs to another provider.".to_owned());
+    }
+    let payload = search
+        .results
+        .iter()
+        .find(|result| result.id == result_id)
+        .map(|result| result.payload.clone().unwrap_or(Value::Null))
+        .ok_or_else(|| {
+            "This plugin search result no longer exists in its issued response.".to_owned()
+        })?;
+    // Selection is one-shot. Removing the snapshot while the same mutex is
+    // held prevents two concurrent launcher activations from delivering the
+    // same plugin result twice.
+    issued.remove(request_id);
+    Ok(payload)
+}
+
+#[tauri::command]
+pub fn dispatch_detached_plugin_frontend_event(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    request: DetachedPluginFrontendEventRequest,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("Only the trusted main iHub surface can dispatch launcher events.".to_owned());
+    }
+
+    let plugin_id = match &request {
+        DetachedPluginFrontendEventRequest::Command { plugin_id, .. }
+        | DetachedPluginFrontendEventRequest::SearchSelection { plugin_id, .. } => plugin_id,
+    };
+    if !is_plugin_id(plugin_id) {
+        return Err("Invalid plugin ID.".to_owned());
+    }
+    state.plugins.ensure_plugin_enabled(plugin_id)?;
+    let Some(target) = detached_plugin_event_target(&app, &state, plugin_id)? else {
+        return Ok(false);
+    };
+
+    let (event_name, payload) = match request {
+        DetachedPluginFrontendEventRequest::Command {
+            plugin_id,
+            command_id,
+        } => {
+            if !is_plugin_id(&command_id) {
+                return Err("Invalid plugin command ID.".to_owned());
+            }
+            let plugin = state
+                .plugins
+                .list()
+                .into_iter()
+                .find(|plugin| plugin.enabled && plugin.id == plugin_id)
+                .ok_or_else(|| format!("Plugin '{plugin_id}' is not available."))?;
+            let command = plugin
+                .commands
+                .iter()
+                .find(|command| command.id == command_id)
+                .ok_or_else(|| {
+                    format!("Plugin command '{plugin_id}/{command_id}' no longer exists.")
+                })?;
+            if command.execution != "frontend"
+                && (plugin.frontend_entry.is_none() || plugin.has_native_worker)
+            {
+                return Err(
+                    "Native plugin commands must use the launcher's reviewed worker path."
+                        .to_owned(),
+                );
+            }
+            if !state
+                .host
+                .commands
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&host_key(&plugin_id, &command_id))
+            {
+                return Err(format!(
+                    "Plugin command '{plugin_id}/{command_id}' is not registered."
+                ));
+            }
+            let request_id = next_request_id();
+            (
+                format!("ihub://plugin/{plugin_id}/command"),
+                json!({
+                    "requestId": request_id,
+                    "commandId": command_id,
+                    "input": Value::Null,
+                    "context": Value::Null,
+                }),
+            )
+        }
+        DetachedPluginFrontendEventRequest::SearchSelection {
+            plugin_id,
+            provider_id,
+            request_id,
+            result_id,
+        } => {
+            if !is_plugin_id(&provider_id)
+                || request_id.is_empty()
+                || request_id.len() > 128
+                || request_id.chars().any(char::is_control)
+                || result_id.trim().is_empty()
+                || result_id.chars().count() > 160
+            {
+                return Err("Invalid plugin search selection.".to_owned());
+            }
+            if !state
+                .plugins
+                .has_declared_search_provider(&plugin_id, &provider_id)?
+                || !state
+                    .host
+                    .search_providers
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(&host_key(&plugin_id, &provider_id))
+            {
+                return Err(format!(
+                    "Plugin search provider '{plugin_id}/{provider_id}' is not registered."
+                ));
+            }
+            let selected_payload = resolve_issued_plugin_search_selection(
+                &state.host,
+                &plugin_id,
+                &provider_id,
+                &request_id,
+                &result_id,
+                Instant::now(),
+            )?;
+            let selection_request_id = next_request_id();
+            (
+                format!("ihub://plugin/{plugin_id}/event/search.select"),
+                json!({
+                    "requestId": selection_request_id,
+                    "providerId": provider_id,
+                    "resultId": result_id,
+                    "payload": selected_payload,
+                }),
+            )
+        }
+    };
+
+    app.emit_to(&target, &event_name, payload)
+        .map_err(|error| format!("Could not deliver detached plugin event: {error}"))?;
+    if let Some(detached_window) = app.get_webview_window(&target) {
+        let _ = detached_window.unminimize();
+        let _ = detached_window.show();
+        let _ = detached_window.set_focus();
+    }
+    Ok(true)
+}
+
 // Tauri exposes these as individually named IPC arguments. Wrapping them in a
 // request object would change the existing frontend command ABI.
 #[allow(clippy::too_many_arguments)]
@@ -2709,7 +3348,10 @@ pub fn invoke_plugin_frontend_command(
             })
             .transpose()?;
         let event_name = format!("ihub://plugin/{plugin_id}/command");
-        if let Err(error) = app.emit(
+        if let Err(error) = emit_plugin_event_to_owner(
+            &app,
+            &state,
+            &plugin_id,
             &event_name,
             json!({
                 "requestId": request_id,
@@ -2735,6 +3377,50 @@ pub fn invoke_plugin_frontend_command(
     } else {
         dispatch()
     }
+}
+
+#[tauri::command]
+pub fn list_registered_plugin_search_providers(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Vec<RegisteredPluginSearchProvider>, String> {
+    if window.label() != "main" {
+        return Err(
+            "Only the trusted main iHub surface can inspect provider readiness.".to_owned(),
+        );
+    }
+    let plugins = state.plugins.list();
+    let declared = plugins
+        .iter()
+        .filter(|plugin| plugin.enabled)
+        .flat_map(|plugin| {
+            plugin
+                .search_providers
+                .iter()
+                .map(|provider| host_key(&plugin.id, &provider.id))
+        })
+        .collect::<HashSet<_>>();
+    let mut providers = state
+        .host
+        .search_providers
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .keys()
+        .filter(|key| declared.contains(*key))
+        .filter_map(|key| {
+            key.split_once(':')
+                .map(|(plugin_id, provider_id)| RegisteredPluginSearchProvider {
+                    plugin_id: plugin_id.to_owned(),
+                    provider_id: provider_id.to_owned(),
+                })
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+    });
+    Ok(providers)
 }
 
 #[tauri::command]
@@ -2772,6 +3458,7 @@ pub async fn query_plugin_search(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains_key(&host_key(&plugin_id, &provider_id))
     {
+        emit_plugin_search_providers_changed(&app, &plugin_id, Some(&provider_id), false);
         return Err(format!(
             "Plugin search provider '{plugin_id}/{provider_id}' is not registered."
         ));
@@ -2800,7 +3487,10 @@ pub async fn query_plugin_search(
     }
 
     let event_name = format!("ihub://plugin/{plugin_id}/search");
-    if let Err(error) = app.emit(
+    if let Err(error) = emit_plugin_event_to_owner(
+        &app,
+        &state,
+        &plugin_id,
         &event_name,
         json!({
             "requestId": request_id.clone(),
@@ -2846,6 +3536,28 @@ pub async fn query_plugin_search(
             return Err("Plugin search provider stopped before responding.".to_owned());
         }
     };
+
+    {
+        let now = Instant::now();
+        let mut issued = state
+            .host
+            .issued_search_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_expired_issued_plugin_searches(&mut issued, now);
+        issued.insert(
+            request_id.clone(),
+            IssuedPluginSearchResults {
+                plugin_id: plugin_id.clone(),
+                provider_id: provider_id.clone(),
+                results: results.clone(),
+                issued_at: now,
+            },
+        );
+        trim_oldest_records(&mut issued, MAX_ISSUED_PLUGIN_SEARCHES, |search| {
+            search.issued_at
+        });
+    }
 
     Ok(PluginSearchResponse {
         request_id,
@@ -2969,6 +3681,10 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
             request.plugin_id, request.provider_id
         )));
     }
+    host.issued_search_results
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|_, search| search.plugin_id != plugin_id);
 
     // Lock grants before previews everywhere so a disable/uninstall cannot
     // race a preview/apply call into retaining a capability after lifecycle
@@ -3670,6 +4386,15 @@ fn remove_expired_cursor_color_approvals(
     approvals.retain(|_, approval| approval.expires_at > now);
 }
 
+fn remove_expired_issued_plugin_searches(
+    searches: &mut HashMap<String, IssuedPluginSearchResults>,
+    now: Instant,
+) {
+    searches.retain(|_, search| {
+        now.saturating_duration_since(search.issued_at) <= PLUGIN_SEARCH_SELECTION_TTL
+    });
+}
+
 fn trim_oldest_records<T>(
     records: &mut HashMap<String, T>,
     maximum: usize,
@@ -3765,6 +4490,23 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn release_detached_plugin_window_lease(window: &tauri::Window) {
+    if window.label() == "main" {
+        return;
+    }
+    let Some(detached) = window.try_state::<DetachedPluginWindowRegistry>() else {
+        return;
+    };
+    let Some(lease_id) = detached.take_window_lease(window.label()) else {
+        return;
+    };
+    if let Some(state) = window.try_state::<AppState>() {
+        if let Some(plugin_id) = release_plugin_frontend_lease(&lease_id, &state) {
+            emit_plugin_search_providers_changed(window.app_handle(), &plugin_id, None, false);
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -3781,16 +4523,35 @@ pub fn run() {
         // alive for the next global-hotkey invocation.
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                let _ = window.emit("ihub://hide-search", json!({}));
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.emit("ihub://hide-search", json!({}));
+                    let _ = window.hide();
+                } else {
+                    // A normal decorated detached window really closes. Revoke
+                    // its iframe lease before the webview disappears so React
+                    // cleanup is an optimization rather than a security
+                    // boundary.
+                    release_detached_plugin_window_lease(window);
+                }
+            }
+            WindowEvent::Destroyed => {
+                // Platform shutdown paths can skip CloseRequested. This is
+                // idempotent after the normal close branch.
+                release_detached_plugin_window_lease(window);
             }
             WindowEvent::Focused(true) => {
+                if window.label() != "main" {
+                    return;
+                }
                 if let Some(state) = window.try_state::<AppState>() {
                     state.launcher_focus.note_focus();
                 }
             }
             WindowEvent::Focused(false) => {
+                if window.label() != "main" {
+                    return;
+                }
                 let Some(state) = window.try_state::<AppState>() else {
                     return;
                 };
@@ -3819,6 +4580,12 @@ pub fn run() {
             state.index.rebuild_default_roots();
             let clipboard_history = state.clipboard_history.clone();
             app.manage(state);
+            app.manage(DetachedPluginWindowRegistry::default());
+            if app.state::<AppState>().super_panel.enabled() {
+                if let Err(error) = ensure_super_panel_listener(app.handle()) {
+                    eprintln!("iHub could not restore the Super Panel listener: {error}");
+                }
+            }
             let _ = std::thread::Builder::new()
                 .name("ihub-clipboard-history".to_owned())
                 .spawn(move || loop {
@@ -3833,6 +4600,7 @@ pub fn run() {
             let launcher_hotkey = register_launcher_hotkey(app.handle(), preferred_launcher_hotkey);
             app.state::<AppState>()
                 .set_launcher_hotkey_status(launcher_hotkey);
+            refresh_plugin_shortcuts(app.handle());
             if !launched_from_autostart() {
                 show_launcher(app.handle());
             }
@@ -3851,6 +4619,9 @@ pub fn run() {
             open_launcher_shortcut,
             unpin_launcher_shortcut,
             list_plugins,
+            crate::detached_plugin_window::open_detached_plugin_window,
+            crate::detached_plugin_window::get_detached_plugin_window_bootstrap,
+            crate::detached_plugin_window::close_detached_plugin_window,
             get_plugin_frontend_url,
             issue_plugin_launcher_context,
             revoke_plugin_launcher_context,
@@ -3872,6 +4643,9 @@ pub fn run() {
             acquire_capture_focus_lease,
             release_capture_focus_lease,
             sample_cursor_color,
+            begin_cursor_color_picker,
+            sample_cursor_color_neighborhood,
+            end_cursor_color_picker,
             capture_native_screenshot,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
@@ -3898,6 +4672,9 @@ pub fn run() {
             clear_unpinned_clipboard_history,
             read_clipboard_files,
             read_clipboard_image,
+            get_super_panel_status,
+            set_super_panel_enabled,
+            consume_super_panel_context,
             run_plugin_command,
             get_autostart_status,
             set_autostart,
@@ -3907,7 +4684,9 @@ pub fn run() {
             get_app_health,
             center_launcher_window,
             plugin_host_call,
+            dispatch_detached_plugin_frontend_event,
             invoke_plugin_frontend_command,
+            list_registered_plugin_search_providers,
             query_plugin_search
         ])
         .run(tauri::generate_context!())
@@ -4017,24 +4796,396 @@ fn register_launcher_hotkey(
     LauncherHotkeyStatus::unavailable_for(preferred_accelerator)
 }
 
+fn launcher_reserved_plugin_shortcuts(state: &AppState) -> HashSet<String> {
+    let status = state.launcher_hotkey_status();
+    let mut reserved = HashSet::from([
+        LAUNCHER_PRIMARY_HOTKEY.to_owned(),
+        LAUNCHER_FALLBACK_HOTKEY.to_owned(),
+    ]);
+    reserved.extend(status.accelerator);
+    reserved.extend(status.preferred_accelerator);
+    reserved
+}
+
+fn register_plugin_shortcut_binding(app: &AppHandle, accelerator: &str) -> Result<(), String> {
+    let accelerator_for_callback = accelerator.to_owned();
+    let pressed = Arc::new(AtomicBool::new(false));
+    app.global_shortcut()
+        .on_shortcut(accelerator, move |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                if !pressed.swap(true, Ordering::AcqRel) {
+                    dispatch_plugin_shortcut(app, &accelerator_for_callback);
+                }
+            } else {
+                pressed.store(false, Ordering::Release);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// Reconciles only plugin-owned registrations. The launcher's active and
+/// recovery accelerators are reserved before this function touches the native
+/// registry, and no failure here mutates the launcher's working binding.
+fn refresh_plugin_shortcuts(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let _change_guard = state
+        .plugin_shortcut_change
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let plugins = state.plugins.list();
+    let mut plan = plan_plugin_shortcuts(&plugins, &launcher_reserved_plugin_shortcuts(&state));
+    let mut eligibility = HashMap::<String, Result<(), String>>::new();
+    plan.ready.retain(|binding| {
+        let result = eligibility
+            .entry(binding.plugin_id.clone())
+            .or_insert_with(|| state.plugins.ensure_plugin_enabled(&binding.plugin_id));
+        if let Err(error) = result {
+            plan.statuses.insert(
+                binding.key.clone(),
+                PluginShortcutStatus::unavailable(format!(
+                    "插件来源或生命周期校验失败，快捷键未注册：{error}"
+                )),
+            );
+            false
+        } else {
+            true
+        }
+    });
+    let previous = {
+        state
+            .plugin_shortcuts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .clone()
+    };
+
+    let desired = plan
+        .ready
+        .iter()
+        .map(|binding| (binding.shortcut.as_str(), binding))
+        .collect::<HashMap<_, _>>();
+    let mut retained = HashMap::new();
+    let mut failed_unregistrations = HashSet::new();
+    for (accelerator, binding) in previous {
+        if desired
+            .get(accelerator.as_str())
+            .is_some_and(|desired| **desired == binding)
+        {
+            plan.statuses
+                .insert(binding.key.clone(), PluginShortcutStatus::registered());
+            retained.insert(accelerator, binding);
+            continue;
+        }
+        if let Err(error) = unregister_launcher_binding(app, &accelerator) {
+            eprintln!("iHub could not unregister stale plugin shortcut {accelerator}: {error}");
+            failed_unregistrations.insert(accelerator);
+        }
+    }
+    drop(desired);
+
+    for binding in plan.ready {
+        if retained.contains_key(&binding.shortcut) {
+            continue;
+        }
+        if failed_unregistrations.contains(&binding.shortcut) {
+            plan.statuses.insert(
+                binding.key,
+                PluginShortcutStatus::unavailable(format!(
+                    "无法安全移除这个快捷键的旧注册；本次未激活 {}。",
+                    binding.shortcut
+                )),
+            );
+            continue;
+        }
+        match register_plugin_shortcut_binding(app, &binding.shortcut) {
+            Ok(()) => {
+                plan.statuses
+                    .insert(binding.key.clone(), PluginShortcutStatus::registered());
+                retained.insert(binding.shortcut.clone(), binding);
+            }
+            Err(error) => {
+                plan.statuses.insert(
+                    binding.key,
+                    PluginShortcutStatus::unavailable(format!(
+                        "系统未能注册 {}；它可能已被其他应用占用。（{error}）",
+                        binding.shortcut
+                    )),
+                );
+            }
+        }
+    }
+
+    *state
+        .plugin_shortcuts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = PluginShortcutRegistry {
+        active: retained,
+        statuses: plan.statuses,
+    };
+    let _ = app.emit("ihub://plugin-shortcuts-changed", json!({}));
+}
+
+fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
+    let binding = {
+        let state = app.state::<AppState>();
+        state.plugin_shortcut_binding(accelerator)
+    };
+    let Some(binding) = binding else {
+        return;
+    };
+    // A lifecycle/source mutation may land just before its reconciliation
+    // reaches the native registry. Re-read the validated manifest projection
+    // so a stale callback can never invoke disabled or replaced code.
+    let state = app.state::<AppState>();
+    let plugins = state.plugins.list();
+    if state.host.auto_hide_is_suspended()
+        || state
+            .plugins
+            .ensure_plugin_enabled(&binding.plugin_id)
+            .is_err()
+        || !binding_is_current(&plugins, &binding)
+    {
+        return;
+    }
+    let payload = PluginShortcutEvent::from_binding(&binding);
+    if binding_targets_frontend_command(&plugins, &binding) {
+        match detached_plugin_event_target(app, &state, &binding.plugin_id) {
+            Ok(Some(label)) => {
+                // The label can only come from the host registry's exact
+                // plugin-ID record. Never accept an event target from a
+                // renderer or broadcast a detached command to every WebView.
+                if let Err(error) = app.emit_to(&label, "ihub://plugin-global-shortcut", payload) {
+                    eprintln!(
+                        "iHub could not deliver detached plugin shortcut {}: {error}",
+                        binding.shortcut
+                    );
+                    return;
+                }
+                if let Some(window) = app.get_webview_window(&label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!(
+                    "iHub could not route detached plugin shortcut {}: {error}",
+                    binding.shortcut
+                );
+                return;
+            }
+        }
+    }
+
+    // Keyword shortcuts and native-worker commands retain the launcher's
+    // search/approval path. Target only the trusted main host so a detached
+    // WebView cannot also observe and execute the same binding.
+    show_launcher(app);
+    if let Err(error) = app.emit_to("main", "ihub://plugin-global-shortcut", payload) {
+        eprintln!(
+            "iHub could not deliver plugin shortcut {}: {error}",
+            binding.shortcut
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayAction {
+    Show,
+    Settings,
+    Reindex,
+    About,
+    Help,
+    Feedback,
+    Restart,
+    Quit,
+}
+
+fn tray_action(menu_id: &str) -> Option<TrayAction> {
+    match menu_id {
+        "show" => Some(TrayAction::Show),
+        "settings" => Some(TrayAction::Settings),
+        "reindex" => Some(TrayAction::Reindex),
+        "about" => Some(TrayAction::About),
+        "help" => Some(TrayAction::Help),
+        "feedback" => Some(TrayAction::Feedback),
+        "restart" => Some(TrayAction::Restart),
+        "quit" => Some(TrayAction::Quit),
+        _ => None,
+    }
+}
+
+fn is_fixed_tray_https_url(url: &str) -> bool {
+    matches!(url, IHUB_HELP_URL | IHUB_FEEDBACK_URL) && url.starts_with("https://")
+}
+
+fn open_fixed_tray_url(url: &'static str) -> Result<(), String> {
+    if !is_fixed_tray_https_url(url) {
+        return Err("Tray links must use an iHub-owned fixed HTTPS destination.".to_owned());
+    }
+    open_external_in_system(url)
+}
+
+fn open_tray_surface(app: &AppHandle, section: &str) {
+    show_launcher(app);
+    let _ = app.emit(
+        "ihub://tray-navigation",
+        json!({ "surface": "settings", "section": section }),
+    );
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示 iHub", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "偏好设置", true, None::<&str>)?;
     let reindex = MenuItem::with_id(app, "reindex", "刷新文件索引", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, "about", "关于 iHub", true, None::<&str>)?;
+    let help = MenuItem::with_id(app, "help", "帮助", true, None::<&str>)?;
+    let feedback = MenuItem::with_id(app, "feedback", "反馈", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "重启 iHub", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 iHub", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &reindex, &quit])?;
+    let separator_one = PredefinedMenuItem::separator(app)?;
+    let separator_two = PredefinedMenuItem::separator(app)?;
+    let separator_three = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &settings,
+            &separator_one,
+            &reindex,
+            &separator_two,
+            &about,
+            &help,
+            &feedback,
+            &separator_three,
+            &restart,
+            &quit,
+        ],
+    )?;
     let _tray = TrayIconBuilder::with_id("ihub-tray")
         .tooltip("iHub")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => show_launcher(app),
-            "reindex" => {
+        .on_menu_event(|app, event| match tray_action(event.id().as_ref()) {
+            Some(TrayAction::Show) => show_launcher(app),
+            Some(TrayAction::Settings) => open_tray_surface(app, "preferences"),
+            Some(TrayAction::Reindex) => {
                 app.state::<AppState>().index.rebuild_default_roots();
             }
-            "quit" => quit_app(app.clone()),
+            Some(TrayAction::About) => open_tray_surface(app, "about"),
+            Some(TrayAction::Help) => {
+                if let Err(error) = open_fixed_tray_url(IHUB_HELP_URL) {
+                    eprintln!("iHub could not open its fixed help URL: {error}");
+                }
+            }
+            Some(TrayAction::Feedback) => {
+                if let Err(error) = open_fixed_tray_url(IHUB_FEEDBACK_URL) {
+                    eprintln!("iHub could not open its fixed feedback URL: {error}");
+                }
+            }
+            Some(TrayAction::Restart) => {
+                if let Err(error) = app.state::<AppState>().super_panel.shutdown_listener() {
+                    eprintln!(
+                        "iHub could not stop the Super Panel listener before restart: {error}"
+                    );
+                }
+                app.restart();
+            }
+            Some(TrayAction::Quit) => quit_app(app.clone()),
             _ => {}
         })
         .build(app)?;
     Ok(())
+}
+
+fn ensure_super_panel_listener(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let callback_app = app.clone();
+    match state
+        .super_panel
+        .ensure_listener(move |trigger| reveal_super_panel(&callback_app, trigger))
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.super_panel.listener_failed(error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn reveal_super_panel(app: &AppHandle, trigger: SuperPanelTrigger) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let event = {
+        let state = app.state::<AppState>();
+        if state.host.auto_hide_is_suspended() {
+            return;
+        }
+        state.super_panel.issue_context(trigger)
+    };
+    let Some(event) = event else {
+        return;
+    };
+
+    let _ = window.unminimize();
+    if let Some(state) = window.try_state::<AppState>() {
+        state.launcher_focus.begin_reveal();
+    }
+    apply_super_panel_reveal_geometry(
+        &window,
+        PhysicalPosition::new(event.physical_x, event.physical_y),
+    );
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = window.emit(
+        "ihub://focus-search",
+        json!({
+            "freshReveal": true,
+            "reason": "explicit",
+        }),
+    );
+    let _ = window.emit("ihub://super-panel", &event);
+}
+
+fn apply_super_panel_reveal_geometry<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    trigger: PhysicalPosition<i32>,
+) {
+    let monitor = window
+        .available_monitors()
+        .ok()
+        .and_then(|monitors| {
+            monitors.into_iter().find(|monitor| {
+                physical_point_in_monitor(
+                    PhysicalPosition::new(f64::from(trigger.x), f64::from(trigger.y)),
+                    *monitor.position(),
+                    *monitor.size(),
+                )
+            })
+        })
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        apply_launcher_reveal_geometry(window);
+        return;
+    };
+    let work_area = monitor.work_area();
+    let Some(layout) = (LauncherWorkArea {
+        position: work_area.position,
+        size: work_area.size,
+    })
+    .super_panel_layout(monitor.scale_factor(), trigger) else {
+        return;
+    };
+    if let Err(error) = window.set_size(layout.size) {
+        eprintln!("iHub could not size the Super Panel surface: {error}");
+    }
+    if let Err(error) = window.set_position(layout.position) {
+        eprintln!("iHub could not anchor the Super Panel surface: {error}");
+    }
 }
 
 fn show_launcher(app: &AppHandle) {
@@ -4239,7 +5390,7 @@ fn required_string_any<'a>(params: &'a Value, keys: &[&str]) -> Result<&'a str, 
     ))
 }
 
-fn is_plugin_id(value: &str) -> bool {
+pub(crate) fn is_plugin_id(value: &str) -> bool {
     let length = value.len();
     (2..=96).contains(&length)
         && value
@@ -4312,7 +5463,7 @@ mod tests {
     use tauri::{PhysicalPosition, PhysicalSize};
 
     use crate::clipboard_history::ClipboardHistory;
-    use crate::models::{LauncherHotkeyRegistration, LauncherHotkeyStatus};
+    use crate::models::{LauncherHotkeyRegistration, LauncherHotkeyStatus, PluginSearchResult};
 
     use super::{
         attach_plugin_launcher_context_transfer, build_plugin_launcher_context_payload,
@@ -4323,17 +5474,19 @@ mod tests {
         issue_plugin_launcher_context_transfer, launcher_visibility_action,
         native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
         optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
+        plugin_search_providers_changed_payload, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
-        take_plugin_launcher_context_transfer, validate_system_icon_request, CaptureFocusLease,
-        CursorColorApproval, LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
-        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
-        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
-        PluginLauncherContextRequest, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
-        LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
-        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES,
+        take_plugin_launcher_context_transfer, truncate_utf8_bytes, validate_system_icon_request,
+        CaptureFocusLease, CursorColorApproval, DetachedPluginFrontendEventRequest,
+        IssuedPluginSearchResults, LauncherFocusGate, LauncherHotkeyToggleGate,
+        LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
+        LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PluginBatchRenamePreview,
+        PluginCursorColor, PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
+        PluginLauncherContextImageRequest, PluginLauncherContextRequest, LAUNCHER_CONTEXT_TTL,
+        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
+        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_SEARCH_SELECTION_TTL,
     };
 
     #[test]
@@ -4358,6 +5511,29 @@ mod tests {
             &[],
         )
         .is_err());
+    }
+
+    #[test]
+    fn tray_actions_are_fixed_and_external_links_are_https_allowlisted() {
+        assert_eq!(super::tray_action("show"), Some(super::TrayAction::Show));
+        assert_eq!(
+            super::tray_action("settings"),
+            Some(super::TrayAction::Settings)
+        );
+        assert_eq!(
+            super::tray_action("restart"),
+            Some(super::TrayAction::Restart)
+        );
+        assert_eq!(super::tray_action("unknown"), None);
+
+        assert!(super::is_fixed_tray_https_url(super::IHUB_HELP_URL));
+        assert!(super::is_fixed_tray_https_url(super::IHUB_FEEDBACK_URL));
+        assert!(!super::is_fixed_tray_https_url(
+            "http://github.com/neko233-com/ihub"
+        ));
+        assert!(!super::is_fixed_tray_https_url(
+            "https://example.com/phishing"
+        ));
     }
 
     #[test]
@@ -4663,6 +5839,35 @@ mod tests {
     }
 
     #[test]
+    fn super_panel_layout_anchors_below_or_above_and_never_leaves_the_work_area() {
+        let work_area = LauncherWorkArea {
+            position: PhysicalPosition::new(-1_920, 40),
+            size: PhysicalSize::new(1_920, 1_040),
+        };
+        let below = work_area
+            .super_panel_layout(1.0, PhysicalPosition::new(-960, 120))
+            .expect("layout");
+        assert_eq!(below.size, PhysicalSize::new(800, 380));
+        assert_eq!(below.position, PhysicalPosition::new(-1_360, 132));
+
+        let above = work_area
+            .super_panel_layout(1.0, PhysicalPosition::new(-20, 1_040))
+            .expect("layout");
+        assert_eq!(above.position, PhysicalPosition::new(-800, 648));
+        assert!(above.position.x >= -1_920);
+        assert!(above.position.y >= 40);
+        assert!(above.position.x + above.size.width as i32 <= 0);
+        assert!(above.position.y + above.size.height as i32 <= 1_080);
+    }
+
+    #[test]
+    fn super_panel_text_truncation_preserves_utf8_boundaries() {
+        assert_eq!(truncate_utf8_bytes("hello".to_owned(), 5), "hello");
+        assert_eq!(truncate_utf8_bytes("a猫b".to_owned(), 4), "a猫");
+        assert_eq!(truncate_utf8_bytes("猫".to_owned(), 2), "");
+    }
+
+    #[test]
     fn launcher_initial_blur_cannot_hide_a_newly_revealed_surface() {
         let focus = LauncherFocusGate::default();
         focus.begin_reveal();
@@ -4714,6 +5919,188 @@ mod tests {
         )
         .expect_err("oversized payloads must not reach the launcher");
         assert!(error.contains("payload exceeds"));
+    }
+
+    #[test]
+    fn plugin_level_provider_dispose_omits_provider_id_instead_of_sending_null() {
+        assert_eq!(
+            plugin_search_providers_changed_payload(
+                "ihub-plugin-owner",
+                Some("provider-owner"),
+                true,
+            ),
+            json!({
+                "pluginId": "ihub-plugin-owner",
+                "providerId": "provider-owner",
+                "registered": true,
+            }),
+        );
+        assert_eq!(
+            plugin_search_providers_changed_payload("ihub-plugin-owner", None, false),
+            json!({
+                "pluginId": "ihub-plugin-owner",
+                "registered": false,
+            }),
+        );
+    }
+
+    #[test]
+    fn detached_search_selection_uses_only_the_native_issued_snapshot() {
+        let host = PluginHostState::default();
+        let issued_at = Instant::now();
+        host.issued_search_results
+            .lock()
+            .expect("issued search lock")
+            .insert(
+                "search-request-owner".to_owned(),
+                IssuedPluginSearchResults {
+                    plugin_id: "ihub-plugin-owner".to_owned(),
+                    provider_id: "provider-owner".to_owned(),
+                    results: vec![PluginSearchResult {
+                        id: "result-owner".to_owned(),
+                        title: "Owned result".to_owned(),
+                        subtitle: None,
+                        score: 42.0,
+                        payload: Some(json!({ "reviewed": true, "path": "opaque-result" })),
+                    }],
+                    issued_at,
+                },
+            );
+
+        assert!(resolve_issued_plugin_search_selection(
+            &host,
+            "ihub-plugin-other",
+            "provider-owner",
+            "search-request-owner",
+            "result-owner",
+            issued_at,
+        )
+        .is_err());
+        assert!(resolve_issued_plugin_search_selection(
+            &host,
+            "ihub-plugin-owner",
+            "provider-other",
+            "search-request-owner",
+            "result-owner",
+            issued_at,
+        )
+        .is_err());
+        assert!(resolve_issued_plugin_search_selection(
+            &host,
+            "ihub-plugin-owner",
+            "provider-owner",
+            "search-request-owner",
+            "result-forged-by-renderer",
+            issued_at,
+        )
+        .is_err());
+        assert_eq!(
+            resolve_issued_plugin_search_selection(
+                &host,
+                "ihub-plugin-owner",
+                "provider-owner",
+                "search-request-owner",
+                "result-owner",
+                issued_at,
+            )
+            .expect("the exact owner can resolve its issued result"),
+            json!({ "reviewed": true, "path": "opaque-result" }),
+        );
+        // A second activation cannot replay the same native-issued result.
+        assert!(resolve_issued_plugin_search_selection(
+            &host,
+            "ihub-plugin-owner",
+            "provider-owner",
+            "search-request-owner",
+            "result-owner",
+            issued_at,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn detached_search_selection_rejects_and_removes_expired_snapshots() {
+        let host = PluginHostState::default();
+        let now = Instant::now();
+        host.issued_search_results
+            .lock()
+            .expect("issued search lock")
+            .insert(
+                "expired-search-request".to_owned(),
+                IssuedPluginSearchResults {
+                    plugin_id: "ihub-plugin-owner".to_owned(),
+                    provider_id: "provider-owner".to_owned(),
+                    results: vec![PluginSearchResult {
+                        id: "expired-result".to_owned(),
+                        title: "Expired result".to_owned(),
+                        subtitle: None,
+                        score: 1.0,
+                        payload: None,
+                    }],
+                    issued_at: now
+                        .checked_sub(PLUGIN_SEARCH_SELECTION_TTL + Duration::from_millis(1))
+                        .expect("test instant supports a short subtraction"),
+                },
+            );
+
+        assert!(resolve_issued_plugin_search_selection(
+            &host,
+            "ihub-plugin-owner",
+            "provider-owner",
+            "expired-search-request",
+            "expired-result",
+            now,
+        )
+        .is_err());
+        assert!(!host
+            .issued_search_results
+            .lock()
+            .expect("issued search lock")
+            .contains_key("expired-search-request"));
+    }
+
+    #[test]
+    fn detached_frontend_event_request_rejects_renderer_routing_fields() {
+        let command = serde_json::from_value::<DetachedPluginFrontendEventRequest>(json!({
+            "kind": "command",
+            "pluginId": "ihub-plugin-owner",
+            "commandId": "open",
+        }))
+        .expect("the bounded command request should deserialize");
+        assert!(matches!(
+            command,
+            DetachedPluginFrontendEventRequest::Command {
+                plugin_id,
+                command_id,
+            } if plugin_id == "ihub-plugin-owner" && command_id == "open"
+        ));
+
+        for forged in [
+            json!({
+                "kind": "command",
+                "pluginId": "ihub-plugin-owner",
+                "commandId": "open",
+                "windowLabel": "main",
+            }),
+            json!({
+                "kind": "searchSelection",
+                "pluginId": "ihub-plugin-owner",
+                "providerId": "provider-owner",
+                "requestId": "search-request-owner",
+                "resultId": "result-owner",
+                "payload": { "forged": true },
+            }),
+            json!({
+                "kind": "keyword",
+                "pluginId": "ihub-plugin-owner",
+                "commandId": "open",
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<DetachedPluginFrontendEventRequest>(forged).is_err(),
+                "renderer-controlled routing or payload fields must be rejected",
+            );
+        }
     }
 
     #[test]

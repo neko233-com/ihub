@@ -447,9 +447,26 @@ The supplied `.gitignore` intentionally leaves `dist/` visible to Git. iHub's Gi
 
 The **Open project folder** button in iHub is an explicit convenience action only. It opens the generated directory in Finder/Explorer; it does not run a terminal command or any project file.
 
+## Host sub-input
+
+The vendored bridge includes the same visible-surface sub-input primitive as the SDK. The input is rendered by iHub above the isolated iframe; the callback stays in this page and receives bounded `{{ text }}` updates. Hidden search runtimes cannot use it, and closing or replacing the plugin surface removes it:
+
+```ts
+await ihub.subInput.set(
+  ({{ text }}) => console.log("filter", text),
+  "Search this plugin",
+  true,
+);
+
+await ihub.subInput.setValue("initial value");
+await ihub.subInput.remove();
+```
+
+Migrate to `@ihub/plugin-sdk` when you need the deliberately limited `window.utools` / `window.rubick` source-compatibility projection. The generated bridge never exposes Node.js, Electron remote, filesystem paths, arbitrary processes, preload scripts, or shell execution.
+
 ## Browser screen picker (optional)
 
-If this plugin records a user-selected browser display, add `"screenCapture": true` under `permissions` in `plugin.json`. The generated `ihub.screenCapture` bridge only holds iHub visible while the browser's own `getDisplayMedia()` picker temporarily moves focus; it does not grant screen pixels or bypass browser permission.
+If this plugin records a user-selected browser display, add `"screenCapture": true` under `permissions` in `plugin.json`. iHub delegates cross-origin display capture only to a native-validated visible Surface lease; hidden search runtimes and undeclared plugins receive no delegation. The generated `ihub.screenCapture` bridge only holds iHub visible while the browser's own `getDisplayMedia()` picker temporarily moves focus. Neither mechanism grants screen pixels, bypasses the browser/OS picker or OS permission, or exposes native capture. Browser-only preview cannot prove desktop permission or successful frame delivery.
 
 Start the lease request, then call `getDisplayMedia()` **synchronously in the same click handler without awaiting the lease**. Awaiting an iframe/host round trip first can consume Chromium's transient user activation. Always release the lease in `finally`, and treat a failed acquisition as non-fatal to the browser picker:
 
@@ -624,12 +641,23 @@ export interface NativeCommandResult {
 }
 
 type CommandHandler = (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>;
+type SubInputChangeHandler = (change: { text: string }) => void | Promise<void>;
 
 export interface IHubBridge {
   registerCommand(
     definition: CommandDefinition,
     handler: CommandHandler,
   ): Promise<() => Promise<void>>;
+  readonly subInput: {
+    /** Controls the trusted input in the current visible iHub plugin surface. */
+    set(
+      onChange: SubInputChangeHandler,
+      placeholder?: string,
+      focus?: boolean,
+    ): Promise<boolean>;
+    remove(): Promise<boolean>;
+    setValue(value: string): Promise<boolean>;
+  };
   readonly screenCapture: {
     /**
      * Start this request and call browser getDisplayMedia() immediately,
@@ -671,6 +699,8 @@ const CURSOR_COLOR_CALL_TIMEOUT_MS = 2 * 60 * 1_000;
 // only keeps the iframe attached long enough to receive a valid host result
 // for a declared native task (the host maximum is 30 minutes).
 const NATIVE_COMMAND_CALL_TIMEOUT_MS = 30 * 60 * 1_000 + 10_000;
+const MAX_SUB_INPUT_PLACEHOLDER_LENGTH = 160;
+const MAX_SUB_INPUT_VALUE_LENGTH = 4_096;
 
 interface PendingCall {
   resolve(value: unknown): void;
@@ -698,9 +728,36 @@ export function createIHubBridge(pluginId: string): IHubBridge {
   const pending = new Map<string, PendingCall>();
   const commandHandlers = new Map<string, CommandHandler>();
   const settings = new Map<string, unknown>();
+  let subInputActive = false;
+  let subInputHandler: SubInputChangeHandler | null = null;
   let sequence = 0;
 
+  const notifySubInput = (text: string): void => {
+    const handler = subInputHandler;
+    if (!handler) {
+      return;
+    }
+    void Promise.resolve(handler({ text })).catch((error) => {
+      console.error("[iHub sub-input]", error);
+    });
+  };
+
   const previewCall = (method: string, params: Record<string, unknown>): unknown => {
+    if (method === "ui.subInput.set") {
+      subInputActive = true;
+      return true;
+    }
+    if (method === "ui.subInput.remove") {
+      subInputActive = false;
+      return true;
+    }
+    if (method === "ui.subInput.setValue") {
+      if (!subInputActive) {
+        return false;
+      }
+      notifySubInput(String(params.value ?? ""));
+      return true;
+    }
     if (method === "filesystem.selectFiles") {
       throw new Error("File selection requires the iHub desktop host.");
     }
@@ -824,6 +881,14 @@ export function createIHubBridge(pluginId: string): IHubBridge {
       if (event.data.name === "ihub://plugin/" + pluginId + "/command") {
         void completeCommand(event.data.payload);
       }
+      if (
+        event.data.name === "ihub://plugin/" + pluginId + "/event/subInput.change"
+        && isRecord(event.data.payload)
+        && typeof event.data.payload.text === "string"
+        && event.data.payload.text.length <= MAX_SUB_INPUT_VALUE_LENGTH
+      ) {
+        notifySubInput(event.data.payload.text);
+      }
       return;
     }
 
@@ -864,6 +929,49 @@ export function createIHubBridge(pluginId: string): IHubBridge {
         commandHandlers.delete(definition.id);
         await call("commands.unregister", { commandId: definition.id });
       };
+    },
+    subInput: {
+      async set(onChange, placeholder = "", focus = true) {
+        if (typeof onChange !== "function") {
+          throw new Error("Sub-input change handler must be a function.");
+        }
+        if (
+          typeof placeholder !== "string"
+          || placeholder.length > MAX_SUB_INPUT_PLACEHOLDER_LENGTH
+        ) {
+          throw new Error("Sub-input placeholder must be at most 160 characters.");
+        }
+        if (typeof focus !== "boolean") {
+          throw new Error("Sub-input focus must be a boolean.");
+        }
+        const previousHandler = subInputHandler;
+        subInputHandler = onChange;
+        try {
+          const accepted = await call<boolean>("ui.subInput.set", { placeholder, focus });
+          if (accepted !== true) {
+            subInputHandler = previousHandler;
+            return false;
+          }
+          return true;
+        } catch (error) {
+          subInputHandler = previousHandler;
+          throw error;
+        }
+      },
+      async remove() {
+        const removed = await call<boolean>("ui.subInput.remove");
+        if (removed === true) {
+          subInputHandler = null;
+          return true;
+        }
+        return false;
+      },
+      setValue(value) {
+        if (typeof value !== "string" || value.length > MAX_SUB_INPUT_VALUE_LENGTH) {
+          return Promise.reject(new Error("Sub-input value must be at most 4096 characters."));
+        }
+        return call<boolean>("ui.subInput.setValue", { value });
+      },
     },
     screenCapture: {
       acquireFocusLease: () => call<ScreenCaptureFocusLease>("screenCapture.acquireFocusLease"),
@@ -1951,6 +2059,9 @@ mod tests {
         let bridge = fs::read_to_string(project.join("src/ihub-bridge.ts"))
             .expect("generated frontend bridge source");
         assert!(bridge.contains("screenCapture"));
+        assert!(bridge.contains("subInput"));
+        assert!(bridge.contains("ui.subInput.set"));
+        assert!(bridge.contains("MAX_SUB_INPUT_VALUE_LENGTH"));
         assert!(bridge.contains("acquireFocusLease"));
         assert!(bridge.contains("releaseFocusLease"));
         assert!(bridge.contains("cursorColor"));
@@ -1967,6 +2078,9 @@ mod tests {
         assert!(bridge.contains("definition: hostDefinition"));
 
         let readme = fs::read_to_string(project.join("README.md")).expect("generated README");
+        assert!(readme.contains("Host sub-input"));
+        assert!(readme.contains("window.utools"));
+        assert!(readme.contains("never exposes Node.js"));
         assert!(readme.contains("screenCapture"));
         assert!(readme.contains("without awaiting the lease"));
         assert!(readme.contains("System cursor pixel"));

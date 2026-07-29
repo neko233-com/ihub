@@ -62,6 +62,7 @@ import {
   type LauncherContextEligibleCommand,
   type LauncherContextHandoffPreview,
 } from "../lib/plugin-launcher-context";
+import { pluginShortcutStatusSummary } from "../lib/plugin-shortcut-status";
 import type {
   OfficialWorkspacePluginProject,
   PluginAutomaticUpdateReport,
@@ -2850,13 +2851,14 @@ export function PluginCenter({
                       const isLifecycleBusy = Boolean(plugin && lifecycleAction?.pluginId === plugin.id);
                       const lifecycleBusyElsewhere = lifecycleAction !== null && !isLifecycleBusy;
                       const updateLabel = updateStatusLabel(update, isCheckingUpdate, isApplyingUpdate);
+                      const shortcutStatus = pluginShortcutStatusSummary(plugin);
                       const updateTitle = [
                         sourceLockTitle(plugin),
                         plugin ? lifecycleTitle(plugin) : undefined,
                         automaticDiscovery ? "插件中心打开时按需检查，保持打开期间每 30 分钟复查：仅发现可信 stable Git commit；会先验证已安装快照的内容哈希，且不会自动下载或应用更新。" : undefined,
                         plugin && isGitPlugin ? updateActionTitle(update) : undefined,
                       ].filter(Boolean).join("\n\n") || undefined;
-                      const statusTitle = [platformNotice?.title, updateTitle].filter(Boolean).join("\n\n") || undefined;
+                      const statusTitle = [platformNotice?.title, updateTitle, shortcutStatus?.title].filter(Boolean).join("\n\n") || undefined;
                       const workspaceStatusTitle = item.entry.workspaceProject
                         ? workspaceAvailable || item.entry.distribution === "bootstrap"
                           ? workspaceProject?.detail
@@ -2905,6 +2907,7 @@ export function PluginCenter({
                             <small title={[plugin?.localLinkError, statusTitle].filter(Boolean).join("\n\n") || undefined}>
                               {platformNotice?.status ?? statusLabel(item.entry, plugin, workspaceProject, desktopRuntime, workspaceProjectsLoaded)}{item.entry.native && !installed ? " · 原生能力" : ""}{sourceLockLabel(plugin) ? ` · 锁定 ${sourceLockLabel(plugin)}` : ""}{automaticDiscovery ? " · 官方仅自动检查" : ""}{updateLabel ? ` · ${updateLabel}` : ""}
                               {plugin?.searchProviders?.length ? ` · 已声明 ${plugin.searchProviders.length} 个搜索提供器` : ""}
+                              {shortcutStatus ? ` · ${shortcutStatus.label}` : ""}
                             </small>
                           </div>
                           <div className="plugin-center__market-actions">

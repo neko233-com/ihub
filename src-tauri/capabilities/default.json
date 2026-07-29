@@ -4,6 +4,7 @@
   "description": "Default desktop capability for the iHub window.",
   "windows": ["main"],
   "permissions": [
+    "main-app-commands",
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-set-size",

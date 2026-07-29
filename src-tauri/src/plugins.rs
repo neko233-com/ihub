@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::launcher_hotkey::normalize_plugin_hotkey;
 use crate::models::{
     OfficialWorkspacePluginProject, PluginArtifactDigest, PluginAutomaticUpdateReport,
-    PluginAutomaticUpdateSkip, PluginCommandInfo, PluginCommandResult, PluginInfo,
-    PluginLauncherContextPermissionsInfo, PluginLifecycleUpdate, PluginSearchProviderInfo,
-    PluginSnapshotIntegrity, PluginSourceLock, PluginUninstallResult, PluginUpdateCheck,
-    PluginUpdateResult,
+    PluginAutomaticUpdateSkip, PluginCommandInfo, PluginCommandResult, PluginGlobalShortcutInfo,
+    PluginInfo, PluginLauncherContextPermissionsInfo, PluginLifecycleUpdate,
+    PluginSearchProviderInfo, PluginSnapshotIntegrity, PluginSourceLock, PluginUninstallResult,
+    PluginUpdateCheck, PluginUpdateResult,
 };
 use crate::plugin_artwork::{load_plugin_artwork, validate_artwork_relative_path, PluginArtwork};
 
@@ -75,6 +76,13 @@ const MAX_SEARCH_PROVIDERS_PER_PLUGIN: usize = 32;
 /// step with the durable-store namespace cap so a manifest cannot make a
 /// session-only secret setting map unbounded.
 const MAX_SETTINGS_PER_PLUGIN: usize = 128;
+/// Global input hooks stay native-host owned and deliberately small. A single
+/// package may combine command-local shortcuts with plugin-level
+/// shortcut-to-command/keyword mappings up to this total.
+const MAX_GLOBAL_SHORTCUTS_PER_PLUGIN: usize = 16;
+const MAX_SHORTCUT_KEYWORD_CHARS: usize = 64;
+const MAX_PERMISSION_LIST_ITEMS: usize = 64;
+const MAX_PERMISSION_VALUE_CHARS: usize = 512;
 const MAX_DEVELOPMENT_LAUNCHER_MARKER_BYTES: u64 = 64 * 1024;
 /// Commands are projected into one Tauri IPC response. Keeping this bounded
 /// prevents a manifest from multiplying even one reused artwork data URL into
@@ -221,6 +229,18 @@ pub(crate) struct PluginFrontendAssetBundle {
     pub(crate) plugin_id: String,
     pub(crate) asset_root: PathBuf,
     pub(crate) entry: PathBuf,
+    /// True only when the validated manifest explicitly declares
+    /// `permissions.screenCapture`. Lease issuance further restricts this to
+    /// visible surfaces before the renderer can delegate `display-capture`.
+    pub(crate) allows_display_capture: bool,
+    /// True only when the validated manifest explicitly declares
+    /// `permissions.microphone`. Lease issuance further restricts this to
+    /// visible surfaces before the renderer can delegate `microphone`.
+    pub(crate) allows_microphone: bool,
+    /// True only when the validated manifest explicitly declares at least one
+    /// external network destination. The asset server uses this as a coarse
+    /// CSP gate; destination strings remain review metadata, not CSP sources.
+    pub(crate) allows_remote_network: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,17 +293,24 @@ struct PluginUpdateDeclaration {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PluginPermissions {
     filesystem: Option<FilesystemPermissions>,
     network: Option<NetworkPermissions>,
     clipboard: Option<ClipboardPermissions>,
     shell: Option<ShellPermissions>,
-    /// Allows only the short-lived focus-protection lease around a browser
-    /// `getDisplayMedia` picker. It does not grant screen pixels, recording,
-    /// global shortcuts, or any native capture API.
+    /// Allows a visible plugin surface to receive the browser's
+    /// `display-capture` Permissions Policy delegation and hold a short-lived
+    /// focus-protection lease while its `getDisplayMedia` picker is open.
+    /// Browser consent remains mandatory, and this does not grant a hidden
+    /// runtime, native screen pixels, global shortcuts, or microphone access.
     #[serde(default)]
     screen_capture: bool,
+    /// Allows only browser microphone Permissions Policy delegation for a
+    /// visible plugin surface. It is independent from display capture and
+    /// does not bypass browser or operating-system consent.
+    #[serde(default)]
+    microphone: bool,
     /// Allows a visible plugin surface to request one delayed sample of the
     /// pixel underneath the cursor. This is intentionally separate from
     /// `screenCapture`: it returns no image, cursor coordinates, recording
@@ -308,9 +335,9 @@ struct PluginPermissions {
     process: Option<ProcessPermissions>,
 }
 
-/// Fine-grained declarations for a launcher handoff. Keep this inner object
-/// strict even while the outer legacy permission object remains permissive:
-/// a typo must never look like approval for a new data category.
+/// Fine-grained declarations for a launcher handoff. This remains strict like
+/// the outer permission contract: a typo must never look like approval for a
+/// new data category.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LauncherContextPermissions {
@@ -322,17 +349,19 @@ struct LauncherContextPermissions {
     image: bool,
 }
 
-/// Network access is not presently proxied through the host bridge: a plugin
-/// iframe may still issue its own browser request subject to ordinary WebView
-/// policy/CORS. It remains part of the manifest trust surface, however, so a
-/// routine Git refresh must not silently add or widen declared destinations.
+/// A non-empty declaration enables the iframe's coarse external-network CSP
+/// gate. Destination strings remain human-review/update-lock metadata for now:
+/// they are not yet parsed into an origin-level runtime allowlist. A routine
+/// Git refresh still may not silently add, remove, or widen them.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkPermissions {
     #[serde(default)]
     allow: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FilesystemPermissions {
     #[serde(default)]
     read: Vec<String>,
@@ -351,6 +380,7 @@ impl FilesystemPermissions {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClipboardPermissions {
     #[serde(default)]
     read: bool,
@@ -365,7 +395,7 @@ struct ClipboardPermissions {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShellPermissions {
     #[serde(default)]
     open_path: bool,
@@ -374,6 +404,7 @@ struct ShellPermissions {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProcessPermissions {
     #[serde(default)]
     spawn: bool,
@@ -421,6 +452,17 @@ struct PluginContributions {
     search_providers: Vec<PluginSearchProviderDeclaration>,
     #[serde(default)]
     settings: Vec<PluginSettingDeclaration>,
+    #[serde(default)]
+    global_shortcuts: Vec<PluginGlobalShortcutDeclaration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginGlobalShortcutDeclaration {
+    id: String,
+    shortcut: String,
+    command_id: Option<String>,
+    keyword: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -455,6 +497,12 @@ struct PluginCommandDeclaration {
     /// Package-relative artwork. Rust decodes and normalizes it before any
     /// value crosses into the WebView.
     icon: Option<String>,
+    /// Bounded static launcher aliases. They are metadata only and cannot be
+    /// replaced by a running iframe.
+    #[serde(default)]
+    keywords: Vec<String>,
+    /// Command-local shorthand for one manifest-owned global binding.
+    shortcut: Option<String>,
     /// Commands in a plugin that also bundles a native worker can still be
     /// entry points into its UI. Omitted values preserve the v1 behavior:
     /// commands are native when the plugin has a native worker, frontend
@@ -1714,6 +1762,13 @@ impl PluginManager {
             plugin_id: plugin_id.to_owned(),
             asset_root,
             entry: frontend_path,
+            allows_display_capture: manifest.permissions.screen_capture,
+            allows_microphone: manifest.permissions.microphone,
+            allows_remote_network: manifest
+                .permissions
+                .network
+                .as_ref()
+                .is_some_and(|network| !network.allow.is_empty()),
         })
     }
 
@@ -2377,6 +2432,7 @@ impl PluginManager {
                 auto_update: false,
                 command_count: 0,
                 commands: Vec::new(),
+                global_shortcuts: Vec::new(),
                 search_providers: Vec::new(),
                 launcher_context: None,
             },
@@ -2452,6 +2508,16 @@ impl PluginManager {
                         .or_else(|| command.subtitle.clone()),
                     icon_src,
                     execution: command_execution(&manifest, command).as_str().to_owned(),
+                    keywords: normalized_shortcut_keywords(&command.keywords),
+                    shortcut: command
+                        .shortcut
+                        .as_deref()
+                        .and_then(|shortcut| normalize_plugin_hotkey(shortcut).ok()),
+                    shortcut_registration: command.shortcut.as_ref().map(|_| "inactive".to_owned()),
+                    shortcut_error: command
+                        .shortcut
+                        .as_ref()
+                        .map(|_| "插件快捷键尚未由驻留宿主注册。".to_owned()),
                 }
             })
             .collect::<Vec<_>>();
@@ -2475,6 +2541,19 @@ impl PluginManager {
                 files: permissions.files,
                 image: permissions.image,
             });
+        let global_shortcuts = declared_global_shortcuts(&manifest)
+            .iter()
+            .filter_map(|shortcut| {
+                Some(PluginGlobalShortcutInfo {
+                    id: shortcut.id.clone(),
+                    shortcut: normalize_plugin_hotkey(&shortcut.shortcut).ok()?,
+                    command_id: shortcut.command_id.clone(),
+                    keyword: shortcut.keyword.clone(),
+                    registration: "inactive".to_owned(),
+                    error: Some("插件快捷键尚未由驻留宿主注册。".to_owned()),
+                })
+            })
+            .collect::<Vec<_>>();
         let plugin_id = manifest.id.clone();
         Ok(PluginInfo {
             id: plugin_id.clone(),
@@ -2500,6 +2579,7 @@ impl PluginManager {
             auto_update: manifest.update.auto_update,
             command_count: commands.len(),
             commands,
+            global_shortcuts,
             search_providers,
             launcher_context,
         })
@@ -3846,6 +3926,7 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
             ));
         }
     }
+    validate_permission_declarations(&manifest.permissions)?;
     let commands = declared_commands(manifest);
     if commands.len() > MAX_COMMANDS_PER_PLUGIN {
         return Err(format!(
@@ -3853,15 +3934,39 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
         ));
     }
     let mut command_ids = std::collections::HashSet::new();
+    let mut canonical_shortcuts = std::collections::HashSet::new();
+    let mut shortcut_count = 0usize;
     for command in commands {
         if !is_valid_identifier(&command.id) {
             return Err(format!("Plugin command ID '{}' is invalid.", command.id));
         }
-        if !command_ids.insert(&command.id) {
+        if !command_ids.insert(command.id.clone()) {
             return Err(format!(
                 "Plugin declares command '{}' more than once.",
                 command.id
             ));
+        }
+        validate_shortcut_keywords(&command.keywords, &format!("command '{}'", command.id))?;
+        if let Some(shortcut) = command.shortcut.as_deref() {
+            if !manifest.permissions.global_shortcut {
+                return Err(format!(
+                    "Plugin command '{}' declares a shortcut without permissions.globalShortcut: true.",
+                    command.id
+                ));
+            }
+            let shortcut = normalize_plugin_hotkey(shortcut).map_err(|error| {
+                format!(
+                    "Plugin command '{}' has an invalid shortcut: {error}",
+                    command.id
+                )
+            })?;
+            reject_launcher_reserved_shortcut(&shortcut)?;
+            if !canonical_shortcuts.insert(shortcut.clone()) {
+                return Err(format!(
+                    "Plugin declares global shortcut '{shortcut}' more than once."
+                ));
+            }
+            shortcut_count += 1;
         }
         if let Some(execution) = command.execution.as_deref() {
             if !matches!(execution, "frontend" | "native") {
@@ -3911,6 +4016,59 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
                 command.id
             ));
         }
+    }
+    let global_shortcuts = declared_global_shortcuts(manifest);
+    let mut global_shortcut_ids = std::collections::HashSet::new();
+    for binding in global_shortcuts {
+        if !manifest.permissions.global_shortcut {
+            return Err(format!(
+                "Plugin shortcut mapping '{}' requires permissions.globalShortcut: true.",
+                binding.id
+            ));
+        }
+        if !is_valid_identifier(&binding.id) || !global_shortcut_ids.insert(&binding.id) {
+            return Err(format!(
+                "Plugin shortcut mapping ID '{}' is invalid or duplicated.",
+                binding.id
+            ));
+        }
+        match (binding.command_id.as_deref(), binding.keyword.as_deref()) {
+            (Some(command_id), None) => {
+                if !command_ids.contains(command_id) {
+                    return Err(format!(
+                        "Plugin shortcut mapping '{}' targets undeclared command '{command_id}'.",
+                        binding.id
+                    ));
+                }
+            }
+            (None, Some(keyword)) => {
+                validate_shortcut_keyword(keyword, &format!("shortcut mapping '{}'", binding.id))?;
+            }
+            _ => {
+                return Err(format!(
+                    "Plugin shortcut mapping '{}' must declare exactly one of commandId or keyword.",
+                    binding.id
+                ));
+            }
+        }
+        let shortcut = normalize_plugin_hotkey(&binding.shortcut).map_err(|error| {
+            format!(
+                "Plugin shortcut mapping '{}' has an invalid shortcut: {error}",
+                binding.id
+            )
+        })?;
+        reject_launcher_reserved_shortcut(&shortcut)?;
+        if !canonical_shortcuts.insert(shortcut.clone()) {
+            return Err(format!(
+                "Plugin declares global shortcut '{shortcut}' more than once."
+            ));
+        }
+        shortcut_count += 1;
+    }
+    if shortcut_count > MAX_GLOBAL_SHORTCUTS_PER_PLUGIN {
+        return Err(format!(
+            "Plugin declares more than {MAX_GLOBAL_SHORTCUTS_PER_PLUGIN} global shortcuts."
+        ));
     }
     let providers = declared_search_providers(manifest);
     if providers.len() > MAX_SEARCH_PROVIDERS_PER_PLUGIN {
@@ -4021,6 +4179,91 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_permission_declarations(permissions: &PluginPermissions) -> Result<(), String> {
+    if let Some(filesystem) = permissions.filesystem.as_ref() {
+        validate_permission_string_list(&filesystem.read, "permissions.filesystem.read")?;
+        validate_permission_string_list(&filesystem.write, "permissions.filesystem.write")?;
+    }
+    if let Some(network) = permissions.network.as_ref() {
+        validate_permission_string_list(&network.allow, "permissions.network.allow")?;
+    }
+    if let Some(process) = permissions.process.as_ref() {
+        validate_permission_string_list(&process.allow, "permissions.process.allow")?;
+    }
+    Ok(())
+}
+
+fn validate_permission_string_list(values: &[String], label: &str) -> Result<(), String> {
+    if values.len() > MAX_PERMISSION_LIST_ITEMS {
+        return Err(format!(
+            "Plugin {label} declares more than {MAX_PERMISSION_LIST_ITEMS} entries."
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for value in values {
+        if value
+            .trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+            != value
+            || value.is_empty()
+            || value.chars().count() > MAX_PERMISSION_VALUE_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "Plugin {label} entries must be non-empty, trimmed, free of control characters, and at most {MAX_PERMISSION_VALUE_CHARS} characters."
+            ));
+        }
+        if !seen.insert(value) {
+            return Err(format!("Plugin {label} entries must be unique."));
+        }
+    }
+    Ok(())
+}
+
+fn validate_shortcut_keywords(keywords: &[String], label: &str) -> Result<(), String> {
+    if keywords.len() > 16 {
+        return Err(format!("Plugin {label} declares more than 16 keywords."));
+    }
+    for keyword in keywords {
+        validate_shortcut_keyword(keyword, label)?;
+    }
+    Ok(())
+}
+
+fn normalized_shortcut_keywords(keywords: &[String]) -> Vec<String> {
+    let mut canonical = std::collections::HashSet::new();
+    keywords
+        .iter()
+        .filter_map(|keyword| {
+            let trimmed = keyword.trim();
+            canonical
+                .insert(trimmed.to_lowercase())
+                .then(|| trimmed.to_owned())
+        })
+        .collect()
+}
+
+fn validate_shortcut_keyword(keyword: &str, label: &str) -> Result<(), String> {
+    if keyword.trim().is_empty()
+        || keyword.chars().count() > MAX_SHORTCUT_KEYWORD_CHARS
+        || keyword.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "Plugin {label} has a keyword that is empty, contains controls, or exceeds {MAX_SHORTCUT_KEYWORD_CHARS} characters."
+        ));
+    }
+    Ok(())
+}
+
+fn reject_launcher_reserved_shortcut(shortcut: &str) -> Result<(), String> {
+    if matches!(shortcut, "Alt+Space" | "Alt+Shift+Space") {
+        return Err(format!(
+            "Global shortcut '{shortcut}' is reserved for the iHub launcher and its recovery binding."
+        ));
+    }
+    Ok(())
+}
+
 fn is_valid_identifier(value: &str) -> bool {
     let length = value.len();
     (2..=96).contains(&length)
@@ -4096,6 +4339,14 @@ fn declared_commands(manifest: &PluginManifest) -> &[PluginCommandDeclaration] {
         .filter(|contributes| !contributes.commands.is_empty())
         .map(|contributes| contributes.commands.as_slice())
         .unwrap_or(manifest.commands.as_slice())
+}
+
+fn declared_global_shortcuts(manifest: &PluginManifest) -> &[PluginGlobalShortcutDeclaration] {
+    manifest
+        .contributes
+        .as_ref()
+        .map(|contributes| contributes.global_shortcuts.as_slice())
+        .unwrap_or(&[])
 }
 
 fn manifest_has_native_worker(manifest: &PluginManifest) -> bool {
@@ -4219,6 +4470,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
     if permissions.screen_capture {
         declaration.permissions.insert("screenCapture".to_owned());
     }
+    if permissions.microphone {
+        declaration.permissions.insert("microphone".to_owned());
+    }
     if permissions.cursor_color {
         declaration.permissions.insert("cursorColor".to_owned());
     }
@@ -4302,6 +4556,13 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
             command.id,
             execution.as_str(),
         ));
+        if let Some(shortcut) = command.shortcut.as_deref() {
+            declaration.native_declarations.insert(format!(
+                "command.globalShortcut:{}:{}",
+                command.id,
+                normalize_plugin_hotkey(shortcut).unwrap_or_else(|_| shortcut.to_owned()),
+            ));
+        }
         if let Some(binary) = command.binary.as_ref() {
             declaration.native_declarations.insert(format!(
                 "command.binary:{}:{}:{}",
@@ -4330,6 +4591,15 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
             ));
         }
     }
+    for binding in declared_global_shortcuts(manifest) {
+        declaration.native_declarations.insert(format!(
+            "globalShortcut.mapping:{}:{}:{}:{}",
+            binding.id,
+            normalize_plugin_hotkey(&binding.shortcut).unwrap_or_else(|_| binding.shortcut.clone()),
+            binding.command_id.as_deref().unwrap_or_default(),
+            binding.keyword.as_deref().unwrap_or_default(),
+        ));
+    }
 
     declaration
 }
@@ -4357,7 +4627,7 @@ fn ensure_update_security_declaration_matches(
         changed.push("permissions");
     }
     if native_changed {
-        changed.push("native binary declarations");
+        changed.push("native binary declarations or global shortcut mappings");
     }
     Err(format!(
         "Refusing to update plugin '{plugin_id}': candidate {} changed. Routine Git updates cannot widen or alter the declared trust surface. After reviewing the candidate, uninstall the managed snapshot and re-import it through the explicit trust prompt before accepting this change.",
@@ -4602,12 +4872,13 @@ mod tests {
     use super::{
         automatic_update_skip_reason, command_execution, command_timeout,
         configure_git_command_environment, ensure_update_security_declaration_matches,
-        is_trusted_official_auto_update_source, load_manifest_artwork, parse_git_source,
-        parse_jsonl_rpc_response, resolve_official_workspace_plugin_at, snapshot_integrity,
-        validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
-        ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
-        PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
-        MAX_COMMANDS_PER_PLUGIN, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
+        is_trusted_official_auto_update_source, load_manifest_artwork,
+        normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response,
+        resolve_official_workspace_plugin_at, snapshot_integrity, validate_manifest,
+        verify_snapshot_integrity, wait_for_child_with_timeout, ChildWaitOutcome, CommandExecution,
+        GitSource, GitTransportPolicy, PluginManager, PluginManifest, LEGACY_SOURCE_RECORD,
+        LIFECYCLE_RECORD, LOCAL_LINKS_RECORD, MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS,
+        MAX_PERMISSION_VALUE_CHARS, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
         OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
     };
 
@@ -4626,6 +4897,30 @@ mod tests {
             install_lock: Arc::new(std::sync::Mutex::new(())),
             automatic_update_lock: Arc::new(std::sync::Mutex::new(())),
         }
+    }
+
+    #[test]
+    fn command_keyword_aliases_are_bounded_but_case_insensitive_duplicates_are_projected_once() {
+        let manifest = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-keyword-aliases",
+  "name": "Keyword aliases",
+  "entry": { "frontend": "dist/index.html" },
+  "contributes": {
+    "commands": [{
+      "id": "open",
+      "title": "Open",
+      "keywords": [" pdf ", "PDF", "合并"]
+    }]
+  }
+}"#,
+        )
+        .expect("keyword alias manifest");
+        validate_manifest(&manifest)
+            .expect("harmless search aliases should not reject the package");
+        let keywords =
+            normalized_shortcut_keywords(&super::declared_commands(&manifest)[0].keywords);
+        assert_eq!(keywords, vec!["pdf", "合并"]);
     }
 
     fn write_plugin(root: &Path, id: &str, name: &str, frontend: &str) {
@@ -5729,6 +6024,138 @@ mod tests {
     }
 
     #[test]
+    fn manifest_global_shortcuts_require_permission_and_declared_targets() {
+        let missing_permission = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-permission",
+  "name": "Shortcut permission",
+  "entry": { "frontend": "dist/index.html" },
+  "contributes": {
+    "commands": [
+      { "id": "open", "title": "Open", "shortcut": "Alt+KeyO" }
+    ]
+  }
+}"#,
+        )
+        .expect("shortcut manifest should deserialize");
+        let error = validate_manifest(&missing_permission)
+            .expect_err("a manifest shortcut is an explicit host capability");
+        assert!(error.contains("permissions.globalShortcut"), "{error}");
+
+        let unknown_target = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-target",
+  "name": "Shortcut target",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "globalShortcut": true },
+  "contributes": {
+    "commands": [{ "id": "open", "title": "Open" }],
+    "globalShortcuts": [{
+      "id": "missing",
+      "shortcut": "Alt+KeyM",
+      "commandId": "not-declared"
+    }]
+  }
+}"#,
+        )
+        .expect("shortcut target manifest should deserialize");
+        let error = validate_manifest(&unknown_target)
+            .expect_err("a global mapping must target a declared command");
+        assert!(error.contains("undeclared command"), "{error}");
+    }
+
+    #[test]
+    fn manifest_global_shortcuts_reject_system_launcher_and_duplicate_bindings() {
+        let reserved = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-reserved",
+  "name": "Shortcut reserved",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "globalShortcut": true },
+  "contributes": {
+    "commands": [
+      { "id": "open", "title": "Open", "shortcut": "Alt+Space" }
+    ]
+  }
+}"#,
+        )
+        .expect("reserved shortcut manifest should deserialize");
+        let error =
+            validate_manifest(&reserved).expect_err("Alt+Space belongs to the main launcher");
+        assert!(error.contains("reserved"), "{error}");
+
+        let duplicate = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-duplicate",
+  "name": "Shortcut duplicate",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "globalShortcut": true },
+  "contributes": {
+    "commands": [
+      { "id": "open", "title": "Open", "shortcut": "Alt+KeyO" }
+    ],
+    "globalShortcuts": [{
+      "id": "find",
+      "shortcut": "alt + keyo",
+      "keyword": "find"
+    }]
+  }
+}"#,
+        )
+        .expect("duplicate shortcut manifest should deserialize");
+        let error = validate_manifest(&duplicate)
+            .expect_err("canonical duplicate accelerators must not be order-dependent");
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    #[test]
+    fn security_declaration_locks_shortcut_target_changes() {
+        let installed = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-lock",
+  "name": "Shortcut lock",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "globalShortcut": true },
+  "contributes": {
+    "commands": [{ "id": "open", "title": "Open" }],
+    "globalShortcuts": [{
+      "id": "action",
+      "shortcut": "Alt+KeyO",
+      "commandId": "open"
+    }]
+  }
+}"#,
+        )
+        .expect("installed shortcut manifest should deserialize");
+        let candidate = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-shortcut-lock",
+  "name": "Shortcut lock",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "globalShortcut": true },
+  "contributes": {
+    "commands": [{ "id": "open", "title": "Open" }],
+    "globalShortcuts": [{
+      "id": "action",
+      "shortcut": "Alt+KeyO",
+      "keyword": "open something else"
+    }]
+  }
+}"#,
+        )
+        .expect("candidate shortcut manifest should deserialize");
+        validate_manifest(&installed).unwrap();
+        validate_manifest(&candidate).unwrap();
+        let error = ensure_update_security_declaration_matches(
+            "ihub-plugin-shortcut-lock",
+            &installed,
+            &candidate,
+        )
+        .expect_err("routine updates may not silently retarget a global shortcut");
+        assert!(error.contains("native binary declarations"), "{error}");
+    }
+
+    #[test]
     fn manifest_rejects_ambiguous_identity_but_legacy_command_artwork_degrades() {
         let ambiguous = serde_json::from_str::<PluginManifest>(
             r#"{
@@ -6454,6 +6881,11 @@ mod tests {
   "network": { "allow": ["https://translate.example.test"] },
   "process": { "spawn": true, "allow": ["tesseract"] },
   "cursorColor": true
+}"#,
+            r#"{
+  "network": { "allow": ["https://translate.example.test"] },
+  "process": { "spawn": true, "allow": ["tesseract"] },
+  "microphone": true
 }"#,
             r#"{
   "network": { "allow": ["https://translate.example.test"] },
@@ -7337,6 +7769,248 @@ mod tests {
         assert!(error.contains("dedicated child build directory"));
 
         let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn frontend_bundle_projects_only_a_nonempty_network_declaration() {
+        let storage = temporary_directory("frontend-network-policy-storage");
+        let locked_id = "ihub-plugin-network-locked";
+        let networked_id = "ihub-plugin-network-open";
+        let locked_root = storage.join(locked_id);
+        let networked_root = storage.join(networked_id);
+        write_plugin(&locked_root, locked_id, "Network locked", "dist/index.html");
+        write_plugin(
+            &networked_root,
+            networked_id,
+            "Network declared",
+            "dist/index.html",
+        );
+        fs::write(
+            networked_root.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{networked_id}",
+  "name": "Network declared",
+  "version": "0.1.0",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "permissions": {{
+    "network": {{
+      "allow": ["user-configured HTTPS endpoint"]
+    }}
+  }}
+}}"#
+            ),
+        )
+        .expect("networked manifest should be written");
+
+        let manager = manager_at(storage.clone());
+        assert!(
+            !manager
+                .frontend_asset_bundle(locked_id)
+                .expect("locked frontend bundle")
+                .allows_remote_network
+        );
+        assert!(
+            manager
+                .frontend_asset_bundle(networked_id)
+                .expect("networked frontend bundle")
+                .allows_remote_network
+        );
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn nested_permissions_reject_unknown_fields_and_unsafe_string_lists() {
+        for permissions in [
+            r#""network": { "allow": [], "typo": true }"#,
+            r#""filesystem": { "read": [], "typo": [] }"#,
+            r#""clipboard": { "read": true, "typo": true }"#,
+            r#""process": { "spawn": true, "typo": true }"#,
+            r#""shell": { "openPath": true, "typo": true }"#,
+        ] {
+            let document = format!(
+                r#"{{
+  "id": "ihub-plugin-permission-unknown",
+  "name": "Permission unknown",
+  "version": "0.1.0",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "permissions": {{ {permissions} }}
+}}"#
+            );
+            let error = serde_json::from_str::<PluginManifest>(&document)
+                .expect_err("unknown nested permission fields must fail closed");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+
+        let over_capacity = (0..=MAX_PERMISSION_LIST_ITEMS)
+            .map(|index| format!(r#""target-{index}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let too_long = "x".repeat(MAX_PERMISSION_VALUE_CHARS + 1);
+        for allow in [
+            r#""""#.to_owned(),
+            r#"" https://api.example.test""#.to_owned(),
+            r#""\uFEFFhttps://api.example.test""#.to_owned(),
+            r#""https://api.example.test\u0001""#.to_owned(),
+            r#""https://api.example.test","https://api.example.test""#.to_owned(),
+            over_capacity,
+            format!(r#""{too_long}""#),
+        ] {
+            let document = format!(
+                r#"{{
+  "id": "ihub-plugin-network-invalid",
+  "name": "Network invalid",
+  "version": "0.1.0",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "permissions": {{ "network": {{ "allow": [{allow}] }} }}
+}}"#
+            );
+            let manifest = serde_json::from_str::<PluginManifest>(&document)
+                .expect("unsafe list entries remain syntactically valid JSON");
+            let error = validate_manifest(&manifest)
+                .expect_err("unsafe network declarations must not open the coarse CSP gate");
+            assert!(error.contains("permissions.network.allow"), "{error}");
+        }
+    }
+
+    #[test]
+    fn frontend_bundle_projects_only_an_explicit_screen_capture_declaration() {
+        let storage = temporary_directory("frontend-display-capture-policy-storage");
+        let undeclared_id = "ihub-plugin-display-capture-locked";
+        let declared_id = "ihub-plugin-display-capture-open";
+        let undeclared_root = storage.join(undeclared_id);
+        let declared_root = storage.join(declared_id);
+        write_plugin(
+            &undeclared_root,
+            undeclared_id,
+            "Display capture locked",
+            "dist/index.html",
+        );
+        write_plugin(
+            &declared_root,
+            declared_id,
+            "Display capture declared",
+            "dist/index.html",
+        );
+        fs::write(
+            declared_root.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{declared_id}",
+  "name": "Display capture declared",
+  "version": "0.1.0",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "permissions": {{ "screenCapture": true }}
+}}"#
+            ),
+        )
+        .expect("screen-capture manifest should be written");
+
+        let manager = manager_at(storage.clone());
+        assert!(
+            !manager
+                .frontend_asset_bundle(undeclared_id)
+                .expect("undeclared frontend bundle")
+                .allows_display_capture
+        );
+        assert!(
+            manager
+                .frontend_asset_bundle(declared_id)
+                .expect("declared frontend bundle")
+                .allows_display_capture
+        );
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn frontend_bundle_projects_only_an_explicit_microphone_declaration() {
+        let storage = temporary_directory("frontend-microphone-policy-storage");
+        let undeclared_id = "ihub-plugin-microphone-locked";
+        let declared_id = "ihub-plugin-microphone-open";
+        let undeclared_root = storage.join(undeclared_id);
+        let declared_root = storage.join(declared_id);
+        write_plugin(
+            &undeclared_root,
+            undeclared_id,
+            "Microphone locked",
+            "dist/index.html",
+        );
+        write_plugin(
+            &declared_root,
+            declared_id,
+            "Microphone declared",
+            "dist/index.html",
+        );
+        fs::write(
+            declared_root.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{declared_id}",
+  "name": "Microphone declared",
+  "version": "0.1.0",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "permissions": {{ "microphone": true }}
+}}"#
+            ),
+        )
+        .expect("microphone manifest should be written");
+
+        let manager = manager_at(storage.clone());
+        assert!(
+            !manager
+                .frontend_asset_bundle(undeclared_id)
+                .expect("undeclared frontend bundle")
+                .allows_microphone
+        );
+        assert!(
+            manager
+                .frontend_asset_bundle(declared_id)
+                .expect("declared frontend bundle")
+                .allows_microphone
+        );
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn microphone_manifest_permission_is_boolean_and_rejects_unknown_typos() {
+        let valid = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-microphone-valid",
+  "name": "Microphone valid",
+  "version": "1.0.0",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "microphone": true }
+}"#,
+        )
+        .expect("an explicit boolean microphone permission should deserialize");
+        assert!(valid.permissions.microphone);
+
+        let non_boolean = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-microphone-invalid",
+  "name": "Microphone invalid",
+  "version": "1.0.0",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "microphone": "yes" }
+}"#,
+        )
+        .expect_err("a non-boolean microphone declaration must be rejected");
+        assert!(non_boolean.to_string().contains("boolean"));
+
+        let typo = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-microphone-typo",
+  "name": "Microphone typo",
+  "version": "1.0.0",
+  "entry": { "frontend": "dist/index.html" },
+  "permissions": { "microhpone": true }
+}"#,
+        )
+        .expect_err("an unknown permission typo must be rejected");
+        assert!(typo.to_string().contains("unknown field"));
     }
 
     #[test]

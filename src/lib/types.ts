@@ -20,6 +20,8 @@ export interface SearchResult {
   timeInput?: string;
   /** A result produced by a manifest-declared iframe search provider. */
   pluginProviderId?: string;
+  /** Opaque native query snapshot used to validate a detached selection. */
+  pluginSearchRequestId?: string;
   pluginSearchResultId?: string;
   pluginPayload?: unknown;
 }
@@ -108,6 +110,8 @@ export interface PluginInfo {
   autoUpdate?: boolean;
   commands?: number | PluginCommandInfo[];
   commandCount?: number;
+  /** Host-owned plugin-level shortcut-to-command/keyword mappings. */
+  globalShortcuts?: PluginGlobalShortcutInfo[];
   /** Metadata declared in the plugin manifest. The iframe must still register
    * a provider before the host sends it a real query. */
   searchProviders?: PluginSearchProviderInfo[];
@@ -218,6 +222,28 @@ export interface PluginCommandInfo {
   iconSrc?: string;
   /** Whether activation opens the plugin iframe or starts a declared worker. */
   execution: "frontend" | "native";
+  /** Static manifest aliases used by launcher search. */
+  keywords?: string[];
+  /** Canonical manifest-owned global accelerator. */
+  shortcut?: string;
+  shortcutRegistration?: "registered" | "blocked" | "unavailable" | "inactive" | string;
+  shortcutError?: string;
+}
+
+export interface PluginGlobalShortcutInfo {
+  id: string;
+  shortcut: string;
+  commandId?: string;
+  keyword?: string;
+  registration: "registered" | "blocked" | "unavailable" | "inactive" | string;
+  error?: string;
+}
+
+export interface PluginGlobalShortcutEvent {
+  pluginId: string;
+  shortcut: string;
+  commandId?: string;
+  keyword?: string;
 }
 
 /** Bounded outcome returned after iHub waits for a one-shot native plugin command. */
@@ -255,6 +281,11 @@ export interface PluginSearchResponse {
   results: PluginSearchProviderResult[];
 }
 
+export interface RegisteredPluginSearchProvider {
+  pluginId: string;
+  providerId: string;
+}
+
 export interface PluginSearchProviderResult {
   id: string;
   title: string;
@@ -282,6 +313,12 @@ export interface PluginFrontendLease {
   leaseId: string;
   url: string;
   origin: string;
+  /** Native-projected capability. True only for a visible lease whose
+   * validated manifest declares permissions.screenCapture. */
+  allowsDisplayCapture: boolean;
+  /** Native-projected capability. True only for a visible lease whose
+   * validated manifest declares permissions.microphone. */
+  allowsMicrophone: boolean;
 }
 
 export interface AutostartStatus {
@@ -300,6 +337,26 @@ export interface LauncherHotkeyStatus {
   /** The native tray's “Show iHub” action remains usable for recovery. */
   trayShowAvailable: boolean;
 }
+
+export interface SuperPanelStatus {
+  enabled: boolean;
+  listenerRunning: boolean;
+  holdMs: number;
+  error?: string;
+}
+
+export interface SuperPanelEvent {
+  contextToken: string;
+  physicalX: number;
+  physicalY: number;
+  expiresInMs: number;
+}
+
+export type SuperPanelContext =
+  | { kind: "files"; files: ClipboardFile[] }
+  | { kind: "image"; image: ClipboardImage }
+  | { kind: "text"; text: string }
+  | { kind: "empty" };
 
 export interface AppHealth {
   version: string;

@@ -1,8 +1,8 @@
 //! Bounded operating-system icons for launcher results.
 //!
-//! All Windows Shell and COM work is confined to one single-threaded-apartment
-//! worker. Callers submit trusted native-index paths through a bounded queue and
-//! receive only a bounded PNG data URL.
+//! Windows Shell/COM work and macOS application-bundle artwork decoding stay
+//! off the command thread. Callers submit trusted native-index paths through a
+//! bounded queue and receive only a bounded PNG data URL.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -198,7 +198,7 @@ impl NativeIconPending {
     }
 }
 
-/// Process-wide access to Windows Shell icons.
+/// Process-wide access to operating-system icons.
 ///
 /// `try_request` never waits for queue capacity. Consumers retain the returned
 /// pending request and wait on a background task, keeping Shell work out of the
@@ -217,7 +217,7 @@ impl NativeIconService {
     pub(crate) fn new() -> Self {
         let worker_state = Arc::new(WorkerState::default());
         let sender = start_worker(Arc::clone(&worker_state));
-        if sender.is_none() && cfg!(target_os = "windows") {
+        if sender.is_none() && cfg!(any(target_os = "windows", target_os = "macos")) {
             worker_state.stalled.store(true, Ordering::Release);
         }
         Self {
@@ -302,7 +302,17 @@ fn start_worker(worker_state: Arc<WorkerState>) -> Option<SyncSender<IconRequest
     Some(sender)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn start_worker(worker_state: Arc<WorkerState>) -> Option<SyncSender<IconRequest>> {
+    let (sender, receiver) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
+    std::thread::Builder::new()
+        .name("ihub-native-icon-macos".to_owned())
+        .spawn(move || macos_icon_worker(receiver, worker_state))
+        .ok()?;
+    Some(sender)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn start_worker(_worker_state: Arc<WorkerState>) -> Option<SyncSender<IconRequest>> {
     None
 }
@@ -335,6 +345,39 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
             let extracted = valid_type
                 .then(|| windows_backend::icon_data_url(&request.path))
                 .flatten();
+            cache.insert(key, extracted.clone(), now);
+            extracted
+        };
+
+        worker_state
+            .last_completed_id
+            .store(request.id, Ordering::Release);
+        worker_state.stalled.store(false, Ordering::Release);
+        let _ = request.reply.try_send(value);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) {
+    let mut cache = IconCache::bounded();
+    while let Ok(request) = receiver.recv() {
+        let metadata = fs::metadata(&request.path).ok();
+        let key = cache_key(
+            request.path.clone(),
+            request.kind.clone(),
+            metadata.as_ref(),
+        );
+        let now = Instant::now();
+        let value = if let Some(cached) = cache.get(&key, now) {
+            cached
+        } else {
+            // dTools only resolves bundle artwork for applications on macOS.
+            // Files and folders intentionally retain the neutral host fallback
+            // until their native Finder icon contract is implemented.
+            let extracted = (request.kind == "application"
+                && metadata.as_ref().is_some_and(fs::Metadata::is_dir))
+            .then(|| macos_backend::application_icon_data_url(&request.path))
+            .flatten();
             cache.insert(key, extracted.clone(), now);
             extracted
         };
@@ -1021,6 +1064,338 @@ mod windows_backend {
     #[cfg(test)]
     pub(super) fn test_internet_shortcut_icon(path: &Path) -> Option<(PathBuf, i32)> {
         internet_shortcut_icon_source(path, &nul_terminated_wide(path)?)
+    }
+}
+
+/// Pure-Rust, bounded `.icns` extraction for macOS application bundles.
+///
+/// dTools looks for `App.icns`, `AppIcon.icns`, the bundle name, and finally
+/// the first `.icns` resource. We keep that compatibility order, but reject
+/// linked resource directories, linked icon files, and containment escapes,
+/// and decode only bounded PNG-backed ICNS entries. Modern application bundles
+/// ship these PNG representations; older raw/JP2-only files safely fall back
+/// to the host placeholder.
+#[cfg(any(target_os = "macos", test))]
+mod macos_backend {
+    use std::{
+        fs::{self, File},
+        io::{Cursor, Read},
+        path::{Path, PathBuf},
+    };
+
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use image::{
+        codecs::png::PngEncoder,
+        imageops::{self, FilterType},
+        ColorType, GenericImageView, ImageEncoder, ImageFormat, ImageReader, RgbaImage,
+    };
+
+    use super::{ICON_EDGE, MAX_ICON_DATA_URL_BYTES};
+
+    const ICNS_MAGIC: &[u8; 4] = b"icns";
+    const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    const MAX_ICNS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_ICNS_PNG_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_ICNS_EDGE: u32 = 2_048;
+    const MAX_ICNS_PIXELS: u64 = 4_194_304;
+    const MAX_ICNS_CHUNKS: usize = 256;
+    const MAX_RESOURCE_ENTRIES: usize = 128;
+
+    pub(super) fn application_icon_data_url(bundle: &Path) -> Option<String> {
+        let icon_path = icon_resource_path(bundle)?;
+        let bytes = read_bounded_file(&icon_path, MAX_ICNS_FILE_BYTES)?;
+        icon_data_url_from_icns(&bytes)
+    }
+
+    fn is_supported_bundle(bundle: &Path) -> bool {
+        bundle
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("app") || extension.eq_ignore_ascii_case("prefPane")
+            })
+    }
+
+    fn icon_resource_path(bundle: &Path) -> Option<PathBuf> {
+        if !bundle.is_absolute() || !is_supported_bundle(bundle) {
+            return None;
+        }
+        let bundle_metadata = fs::metadata(bundle).ok()?;
+        if !bundle_metadata.is_dir() {
+            return None;
+        }
+        let canonical_bundle = fs::canonicalize(bundle).ok()?;
+        let resources = bundle.join("Contents/Resources");
+        let resource_metadata = fs::symlink_metadata(&resources).ok()?;
+        if resource_metadata.file_type().is_symlink() || !resource_metadata.is_dir() {
+            return None;
+        }
+        let canonical_resources = fs::canonicalize(&resources).ok()?;
+        if !canonical_resources.starts_with(&canonical_bundle) {
+            return None;
+        }
+
+        let bundle_stem = bundle.file_stem()?.to_string_lossy();
+        let compact_stem = bundle_stem
+            .chars()
+            .filter(|value| *value != ' ')
+            .collect::<String>();
+        let mut preferred = vec![
+            "App.icns".to_owned(),
+            "AppIcon.icns".to_owned(),
+            format!("{bundle_stem}.icns"),
+        ];
+        if compact_stem != bundle_stem {
+            preferred.push(format!("{compact_stem}.icns"));
+        }
+        for name in preferred {
+            let candidate = resources.join(name);
+            if let Some(verified) = verify_icon_resource(&canonical_resources, &candidate) {
+                return Some(verified);
+            }
+        }
+
+        let mut entries = fs::read_dir(&resources)
+            .ok()?
+            .filter_map(Result::ok)
+            .take(MAX_RESOURCE_ENTRIES + 1)
+            .collect::<Vec<_>>();
+        if entries.len() > MAX_RESOURCE_ENTRIES {
+            return None;
+        }
+        entries.sort_unstable_by_key(fs::DirEntry::file_name);
+        entries.into_iter().find_map(|entry| {
+            let path = entry.path();
+            let is_icns = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("icns"));
+            is_icns
+                .then(|| verify_icon_resource(&canonical_resources, &path))
+                .flatten()
+        })
+    }
+
+    fn verify_icon_resource(canonical_resources: &Path, candidate: &Path) -> Option<PathBuf> {
+        let metadata = fs::symlink_metadata(candidate).ok()?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_ICNS_FILE_BYTES
+        {
+            return None;
+        }
+        let canonical = fs::canonicalize(candidate).ok()?;
+        canonical
+            .starts_with(canonical_resources)
+            .then_some(canonical)
+    }
+
+    fn read_bounded_file(path: &Path, limit: u64) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        File::open(path)
+            .ok()?
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= limit).then_some(bytes)
+    }
+
+    fn icon_data_url_from_icns(bytes: &[u8]) -> Option<String> {
+        if bytes.len() < 8 || &bytes[..4] != ICNS_MAGIC {
+            return None;
+        }
+        let declared_length = u32::from_be_bytes(bytes[4..8].try_into().ok()?) as usize;
+        if declared_length != bytes.len() {
+            return None;
+        }
+
+        let mut cursor = 8_usize;
+        let mut chunk_count = 0_usize;
+        let mut best: Option<(&[u8], u64)> = None;
+        while cursor < bytes.len() {
+            chunk_count = chunk_count.checked_add(1)?;
+            if chunk_count > MAX_ICNS_CHUNKS {
+                return None;
+            }
+            let header_end = cursor.checked_add(8)?;
+            if header_end > bytes.len() {
+                return None;
+            }
+            let block_length =
+                u32::from_be_bytes(bytes[cursor + 4..header_end].try_into().ok()?) as usize;
+            if block_length < 8 {
+                return None;
+            }
+            let block_end = cursor.checked_add(block_length)?;
+            if block_end > bytes.len() {
+                return None;
+            }
+            let payload = &bytes[header_end..block_end];
+            if payload.len() <= MAX_ICNS_PNG_BYTES && payload.starts_with(PNG_MAGIC) {
+                let reader = ImageReader::with_format(Cursor::new(payload), ImageFormat::Png);
+                if let Ok((width, height)) = reader.into_dimensions() {
+                    let pixels = u64::from(width).saturating_mul(u64::from(height));
+                    if width > 0
+                        && height > 0
+                        && width <= MAX_ICNS_EDGE
+                        && height <= MAX_ICNS_EDGE
+                        && pixels <= MAX_ICNS_PIXELS
+                        && best.map_or(true, |(_, best_pixels)| pixels > best_pixels)
+                    {
+                        best = Some((payload, pixels));
+                    }
+                }
+            }
+            cursor = block_end;
+        }
+
+        let (payload, _) = best?;
+        let image = image::load_from_memory_with_format(payload, ImageFormat::Png)
+            .ok()?
+            .into_rgba8();
+        encode_png_data_url(image)
+    }
+
+    fn encode_png_data_url(source: RgbaImage) -> Option<String> {
+        let (width, height) = source.dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let output = if width == ICON_EDGE && height == ICON_EDGE {
+            source
+        } else {
+            let scale = (ICON_EDGE as f64 / width as f64).min(ICON_EDGE as f64 / height as f64);
+            let resized_width = ((width as f64 * scale).round() as u32).clamp(1, ICON_EDGE);
+            let resized_height = ((height as f64 * scale).round() as u32).clamp(1, ICON_EDGE);
+            let resized =
+                imageops::resize(&source, resized_width, resized_height, FilterType::Lanczos3);
+            let mut canvas = RgbaImage::new(ICON_EDGE, ICON_EDGE);
+            imageops::overlay(
+                &mut canvas,
+                &resized,
+                i64::from((ICON_EDGE - resized_width) / 2),
+                i64::from((ICON_EDGE - resized_height) / 2),
+            );
+            canvas
+        };
+
+        let mut png = Vec::with_capacity(output.as_raw().len());
+        PngEncoder::new(&mut png)
+            .write_image(
+                output.as_raw(),
+                ICON_EDGE,
+                ICON_EDGE,
+                ColorType::Rgba8.into(),
+            )
+            .ok()?;
+        let data_url = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(png));
+        (data_url.len() <= MAX_ICON_DATA_URL_BYTES).then_some(data_url)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn test_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+            let image = RgbaImage::from_pixel(width, height, image::Rgba(rgba));
+            let mut png = Vec::new();
+            PngEncoder::new(&mut png)
+                .write_image(image.as_raw(), width, height, ColorType::Rgba8.into())
+                .expect("encode test png");
+            png
+        }
+
+        fn test_icns(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+            let total = 8_usize
+                + chunks
+                    .iter()
+                    .map(|(_, payload)| 8_usize + payload.len())
+                    .sum::<usize>();
+            let mut bytes = Vec::with_capacity(total);
+            bytes.extend_from_slice(ICNS_MAGIC);
+            bytes.extend_from_slice(&(total as u32).to_be_bytes());
+            for (kind, payload) in chunks {
+                bytes.extend_from_slice(*kind);
+                bytes.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+                bytes.extend_from_slice(payload);
+            }
+            bytes
+        }
+
+        #[test]
+        fn selects_the_largest_bounded_png_and_normalizes_to_48_pixels() {
+            let small = test_png(16, 16, [255, 0, 0, 255]);
+            let large = test_png(256, 128, [0, 128, 255, 255]);
+            let bytes = test_icns(&[(b"icp4", small), (b"ic08", large)]);
+            let data_url = icon_data_url_from_icns(&bytes).expect("decoded icon");
+            let decoded = BASE64_STANDARD
+                .decode(
+                    data_url
+                        .strip_prefix("data:image/png;base64,")
+                        .expect("png data url"),
+                )
+                .expect("base64");
+            let image = image::load_from_memory_with_format(&decoded, ImageFormat::Png)
+                .expect("normalized png");
+            assert_eq!(image.dimensions(), (ICON_EDGE, ICON_EDGE));
+            let center = image.to_rgba8().get_pixel(24, 24).0;
+            assert_eq!(center, [0, 128, 255, 255]);
+        }
+
+        #[test]
+        fn rejects_malformed_lengths_and_unbounded_dimensions() {
+            let mut malformed = test_icns(&[(b"ic08", test_png(32, 32, [1, 2, 3, 255]))]);
+            malformed[7] = malformed[7].wrapping_add(1);
+            assert!(icon_data_url_from_icns(&malformed).is_none());
+
+            let huge_header_only = {
+                let mut png = test_png(1, 1, [1, 2, 3, 255]);
+                // PNG IHDR width and height are big-endian at offsets 16/20.
+                png[16..20].copy_from_slice(&4_096_u32.to_be_bytes());
+                png[20..24].copy_from_slice(&4_096_u32.to_be_bytes());
+                test_icns(&[(b"ic10", png)])
+            };
+            assert!(icon_data_url_from_icns(&huge_header_only).is_none());
+        }
+
+        #[test]
+        fn rejects_an_excessive_number_of_icns_chunks() {
+            let chunks = (0..=MAX_ICNS_CHUNKS)
+                .map(|_| (b"TOC ", Vec::new()))
+                .collect::<Vec<_>>();
+            assert!(icon_data_url_from_icns(&test_icns(&chunks)).is_none());
+        }
+
+        #[test]
+        fn resolves_dtools_compatible_bundle_candidates_without_leaving_resources() {
+            let bundle =
+                std::env::temp_dir().join(format!("ihub-macos-icon-{}.app", uuid::Uuid::new_v4()));
+            let outside_icon = std::env::temp_dir().join(format!(
+                "ihub-macos-icon-outside-{}.icns",
+                uuid::Uuid::new_v4()
+            ));
+            let resources = bundle.join("Contents/Resources");
+            fs::create_dir_all(&resources).expect("create resources");
+            let icns = test_icns(&[(b"ic08", test_png(64, 64, [24, 80, 160, 255]))]);
+            fs::write(resources.join("AppIcon.icns"), &icns).expect("write icns");
+            fs::write(&outside_icon, icns).expect("write outside icns");
+
+            let resolved = icon_resource_path(&bundle).expect("resolve icon");
+            assert_eq!(
+                resolved.file_name().and_then(|value| value.to_str()),
+                Some("AppIcon.icns")
+            );
+            let canonical_resources =
+                fs::canonicalize(&resources).expect("canonical resources directory");
+            assert!(verify_icon_resource(&canonical_resources, &outside_icon).is_none());
+            assert!(application_icon_data_url(&bundle)
+                .expect("bundle icon")
+                .starts_with("data:image/png;base64,"));
+
+            fs::remove_file(outside_icon).expect("cleanup outside icon");
+            fs::remove_dir_all(&bundle).expect("cleanup bundle");
+        }
     }
 }
 

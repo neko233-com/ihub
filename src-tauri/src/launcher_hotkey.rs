@@ -173,7 +173,7 @@ pub fn normalize_launcher_hotkey(accelerator: &str) -> Result<String, String> {
     }
     let key = key.ok_or_else(|| "快捷键必须包含一个普通按键。".to_owned())?;
     if alt && key == "F4" {
-        return Err("Alt+F4 是系统关闭窗口快捷键，不能用于呼出 iHub。".to_owned());
+        return Err("Alt+F4 是系统关闭窗口快捷键，不能注册为全局快捷键。".to_owned());
     }
 
     let mut tokens = Vec::with_capacity(4);
@@ -188,6 +188,14 @@ pub fn normalize_launcher_hotkey(accelerator: &str) -> Result<String, String> {
     }
     tokens.push(key);
     Ok(tokens.join("+"))
+}
+
+/// Applies the same bounded, cross-platform accelerator grammar to a
+/// manifest-declared plugin shortcut. Keeping plugin and launcher
+/// normalization identical lets the resident host compare canonical strings
+/// before it touches the operating-system shortcut registry.
+pub fn normalize_plugin_hotkey(accelerator: &str) -> Result<String, String> {
+    normalize_launcher_hotkey(accelerator)
 }
 
 fn normalize_safe_key(token: &str) -> Option<&'static str> {

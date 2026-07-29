@@ -25,6 +25,8 @@ import type {
   ScreenCaptureFocusLease,
   ScreenCaptureFocusLeaseRelease,
   PluginSettingWriteResult,
+  PluginSubInputChange,
+  PluginSubInputChangeHandler,
   WindowManagementAction,
   WindowManagementResult,
   SearchHandler,
@@ -33,6 +35,7 @@ import type {
   SearchResult,
   Unlisten,
 } from "./types.js";
+import { installUToolsCompatibility } from "./compatibility.js";
 
 declare global {
   interface Window {
@@ -54,6 +57,8 @@ const MIN_NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS = 1_000;
 // response channel alive long enough to receive the host's result; it never
 // extends the host-owned deadline or any permission.
 const NATIVE_COMMAND_FRAME_CALL_TIMEOUT_MS = 30 * 60 * 1_000 + 10_000;
+const MAX_SUB_INPUT_PLACEHOLDER_LENGTH = 160;
+const MAX_SUB_INPUT_VALUE_LENGTH = 4_096;
 
 const eventName = (pluginId: string, kind: "command" | "search") => `ihub://plugin/${pluginId}/${kind}`;
 
@@ -218,6 +223,7 @@ export function getHostBridge(): HostBridge {
 export function createDevelopmentBridge(): DevelopmentBridge {
   const listeners = new Map<string, Set<(payload: unknown) => void | Promise<void>>>();
   const settings = new Map<string, Json>();
+  let subInputActive = false;
 
   return {
     async call<T>(request: HostRequest): Promise<T> {
@@ -228,6 +234,22 @@ export function createDevelopmentBridge(): DevelopmentBridge {
         case "settings.set":
           settings.set(String(params.key), params.value);
           return { saved: true, persistent: false } as T;
+        case "ui.subInput.set":
+          subInputActive = true;
+          return true as T;
+        case "ui.subInput.remove":
+          subInputActive = false;
+          return true as T;
+        case "ui.subInput.setValue": {
+          if (!subInputActive) {
+            return false as T;
+          }
+          const handlers = [
+            ...(listeners.get(`ihub://plugin/${request.pluginId}/event/subInput.change`) ?? []),
+          ];
+          await Promise.all(handlers.map((handler) => handler({ text: String(params.value ?? "") })));
+          return true as T;
+        }
         case "clipboard.readText":
           return "" as T;
         case "clipboard.history.snapshot":
@@ -277,8 +299,12 @@ class Runtime implements Disposable {
   private readonly commandHandlers = new Map<string, CommandHandler>();
   private readonly searchHandlers = new Map<string, SearchHandler>();
   private readonly unlisten: Unlisten[] = [];
+  private compatibility: Disposable | null = null;
+  private subInputOperation: Promise<void> = Promise.resolve();
   private commandListenerReady = false;
   private searchListenerReady = false;
+  private subInputListenerReady = false;
+  private subInputHandler: PluginSubInputChangeHandler | null = null;
   private disposed = false;
 
   constructor(
@@ -294,6 +320,12 @@ class Runtime implements Disposable {
       },
       search: {
         register: (definition, handler) => this.registerSearchProvider(definition, handler),
+      },
+      subInput: {
+        set: (onChange, placeholder, focus) =>
+          this.enqueueSubInput(() => this.setSubInput(onChange, placeholder, focus)),
+        remove: () => this.enqueueSubInput(() => this.removeSubInput()),
+        setValue: (value) => this.enqueueSubInput(() => this.setSubInputValue(value)),
       },
       settings: {
         get: <T extends Json>(key: string, fallback?: T) => this.getSetting(key, fallback),
@@ -357,6 +389,7 @@ class Runtime implements Disposable {
   }
 
   async activate(activate: (context: PluginContext) => void | Promise<void>): Promise<void> {
+    this.compatibility = installUToolsCompatibility(this.context, this.onError);
     await activate(this.context);
     await this.call("lifecycle.ready");
   }
@@ -366,10 +399,84 @@ class Runtime implements Disposable {
       return;
     }
     this.disposed = true;
+    this.compatibility?.dispose();
+    this.compatibility = null;
+    const removeSubInput = this.subInputHandler
+      ? this.bridge.call({
+          pluginId: this.pluginId,
+          method: "ui.subInput.remove",
+        }).catch(this.onError)
+      : Promise.resolve();
+    this.subInputHandler = null;
     this.commandHandlers.clear();
     this.searchHandlers.clear();
-    await Promise.all(this.unlisten.splice(0).map((dispose) => Promise.resolve(dispose())));
+    await Promise.all([
+      removeSubInput,
+      ...this.unlisten.splice(0).map((dispose) => Promise.resolve(dispose())),
+    ]);
     await this.bridge.call({ pluginId: this.pluginId, method: "lifecycle.dispose" }).catch(this.onError);
+  }
+
+  private async setSubInput(
+    onChange: PluginSubInputChangeHandler,
+    placeholder = "",
+    focus = true,
+  ): Promise<boolean> {
+    this.assertActive();
+    if (typeof onChange !== "function") {
+      throw new Error("Sub-input change handler must be a function.");
+    }
+    if (typeof placeholder !== "string" || placeholder.length > MAX_SUB_INPUT_PLACEHOLDER_LENGTH) {
+      throw new Error(`Sub-input placeholder must be at most ${MAX_SUB_INPUT_PLACEHOLDER_LENGTH} characters.`);
+    }
+    if (typeof focus !== "boolean") {
+      throw new Error("Sub-input focus must be a boolean.");
+    }
+
+    await this.ensureSubInputListener();
+    const previousHandler = this.subInputHandler;
+    this.subInputHandler = onChange;
+    try {
+      const accepted = await this.call<boolean>("ui.subInput.set", {
+        placeholder,
+        focus,
+      });
+      if (accepted !== true) {
+        this.subInputHandler = previousHandler;
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.subInputHandler = previousHandler;
+      throw error;
+    }
+  }
+
+  private async removeSubInput(): Promise<boolean> {
+    this.assertActive();
+    const removed = await this.call<boolean>("ui.subInput.remove");
+    if (removed === true) {
+      this.subInputHandler = null;
+      return true;
+    }
+    return false;
+  }
+
+  private async setSubInputValue(value: string): Promise<boolean> {
+    this.assertActive();
+    if (typeof value !== "string" || value.length > MAX_SUB_INPUT_VALUE_LENGTH) {
+      throw new Error(`Sub-input value must be at most ${MAX_SUB_INPUT_VALUE_LENGTH} characters.`);
+    }
+    return (await this.call<boolean>("ui.subInput.setValue", { value })) === true;
+  }
+
+  private enqueueSubInput<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.subInputOperation.then(operation);
+    this.subInputOperation = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async registerCommand(definition: RuntimeCommandDefinition, handler: CommandHandler): Promise<Disposable> {
@@ -380,11 +487,13 @@ class Runtime implements Disposable {
 
     await this.ensureCommandListener();
     this.commandHandlers.set(definition.id, handler);
-    // Runtime registrations must never turn an iframe-provided string into a
-    // package artwork path. Keep this defensive strip even though the public
-    // RuntimeCommandDefinition type rejects `icon` at compile time.
-    const { icon: _ignoredIcon, ...hostDefinition } = definition as RuntimeCommandDefinition & {
+    // Runtime registrations must never turn iframe-provided strings into a
+    // package artwork path or OS-level shortcut. Keep this defensive strip
+    // even though the public RuntimeCommandDefinition type rejects both at
+    // compile time.
+    const { icon: _ignoredIcon, shortcut: _ignoredShortcut, ...hostDefinition } = definition as RuntimeCommandDefinition & {
       icon?: unknown;
+      shortcut?: unknown;
     };
     await this.call("commands.register", { definition: json(hostDefinition) });
     return this.registrationDisposable(
@@ -454,6 +563,36 @@ class Runtime implements Disposable {
     );
     this.unlisten.push(dispose);
     this.searchListenerReady = true;
+  }
+
+  private async ensureSubInputListener(): Promise<void> {
+    if (this.subInputListenerReady) {
+      return;
+    }
+    const dispose = await this.bridge.listen<PluginSubInputChange>(
+      `ihub://plugin/${this.pluginId}/event/subInput.change`,
+      async (change) => {
+        if (
+          !change
+          || typeof change !== "object"
+          || typeof change.text !== "string"
+          || change.text.length > MAX_SUB_INPUT_VALUE_LENGTH
+        ) {
+          return;
+        }
+        const handler = this.subInputHandler;
+        if (!handler) {
+          return;
+        }
+        try {
+          await handler({ text: change.text });
+        } catch (error) {
+          this.onError(error);
+        }
+      },
+    );
+    this.unlisten.push(dispose);
+    this.subInputListenerReady = true;
   }
 
   private async handleCommand(request: CommandInvocation): Promise<void> {

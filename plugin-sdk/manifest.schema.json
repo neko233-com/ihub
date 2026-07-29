@@ -105,6 +105,11 @@
           "type": "array",
           "items": { "$ref": "#/$defs/setting" }
         },
+        "globalShortcuts": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/globalShortcut" }
+        },
         "quickActions": {
           "type": "array",
           "items": { "$ref": "#/$defs/quickAction" }
@@ -127,11 +132,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "allow": {
-              "type": "array",
-              "items": { "type": "string", "minLength": 1 },
-              "uniqueItems": true
-            }
+            "allow": { "$ref": "#/$defs/permissionStringList" }
           }
         },
         "clipboard": {
@@ -149,11 +150,7 @@
           "additionalProperties": false,
           "properties": {
             "spawn": { "type": "boolean" },
-            "allow": {
-              "type": "array",
-              "items": { "type": "string", "minLength": 1 },
-              "uniqueItems": true
-            }
+            "allow": { "$ref": "#/$defs/permissionStringList" }
           }
         },
         "shell": {
@@ -166,13 +163,20 @@
         },
         "screenCapture": {
           "type": "boolean",
-          "description": "Allows a short-lived focus-protection lease around the browser getDisplayMedia picker. It does not grant native screen capture or screen contents."
+          "description": "Allows display-capture Permissions Policy delegation only to a native-validated visible Surface lease, plus a short-lived focus-protection lease around the browser getDisplayMedia picker. Hidden runtimes and undeclared plugins receive no delegation. It does not bypass the browser/OS picker, grant native screen capture, or expose screen contents."
+        },
+        "microphone": {
+          "type": "boolean",
+          "description": "Allows microphone Permissions Policy delegation only to a native-validated visible Surface lease. Hidden runtimes and undeclared plugins receive no delegation. It does not bypass the browser/OS prompt, grant audio samples to iHub, or expose a native recording API."
         },
         "cursorColor": {
           "type": "boolean",
           "description": "Allows one host-confirmed native sample of the pixel beneath the cursor. It never grants a screenshot, coordinates, recording, or background polling."
         },
-        "globalShortcut": { "type": "boolean" },
+        "globalShortcut": {
+          "type": "boolean",
+          "description": "Allows only manifest-declared, host-validated global shortcut mappings. Runtime JavaScript cannot register or alter OS shortcuts."
+        },
         "notifications": { "type": "boolean" },
         "nativeApi": { "type": "boolean" },
         "windowManagement": {
@@ -237,7 +241,24 @@
     },
     "pathScopeList": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+      },
+      "uniqueItems": true
+    },
+    "permissionStringList": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+      },
       "uniqueItems": true
     },
     "command": {
@@ -261,12 +282,22 @@
             }
           }
         },
-        "keywords": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "keywords": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+          },
+          "uniqueItems": true
+        },
         "icon": {
           "$ref": "#/$defs/artworkPath",
           "description": "Static, package-relative PNG, JPEG, or WebP artwork. New packages should use a valid raster file. For compatibility, the host may ignore an unavailable legacy command icon and use its safe fallback; it never exposes this path to the WebView."
         },
-        "shortcut": { "type": "string" }
+        "shortcut": { "$ref": "#/$defs/globalShortcutAccelerator" }
       },
       "allOf": [
         {
@@ -283,6 +314,33 @@
             }
           }
         }
+      ]
+    },
+    "globalShortcutAccelerator": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^(?:(?:CmdOrCtrl|Alt|Shift)\\+){1,3}(?:Key[A-Z]|Digit[0-9]|F(?:[1-9]|1[0-2])|Space|Minus|Equal|Comma|Period|Semicolon|Quote|Slash|Backslash|BracketLeft|BracketRight|Backquote)$",
+      "description": "Portable host grammar. CmdOrCtrl/Alt/Shift are canonicalized by Rust; Alt+F4 and launcher-owned bindings are rejected."
+    },
+    "globalShortcut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "shortcut"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "shortcut": { "$ref": "#/$defs/globalShortcutAccelerator" },
+        "commandId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "keyword": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        }
+      },
+      "oneOf": [
+        { "required": ["commandId"], "not": { "required": ["keyword"] } },
+        { "required": ["keyword"], "not": { "required": ["commandId"] } }
       ]
     },
     "searchProvider": {

@@ -115,6 +115,40 @@ pub struct PluginCommandInfo {
     /// target. Frontend commands open the constrained iframe; native commands
     /// may start the plugin's declared worker after user confirmation.
     pub execution: String,
+    /// Bounded launcher aliases declared in the signed/linked manifest.
+    /// Runtime command registration cannot add or replace them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Canonical manifest-declared global accelerator, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
+    /// `registered`, `blocked`, `unavailable`, or `inactive`. This is
+    /// projected by the resident shortcut registry, never supplied by the
+    /// plugin package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut_registration: Option<String>,
+    /// A bounded user-facing reason when the OS binding was not activated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut_error: Option<String>,
+}
+
+/// A plugin-level declarative mapping from a global accelerator to either a
+/// declared command or a bounded launcher keyword. The native host owns
+/// validation and registration; plugin JavaScript never receives a shortcut
+/// handle.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginGlobalShortcutInfo {
+    pub id: String,
+    pub shortcut: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyword: Option<String>,
+    /// `registered`, `blocked`, `unavailable`, or `inactive`.
+    pub registration: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A declarative search provider advertised by an installed plugin manifest.
@@ -267,6 +301,10 @@ pub struct PluginInfo {
     pub auto_update: bool,
     pub command_count: usize,
     pub commands: Vec<PluginCommandInfo>,
+    /// Plugin-level shortcut-to-command/keyword mappings declared in the
+    /// manifest. Command-local shorthand remains on `commands[].shortcut`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_shortcuts: Vec<PluginGlobalShortcutInfo>,
     /// Manifest-declared providers. These are metadata only until the
     /// plugin's constrained iframe bridge registers the same provider.
     pub search_providers: Vec<PluginSearchProviderInfo>,

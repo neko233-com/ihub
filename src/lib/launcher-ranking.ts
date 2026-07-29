@@ -1,4 +1,8 @@
 import type { SearchKind, SearchResult } from "./types";
+import {
+  launcherUsageSearchBoost,
+  type LauncherUsageLedger,
+} from "./launcher-usage";
 
 /**
  * The native index already produces an efficient, relevance-sorted window of
@@ -90,6 +94,43 @@ export function mergeLauncherSearchResults(
   for (const group of groups) {
     for (const result of group) {
       ranked.push({ result, rank: launcherResultRank(result, query), order });
+      order += 1;
+    }
+  }
+
+  ranked.sort((left, right) =>
+    right.rank - left.rank
+    || right.result.score - left.result.score
+    || left.order - right.order,
+  );
+
+  const seen = new Set<string>();
+  return ranked.flatMap(({ result }) => {
+    const identity = identityFor(result);
+    if (seen.has(identity)) {
+      return [];
+    }
+    seen.add(identity);
+    return [result];
+  });
+}
+
+export function mergeLauncherSearchResultsWithUsage(
+  query: string,
+  usage: LauncherUsageLedger,
+  now: number,
+  ...groups: ReadonlyArray<readonly SearchResult[]>
+): SearchResult[] {
+  const ranked: RankedResult[] = [];
+  let order = 0;
+  for (const group of groups) {
+    for (const result of group) {
+      ranked.push({
+        result,
+        rank: launcherResultRank(result, query)
+          + launcherUsageSearchBoost(usage, result.id, now),
+        order,
+      });
       order += 1;
     }
   }

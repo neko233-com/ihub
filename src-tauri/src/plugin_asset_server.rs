@@ -48,7 +48,14 @@ const MAX_ACTIVE_FRONTEND_LEASES: usize = 96;
 /// process table or permanently starve lifecycle operations.
 const MAX_ACTIVE_NATIVE_COMMANDS: usize = 4;
 const MAX_ACTIVE_NATIVE_COMMANDS_PER_PLUGIN: usize = 1;
-const PLUGIN_CSP: &str = concat!(
+const LOCKED_PLUGIN_CSP: &str = concat!(
+    "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; ",
+    "frame-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data: blob:; font-src 'self' data:; ",
+    "media-src 'self' data: blob:; worker-src 'self' blob:; ",
+    "connect-src 'self'"
+);
+const NETWORKED_PLUGIN_CSP: &str = concat!(
     "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; ",
     "frame-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data: blob: https:; font-src 'self' data:; ",
@@ -64,6 +71,12 @@ pub struct PluginFrontendLease {
     pub(crate) lease_id: String,
     pub(crate) url: String,
     pub(crate) origin: String,
+    /// Native-projected Permissions Policy capability. It can be true only
+    /// for a validated `screenCapture` manifest and a visible surface lease.
+    pub(crate) allows_display_capture: bool,
+    /// Native-projected Permissions Policy capability. It can be true only
+    /// for a validated `microphone` manifest and a visible surface lease.
+    pub(crate) allows_microphone: bool,
 }
 
 /// The trusted React host tells the asset server why it is creating a lease.
@@ -138,6 +151,7 @@ struct ServedBundle {
     asset_root: PathBuf,
     entry: PathBuf,
     route_token: String,
+    allows_remote_network: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -292,6 +306,9 @@ impl PluginAssetServer {
             plugin_id,
             asset_root,
             entry,
+            allows_display_capture,
+            allows_microphone,
+            allows_remote_network,
         } = bundle;
         if self.is_transitioning(&plugin_id) {
             return Err(format!(
@@ -305,6 +322,9 @@ impl PluginAssetServer {
             lease_id: lease_id.clone(),
             url: format!("{origin}/v1/{route_token}/"),
             origin,
+            allows_display_capture: allows_display_capture
+                && purpose == PluginFrontendPurpose::Surface,
+            allows_microphone: allows_microphone && purpose == PluginFrontendPurpose::Surface,
         };
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
@@ -314,6 +334,7 @@ impl PluginAssetServer {
             asset_root,
             entry,
             route_token,
+            allows_remote_network,
         };
         let worker = thread::Builder::new()
             .name("ihub-plugin-assets".to_owned())
@@ -640,7 +661,14 @@ fn handle_connection(
     // A file can disappear between canonicalization and opening during a
     // local development rebuild. Close the connection without writing a
     // second HTTP status after a partial 200 response.
-    let _ = serve_asset(stream, method, &path, shutdown, last_heartbeat);
+    let _ = serve_asset(
+        stream,
+        method,
+        &path,
+        bundle.allows_remote_network,
+        shutdown,
+        last_heartbeat,
+    );
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String)>> {
@@ -757,6 +785,7 @@ fn serve_asset(
     stream: &mut TcpStream,
     method: HttpMethod,
     path: &Path,
+    allows_remote_network: bool,
     shutdown: &AtomicBool,
     last_heartbeat: &Mutex<Instant>,
 ) -> io::Result<()> {
@@ -769,7 +798,7 @@ fn serve_asset(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
         content_type(path),
         metadata.len(),
-        PLUGIN_CSP,
+        plugin_csp(allows_remote_network),
     );
     stream.write_all(header.as_bytes())?;
     if matches!(method, HttpMethod::Get) {
@@ -804,6 +833,14 @@ fn write_status(stream: &mut TcpStream, status: &str) -> io::Result<()> {
         "HTTP/1.1 {status}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(header.as_bytes())
+}
+
+fn plugin_csp(allows_remote_network: bool) -> &'static str {
+    if allows_remote_network {
+        NETWORKED_PLUGIN_CSP
+    } else {
+        LOCKED_PLUGIN_CSP
+    }
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -844,11 +881,24 @@ fn content_type(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::mpsc, thread, time::Duration};
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpStream,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
-    use super::{PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose};
+    use super::{
+        PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose, LOCKED_PLUGIN_CSP,
+        NETWORKED_PLUGIN_CSP,
+    };
 
-    fn temporary_bundle(plugin_id: &str) -> (std::path::PathBuf, PluginFrontendAssetBundle) {
+    fn temporary_bundle(
+        plugin_id: &str,
+        allows_remote_network: bool,
+    ) -> (std::path::PathBuf, PluginFrontendAssetBundle) {
         let root =
             std::env::temp_dir().join(format!("ihub-plugin-assets-test-{}", uuid::Uuid::new_v4()));
         let asset_root = root.join("dist");
@@ -865,15 +915,79 @@ mod tests {
                 plugin_id: plugin_id.to_owned(),
                 asset_root,
                 entry,
+                allows_display_capture: false,
+                allows_microphone: false,
+                allows_remote_network,
             },
         )
+    }
+
+    fn fetch_lease_response(lease: &super::PluginFrontendLease) -> String {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease URL should have a host");
+        let port = url.port().expect("lease URL should have a port");
+        let mut stream =
+            TcpStream::connect((host, port)).expect("asset listener should accept a request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("test request should have a read timeout");
+        write!(
+            stream,
+            "GET {} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n",
+            url.path()
+        )
+        .expect("test request should be written");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("asset response should be readable");
+        String::from_utf8(response).expect("asset response should be UTF-8")
+    }
+
+    #[test]
+    fn http_response_csp_opens_external_network_only_for_declared_bundles() {
+        for (allows_remote_network, expected_csp) in
+            [(false, LOCKED_PLUGIN_CSP), (true, NETWORKED_PLUGIN_CSP)]
+        {
+            let server = PluginAssetServer::new();
+            let plugin_id = if allows_remote_network {
+                "ihub-plugin-networked-csp-test"
+            } else {
+                "ihub-plugin-locked-csp-test"
+            };
+            let (root, bundle) = temporary_bundle(plugin_id, allows_remote_network);
+            let lease = server
+                .issue(bundle, PluginFrontendPurpose::Surface)
+                .expect("frontend lease should issue");
+            let response = fetch_lease_response(&lease);
+            let csp = response
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Security-Policy: "))
+                .expect("asset response should contain a CSP header");
+
+            assert_eq!(csp, expected_csp);
+            if allows_remote_network {
+                assert!(csp.contains("connect-src 'self' https: wss:"));
+                assert!(csp.contains("img-src 'self' data: blob: https:"));
+                assert!(csp.contains("media-src 'self' blob: https:"));
+            } else {
+                assert!(csp.contains("connect-src 'self'"));
+                assert!(csp.contains("img-src 'self' data: blob:;"));
+                assert!(csp.contains("media-src 'self' data: blob:;"));
+                assert!(!csp.contains("https:"));
+                assert!(!csp.contains("wss:"));
+            }
+
+            assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
     fn a_fresh_lease_replaces_the_same_plugins_old_bridge_session() {
         let server = PluginAssetServer::new();
         let plugin_id = "ihub-plugin-lease-test";
-        let (root, bundle) = temporary_bundle(plugin_id);
+        let (root, bundle) = temporary_bundle(plugin_id, false);
         let first = server
             .issue(bundle.clone(), PluginFrontendPurpose::Surface)
             .expect("first lease should issue");
@@ -896,12 +1010,17 @@ mod tests {
     fn a_hidden_runtime_lease_is_not_a_visible_user_presence_surface() {
         let server = PluginAssetServer::new();
         let plugin_id = "ihub-plugin-runtime-purpose-test";
-        let (root, bundle) = temporary_bundle(plugin_id);
+        let (root, mut bundle) = temporary_bundle(plugin_id, false);
+        bundle.allows_display_capture = true;
         let runtime = server
             .issue(bundle, PluginFrontendPurpose::Runtime)
             .expect("runtime lease should issue");
 
         assert!(server.is_active_for(&runtime.lease_id, plugin_id));
+        assert!(
+            !runtime.allows_display_capture,
+            "a declared screen-capture permission must not survive projection into a hidden runtime lease"
+        );
         assert!(
             !server.is_active_surface_for(&runtime.lease_id, plugin_id),
             "a hidden search runtime must never qualify for a visible-only host capability"
@@ -912,6 +1031,112 @@ mod tests {
             Some(plugin_id)
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn display_capture_delegation_requires_both_manifest_permission_and_surface_purpose() {
+        let server = PluginAssetServer::new();
+
+        let undeclared_id = "ihub-plugin-display-capture-undeclared";
+        let (undeclared_root, undeclared_bundle) = temporary_bundle(undeclared_id, false);
+        let undeclared_surface = server
+            .issue(undeclared_bundle, PluginFrontendPurpose::Surface)
+            .expect("undeclared surface lease should issue");
+        assert!(
+            !undeclared_surface.allows_display_capture,
+            "a visible surface without the manifest permission must receive no display-capture delegation"
+        );
+
+        let declared_id = "ihub-plugin-display-capture-declared";
+        let (declared_root, mut declared_bundle) = temporary_bundle(declared_id, false);
+        declared_bundle.allows_display_capture = true;
+        let declared_surface = server
+            .issue(declared_bundle, PluginFrontendPurpose::Surface)
+            .expect("declared surface lease should issue");
+        assert!(
+            declared_surface.allows_display_capture,
+            "a visible surface with the validated manifest permission should receive display-capture delegation"
+        );
+
+        let runtime_id = "ihub-plugin-display-capture-runtime";
+        let (runtime_root, mut runtime_bundle) = temporary_bundle(runtime_id, false);
+        runtime_bundle.allows_display_capture = true;
+        let declared_runtime = server
+            .issue(runtime_bundle, PluginFrontendPurpose::Runtime)
+            .expect("declared runtime lease should issue");
+        assert!(
+            !declared_runtime.allows_display_capture,
+            "a hidden runtime must receive no display-capture delegation even when its manifest declares the permission"
+        );
+
+        assert_eq!(
+            server.release(&undeclared_surface.lease_id).as_deref(),
+            Some(undeclared_id)
+        );
+        assert_eq!(
+            server.release(&declared_surface.lease_id).as_deref(),
+            Some(declared_id)
+        );
+        assert_eq!(
+            server.release(&declared_runtime.lease_id).as_deref(),
+            Some(runtime_id)
+        );
+        let _ = fs::remove_dir_all(undeclared_root);
+        let _ = fs::remove_dir_all(declared_root);
+        let _ = fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn microphone_delegation_requires_both_manifest_permission_and_surface_purpose() {
+        let server = PluginAssetServer::new();
+
+        let undeclared_id = "ihub-plugin-microphone-undeclared";
+        let (undeclared_root, undeclared_bundle) = temporary_bundle(undeclared_id, false);
+        let undeclared_surface = server
+            .issue(undeclared_bundle, PluginFrontendPurpose::Surface)
+            .expect("undeclared surface lease should issue");
+        assert!(
+            !undeclared_surface.allows_microphone,
+            "a visible surface without the manifest permission must receive no microphone delegation"
+        );
+
+        let declared_id = "ihub-plugin-microphone-declared";
+        let (declared_root, mut declared_bundle) = temporary_bundle(declared_id, false);
+        declared_bundle.allows_microphone = true;
+        let declared_surface = server
+            .issue(declared_bundle, PluginFrontendPurpose::Surface)
+            .expect("declared surface lease should issue");
+        assert!(
+            declared_surface.allows_microphone,
+            "a visible surface with the validated manifest permission should receive microphone delegation"
+        );
+
+        let runtime_id = "ihub-plugin-microphone-runtime";
+        let (runtime_root, mut runtime_bundle) = temporary_bundle(runtime_id, false);
+        runtime_bundle.allows_microphone = true;
+        let declared_runtime = server
+            .issue(runtime_bundle, PluginFrontendPurpose::Runtime)
+            .expect("declared runtime lease should issue");
+        assert!(
+            !declared_runtime.allows_microphone,
+            "a hidden runtime must receive no microphone delegation even when its manifest declares the permission"
+        );
+
+        assert_eq!(
+            server.release(&undeclared_surface.lease_id).as_deref(),
+            Some(undeclared_id)
+        );
+        assert_eq!(
+            server.release(&declared_surface.lease_id).as_deref(),
+            Some(declared_id)
+        );
+        assert_eq!(
+            server.release(&declared_runtime.lease_id).as_deref(),
+            Some(runtime_id)
+        );
+        let _ = fs::remove_dir_all(undeclared_root);
+        let _ = fs::remove_dir_all(declared_root);
+        let _ = fs::remove_dir_all(runtime_root);
     }
 
     #[test]

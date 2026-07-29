@@ -77,11 +77,20 @@ export interface PluginPermissions {
     openPath?: boolean;
   };
   /**
-   * Allows a bounded focus-protection lease around the browser's
-   * `getDisplayMedia` picker. It never grants screen pixels or a native
-   * capture API.
+   * Lets the trusted host delegate display capture only to a native-validated
+   * visible Surface lease, and allows a bounded focus-protection lease around
+   * the browser's `getDisplayMedia` picker. Hidden runtimes receive no
+   * delegation. It never bypasses the browser/OS picker, grants screen pixels,
+   * or exposes a native capture API.
    */
   screenCapture?: boolean;
+  /**
+   * Lets the trusted host delegate microphone capture only to a
+   * native-validated visible Surface lease. Hidden runtimes receive no
+   * delegation. It never bypasses the browser/OS permission prompt, grants
+   * audio samples to the host, or exposes a native recording API.
+   */
+  microphone?: boolean;
   /**
    * Allows one host-confirmed native sample of the pixel beneath the cursor.
    * It is not a screenshot, recording, coordinate, or background-polling
@@ -113,7 +122,19 @@ export interface PluginContributions {
   commands?: CommandDefinition[];
   searchProviders?: SearchProviderDefinition[];
   settings?: PluginSettingDefinition[];
+  /**
+   * Plugin-level, manifest-only accelerator mappings. Each binding opens one
+   * declared command or pre-fills one bounded launcher keyword.
+   */
+  globalShortcuts?: GlobalShortcutDefinition[];
   quickActions?: QuickActionDefinition[];
+}
+
+export interface GlobalShortcutDefinition {
+  id: string;
+  shortcut: string;
+  commandId?: string;
+  keyword?: string;
 }
 
 export interface CommandDefinition {
@@ -128,6 +149,10 @@ export interface CommandDefinition {
    * Runtime command registration cannot introduce or replace artwork.
    */
   icon?: string;
+  /**
+   * Manifest-only shorthand for invoking this command from a host-owned
+   * global accelerator. Requires permissions.globalShortcut.
+   */
   shortcut?: string;
   /**
    * Opens the plugin iframe or starts its manifest-locked native worker.
@@ -153,8 +178,9 @@ export interface NativeCommandRunPolicy {
  * dynamic registration cannot send a package path or image payload to the host.
  * Declare command artwork statically in plugin.json instead.
  */
-export type RuntimeCommandDefinition = Omit<CommandDefinition, "icon"> & {
+export type RuntimeCommandDefinition = Omit<CommandDefinition, "icon" | "shortcut"> & {
   readonly icon?: never;
+  readonly shortcut?: never;
 };
 
 export interface SearchProviderDefinition {
@@ -425,6 +451,38 @@ export interface PluginWindowManagement {
   manageLauncher(action: WindowManagementAction): Promise<WindowManagementResult>;
 }
 
+export interface PluginSubInputChange {
+  text: string;
+}
+
+export type PluginSubInputChangeHandler = (
+  change: PluginSubInputChange,
+) => void | Promise<void>;
+
+/**
+ * Controls the text input rendered by the trusted visible iHub plugin host.
+ * The input is tied to the current surface lease and is never available to a
+ * hidden search runtime or a native worker.
+ */
+export interface PluginSubInput {
+  /**
+   * Creates or updates the host input and replaces the current change handler.
+   * Focus defaults to true, matching the familiar uTools sub-input behavior.
+   */
+  set(
+    onChange: PluginSubInputChangeHandler,
+    placeholder?: string,
+    focus?: boolean,
+  ): Promise<boolean>;
+  /** Removes the host input and its change handler. */
+  remove(): Promise<boolean>;
+  /**
+   * Updates the host input. A successful update also invokes the registered
+   * change handler with the resulting text.
+   */
+  setValue(value: string): Promise<boolean>;
+}
+
 /** A short-lived directory capability issued only after the native picker. */
 export type FilesystemDirectorySelection =
   | { cancelled: true }
@@ -556,6 +614,7 @@ export interface PluginContext {
   readonly pluginId: string;
   readonly commands: PluginCommands;
   readonly search: PluginSearch;
+  readonly subInput: PluginSubInput;
   readonly settings: PluginSettings;
   readonly clipboard: PluginClipboard;
   readonly shell: PluginShell;
@@ -571,6 +630,48 @@ export interface PluginContext {
     show(options: NotificationOptions): Promise<void>;
   };
   readonly logger: PluginLogger;
+}
+
+/**
+ * Deliberately small compatibility projection installed as both
+ * `window.utools` and `window.rubick` while an iHub SDK runtime is active.
+ *
+ * It is not Electron's uTools preload API. Omitted members are intentional:
+ * there is no Node.js, filesystem path, process, remote, arbitrary shell,
+ * BrowserWindow, or preload access.
+ */
+export interface IHubUToolsCompatibilityApi {
+  setSubInput(
+    onChange: PluginSubInputChangeHandler,
+    placeholder?: string,
+    isFocus?: boolean,
+  ): boolean;
+  removeSubInput(): boolean;
+  setSubInputValue(value: string): boolean;
+  /** Requires `clipboard.write` in plugin.json. */
+  copyText(value: string): boolean;
+  /** Requires `notifications` in plugin.json. */
+  showNotification(body: string): void;
+  /** Requires `shell.openExternal` in plugin.json. */
+  shellOpenExternal(url: string): void;
+  /** Requires `shell.openPath` in plugin.json. */
+  shellOpenPath(path: string): void;
+  /** Requires `cursorColor` and the trusted iHub confirmation overlay. */
+  screenColorPick(callback: (color: CursorColorSample) => void): void;
+  getWindowType(): "main";
+  isDarkColors(): boolean;
+  isWindows(): boolean;
+  isMacOS(): boolean;
+  isLinux(): boolean;
+}
+
+declare global {
+  interface Window {
+    /** Present only after `bootstrapPlugin` starts in an iHub plugin page. */
+    utools?: IHubUToolsCompatibilityApi;
+    /** Exact alias of `window.utools`, for the legacy dTools/Rubick name. */
+    rubick?: IHubUToolsCompatibilityApi;
+  }
 }
 
 export interface BootstrapOptions {

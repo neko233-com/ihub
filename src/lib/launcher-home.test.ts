@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLauncherItemIndex,
+  canonicalLauncherRecentDestination,
   isLauncherRecentDestination,
   LAUNCHER_RECENT_CAPACITY,
   launcherHomePreview,
@@ -41,5 +42,21 @@ describe("launcher home identity and history semantics", () => {
     expect(isLauncherRecentDestination("system-command:ihub.open-settings")).toBe(false);
     expect(isLauncherRecentDestination("ihub.tool.json")).toBe(true);
     expect(isLauncherRecentDestination("application:C:/Program Files/App/app.exe")).toBe(true);
+  });
+
+  it("uses one stable recent identity for built-ins opened from search or home", () => {
+    expect(
+      canonicalLauncherRecentDestination(
+        "builtin-command:ihub.tool.screenshot",
+      ),
+    ).toBe("ihub.tool.screenshot");
+    expect(
+      canonicalLauncherRecentDestination("ihub.tool.screenshot"),
+    ).toBe("ihub.tool.screenshot");
+    expect(
+      canonicalLauncherRecentDestination(
+        "builtin-command:third.party.command",
+      ),
+    ).toBe("builtin-command:third.party.command");
   });
 });

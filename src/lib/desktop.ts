@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { SuperPanelEvent } from "./types";
 
 export const isDesktop = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -46,4 +47,114 @@ export async function onHideSearch(callback: () => void): Promise<UnlistenFn> {
   }
 
   return listen("ihub://hide-search", callback);
+}
+
+export interface TrayNavigationEventPayload {
+  surface: "settings";
+  section: "preferences" | "about";
+}
+
+export async function onTrayNavigation(
+  callback: (payload: TrayNavigationEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen<TrayNavigationEventPayload>("ihub://tray-navigation", (event) => {
+    const payload = event.payload as Partial<TrayNavigationEventPayload> | null;
+    if (payload?.surface === "settings") {
+      callback({
+        surface: "settings",
+        section: payload.section === "about" ? "about" : "preferences",
+      });
+    }
+  });
+}
+
+export interface PluginGlobalShortcutEventPayload {
+  pluginId: string;
+  shortcut: string;
+  commandId?: string;
+  keyword?: string;
+}
+
+export async function onPluginGlobalShortcut(
+  callback: (payload: PluginGlobalShortcutEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen<PluginGlobalShortcutEventPayload>("ihub://plugin-global-shortcut", (event) => {
+    const payload = event.payload as Partial<PluginGlobalShortcutEventPayload> | null;
+    if (
+      typeof payload?.pluginId !== "string"
+      || typeof payload.shortcut !== "string"
+      || (typeof payload.commandId === "string") === (typeof payload.keyword === "string")
+    ) {
+      return;
+    }
+    callback(payload as PluginGlobalShortcutEventPayload);
+  });
+}
+
+export async function onPluginShortcutsChanged(
+  callback: () => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen("ihub://plugin-shortcuts-changed", callback);
+}
+
+export interface PluginSearchProvidersChangedPayload {
+  pluginId: string;
+  providerId?: string;
+  registered: boolean;
+}
+
+export async function onPluginSearchProvidersChanged(
+  callback: (payload: PluginSearchProvidersChangedPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen<PluginSearchProvidersChangedPayload>(
+    "ihub://plugin-search-providers-changed",
+    (event) => {
+      const payload =
+        event.payload as Partial<PluginSearchProvidersChangedPayload> | null;
+      if (
+        typeof payload?.pluginId !== "string"
+        || typeof payload.registered !== "boolean"
+        || (
+          payload.providerId !== undefined
+          && typeof payload.providerId !== "string"
+        )
+        || (payload.registered && typeof payload.providerId !== "string")
+      ) {
+        return;
+      }
+      callback(payload as PluginSearchProvidersChangedPayload);
+    },
+  );
+}
+
+export async function onSuperPanel(
+  callback: (payload: SuperPanelEvent) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen<SuperPanelEvent>("ihub://super-panel", (event) => {
+    const payload = event.payload as Partial<SuperPanelEvent> | null;
+    if (
+      typeof payload?.contextToken !== "string"
+      || typeof payload.physicalX !== "number"
+      || typeof payload.physicalY !== "number"
+      || typeof payload.expiresInMs !== "number"
+    ) {
+      return;
+    }
+    callback(payload as SuperPanelEvent);
+  });
 }

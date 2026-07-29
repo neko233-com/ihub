@@ -286,7 +286,7 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
   {
     id: "ihub-screenshot",
     name: "截图",
-    description: "用系统选择器截取屏幕、窗口或标签页为 PNG；桌面端还可直接截取主显示器，文件只会在你下载时保存。",
+    description: "读取显示器、窗口或标签页的一帧，再拖拽矩形选区裁剪 PNG；取消即丢弃，文件只会在你下载时保存。",
     category: "media",
     distribution: "builtin",
     tags: ["截图", "PNG", "屏幕", "窗口", "本地"],

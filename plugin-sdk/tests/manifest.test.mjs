@@ -117,3 +117,169 @@ test("schema mirrors command and artwork path limits", () => {
     assert.equal(artworkPattern.test(unsafe), false, JSON.stringify(unsafe));
   }
 });
+
+test("accepts only an explicit boolean microphone permission", () => {
+  const declared = validateManifest({
+    ...baseManifest(),
+    permissions: { microphone: true },
+  });
+  assert.deepEqual(declared.issues, []);
+
+  const nonBoolean = validateManifest({
+    ...baseManifest(),
+    permissions: { microphone: "yes" },
+  });
+  assert.ok(nonBoolean.issues.some(
+    (issue) => issue.path === "$.permissions.microphone"
+      && issue.message.includes("boolean"),
+  ));
+
+  const unknown = validateManifest({
+    ...baseManifest(),
+    permissions: { microhpone: true },
+  });
+  assert.ok(unknown.issues.some(
+    (issue) => issue.path === "$.permissions.microhpone"
+      && issue.message.includes("not supported"),
+  ));
+});
+
+test("schema declares microphone as a strict boolean permission", () => {
+  const schemaPath = fileURLToPath(new URL("../manifest.schema.json", import.meta.url));
+  const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+  const permissions = schema.properties.permissions;
+
+  assert.equal(permissions.additionalProperties, false);
+  assert.equal(permissions.properties.microphone.type, "boolean");
+});
+
+test("validates every nested permission object and bounded declaration list", () => {
+  const valid = validateManifest({
+    ...baseManifest(),
+    permissions: {
+      filesystem: { read: ["user-selected"], write: [] },
+      network: { allow: ["https://api.example.test"] },
+      clipboard: { read: true, write: false, history: true },
+      process: { spawn: true, allow: ["trusted-worker"] },
+      shell: { openExternal: true, openPath: false },
+    },
+  });
+  assert.deepEqual(valid.issues, []);
+
+  const invalidPermissions = [
+    { network: "https://api.example.test" },
+    { network: { typo: true } },
+    { network: { allow: "https://api.example.test" } },
+    { network: { allow: [""] } },
+    { network: { allow: [" https://api.example.test"] } },
+    { network: { allow: ["\uFEFFhttps://api.example.test"] } },
+    { network: { allow: ["https://api.example.test\u0001"] } },
+    { network: { allow: ["https://api.example.test", "https://api.example.test"] } },
+    { network: { allow: Array.from({ length: 65 }, (_, index) => `target-${index}`) } },
+    { network: { allow: ["x".repeat(513)] } },
+    { filesystem: { read: true } },
+    { filesystem: { typo: [] } },
+    { clipboard: { history: "yes" } },
+    { clipboard: { typo: true } },
+    { process: { spawn: "yes" } },
+    { process: { allow: [""] } },
+    { shell: { openExternal: "yes" } },
+    { shell: { typo: true } },
+  ];
+  for (const permissions of invalidPermissions) {
+    const result = validateManifest({ ...baseManifest(), permissions });
+    assert.equal(result.valid, false, JSON.stringify(permissions));
+    assert.ok(
+      result.issues.some((issue) => issue.path.startsWith("$.permissions.")),
+      JSON.stringify(permissions),
+    );
+  }
+});
+
+test("schema mirrors bounded permission declaration lists", () => {
+  const schemaPath = fileURLToPath(new URL("../manifest.schema.json", import.meta.url));
+  const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+  for (const definition of [
+    schema.$defs.pathScopeList,
+    schema.$defs.permissionStringList,
+  ]) {
+    assert.equal(definition.maxItems, 64);
+    assert.equal(definition.uniqueItems, true);
+    assert.equal(definition.items.maxLength, 512);
+    const pattern = new RegExp(definition.items.pattern);
+    assert.equal(pattern.test("user-configured HTTPS endpoint"), true);
+    assert.equal(pattern.test(" leading-space"), false);
+    assert.equal(pattern.test("trailing-space "), false);
+    assert.equal(pattern.test("\uFEFFleading-bom"), false);
+    assert.equal(pattern.test("control\u0001"), false);
+  }
+});
+
+test("accepts only permissioned, unique shortcut-to-command or keyword mappings", () => {
+  const valid = validateManifest({
+    ...baseManifest(),
+    permissions: { globalShortcut: true },
+    contributes: {
+      commands: [{
+        id: "open",
+        title: "Open",
+        keywords: ["launch", "打开"],
+        shortcut: "alt + keyo",
+      }],
+      globalShortcuts: [{
+        id: "find",
+        shortcut: "CmdOrCtrl+Alt+KeyF",
+        keyword: "find files",
+      }, {
+        id: "run-open",
+        shortcut: "Alt+Shift+KeyO",
+        commandId: "open",
+      }],
+    },
+  });
+  assert.deepEqual(valid.issues, []);
+
+  const missingPermission = validateManifest({
+    ...baseManifest(),
+    contributes: {
+      commands: [{ id: "open", title: "Open", shortcut: "Alt+KeyO" }],
+    },
+  });
+  assert.ok(missingPermission.issues.some((issue) => issue.message.includes("globalShortcut")));
+
+  const invalidTargets = validateManifest({
+    ...baseManifest(),
+    permissions: { globalShortcut: true },
+    contributes: {
+      commands: [{ id: "open", title: "Open" }],
+      globalShortcuts: [{
+        id: "unsafe",
+        shortcut: "Alt+F4",
+        commandId: "missing",
+        keyword: "both",
+      }],
+    },
+  });
+  assert.ok(invalidTargets.issues.some((issue) => issue.path.endsWith(".shortcut")));
+  assert.ok(invalidTargets.issues.some((issue) => issue.message.includes("exactly one")));
+});
+
+test("blocks launcher-owned and duplicate plugin accelerators", () => {
+  const result = validateManifest({
+    ...baseManifest(),
+    permissions: { globalShortcut: true },
+    contributes: {
+      commands: [
+        { id: "open", title: "Open", shortcut: "Alt+Space" },
+        { id: "other", title: "Other", shortcut: "Alt+KeyO" },
+      ],
+      globalShortcuts: [{
+        id: "duplicate",
+        shortcut: "alt+keyo",
+        keyword: "other",
+      }],
+    },
+  });
+  assert.ok(result.issues.some((issue) => issue.message.includes("reserved")));
+  assert.ok(result.issues.some((issue) => issue.message.includes("duplicates")));
+});

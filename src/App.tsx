@@ -58,7 +58,24 @@ import {
   type LauncherContextHandoff,
   type LauncherContextImageSource,
 } from "./lib/plugin-launcher-context";
-import { command, isDesktop, onFocusSearch, onHideSearch } from "./lib/desktop";
+import {
+  completePluginSearchProviderReadiness,
+  createPluginSearchProviderReadinessBootstrap,
+  transitionPluginSearchProviderReadiness,
+  type PluginSearchProviderReadinessEvent,
+} from "./lib/plugin-search-provider-readiness";
+import {
+  command,
+  isDesktop,
+  onFocusSearch,
+  onHideSearch,
+  onPluginGlobalShortcut,
+  onPluginSearchProvidersChanged,
+  onPluginShortcutsChanged,
+  onSuperPanel,
+  onTrayNavigation,
+} from "./lib/desktop";
+import type { DetachedPluginWindowOpened } from "./lib/detached-plugin-window";
 import {
   findLauncherContentResults,
   quickNotesStorageKey,
@@ -75,6 +92,7 @@ import {
 } from "./lib/launcher-hotkey-status";
 import {
   buildLauncherItemIndex,
+  canonicalLauncherRecentDestination,
   isLauncherRecentDestination,
   LAUNCHER_RECENT_CAPACITY,
   retainLauncherRecent,
@@ -89,9 +107,15 @@ import {
   type SystemIconMap,
 } from "./lib/native-icons";
 import { launcherCalculationResults } from "./lib/launcher-calculation";
-import { mergeLauncherSearchResults } from "./lib/launcher-ranking";
+import { mergeLauncherSearchResultsWithUsage } from "./lib/launcher-ranking";
+import {
+  parseLauncherUsageLedger,
+  recordLauncherUsage,
+  sortLauncherItemsByUsage,
+  type LauncherUsageLedger,
+} from "./lib/launcher-usage";
 import { launcherSystemCommandResults } from "./lib/launcher-system-commands";
-import { mockResults } from "./lib/mock-data";
+import { browserPreviewSystemIcons, mockResults } from "./lib/mock-data";
 import {
   parseLauncherTimeInput,
   shouldOfferLauncherTimeTool,
@@ -113,11 +137,15 @@ import type {
   PluginCommandInfo,
   PluginCommandResult,
   PluginFrontendEvent,
+  PluginGlobalShortcutEvent,
   PluginInfo,
   PluginLauncherContextIssue,
   PluginSearchProviderInfo,
   PluginSearchResponse,
+  RegisteredPluginSearchProvider,
   SearchResult,
+  SuperPanelContext,
+  SuperPanelStatus,
 } from "./lib/types";
 
 const browserStatus: IndexStatus = {
@@ -152,6 +180,7 @@ type LauncherSurface =
 const isDevelopmentBuild = import.meta.env.DEV;
 const UPDATE_DISCOVERY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const launcherRecentStorageKey = "ihub.launcher.recent-command-ids.v1";
+const launcherUsageStorageKey = "ihub.launcher.local-usage.v1";
 const launcherRecentApplicationsStorageKey = "ihub.launcher.recent-applications.v1";
 const launcherShowRecentStorageKey = "ihub.launcher.show-recent.v1";
 // Installation remains an explicit opt-in. Keeping this separate from update
@@ -217,6 +246,19 @@ function readStoredStringArray(key: string, limit = 12): string[] {
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === "string").slice(0, limit)
       : [];
+  } catch {
+    return [];
+  }
+}
+
+function readStoredLauncherUsage(): LauncherUsageLedger {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    return parseLauncherUsageLedger(
+      JSON.parse(window.localStorage.getItem(launcherUsageStorageKey) ?? "[]"),
+    );
   } catch {
     return [];
   }
@@ -484,7 +526,14 @@ function pluginCommandResults(plugins: PluginInfo[], query: string): SearchResul
         if (!normalized) {
           return true;
         }
-        return [plugin.name, plugin.description, command.id, command.name, command.description]
+        return [
+          plugin.name,
+          plugin.description,
+          command.id,
+          command.name,
+          command.description,
+          ...(command.keywords ?? []),
+        ]
           .filter(Boolean)
           .join(" ")
           .toLocaleLowerCase()
@@ -580,6 +629,7 @@ function pluginProviderResponseResults(
     ].filter(Boolean).join(" · "),
     pluginId: provider.plugin.id,
     pluginProviderId: provider.provider.id,
+    pluginSearchRequestId: response.requestId,
     pluginSearchResultId: result.id,
     pluginPayload: result.payload,
   }));
@@ -941,7 +991,10 @@ export function App() {
   const [pastedFileResults, setPastedFileResults] = useState<SearchResult[]>([]);
   const [pastedImage, setPastedImage] = useState<LauncherPastedImage | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>(mockResults);
-  const [searchIconCache, setSearchIconCache] = useState<SystemIconMap>({});
+  const [searchIconCache, setSearchIconCache] = useState<SystemIconMap>(() =>
+    isDesktop()
+      ? {}
+      : mergeNativeIconCache({}, browserPreviewSystemIcons, mockResults));
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
@@ -972,8 +1025,14 @@ export function App() {
   // authorization channel.
   const [launcherShortcuts, setLauncherShortcuts] = useState<LauncherShortcutView[]>([]);
   const [recentItemIds, setRecentItemIds] = useState<string[]>(() =>
-    readStoredStringArray(launcherRecentStorageKey, LAUNCHER_RECENT_CAPACITY)
-      .filter(isLauncherRecentDestination));
+    retainLauncherRecent(Array.from(new Set(
+      readStoredStringArray(launcherRecentStorageKey, LAUNCHER_RECENT_CAPACITY)
+        .map(canonicalLauncherRecentDestination)
+        .filter(isLauncherRecentDestination),
+    ))));
+  const [launcherUsage, setLauncherUsage] = useState<LauncherUsageLedger>(
+    readStoredLauncherUsage,
+  );
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
   const [homeIconCache, setHomeIconCache] = useState<SystemIconMap>({});
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
@@ -987,6 +1046,7 @@ export function App() {
   const autoInstallSignedUpdatesRef = useRef(autoInstallSignedUpdates);
   const [activePlugin, setActivePlugin] = useState<PluginInfo | null>(null);
   const [pendingPluginEvent, setPendingPluginEvent] = useState<PluginFrontendEvent | null>(null);
+  const [pendingPluginShortcut, setPendingPluginShortcut] = useState<PluginGlobalShortcutEvent | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -996,6 +1056,14 @@ export function App() {
   const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null);
   const [isUpdatingAutostart, setIsUpdatingAutostart] = useState(false);
   const [autostartError, setAutostartError] = useState<string | null>(null);
+  const [superPanelStatus, setSuperPanelStatus] = useState<SuperPanelStatus | null>(
+    isDesktop() ? null : {
+      enabled: false,
+      listenerRunning: false,
+      holdMs: 460,
+    },
+  );
+  const [isUpdatingSuperPanel, setIsUpdatingSuperPanel] = useState(false);
   const [isRecordingLauncherHotkey, setIsRecordingLauncherHotkey] = useState(false);
   const [launcherHotkeyDraft, setLauncherHotkeyDraft] = useState<string | null>(null);
   const [isUpdatingLauncherHotkey, setIsUpdatingLauncherHotkey] = useState(false);
@@ -1178,8 +1246,10 @@ export function App() {
     [registeredSearchProviderKeys],
   );
   const results = useMemo(() => {
-    return mergeLauncherSearchResults(
+    return mergeLauncherSearchResultsWithUsage(
       query,
+      launcherUsage,
+      Date.now(),
       launcherCalculationResults(query),
       launcherSystemCommandResults(query),
       builtinToolResults(query),
@@ -1188,7 +1258,7 @@ export function App() {
       contentResults,
       searchResults,
     );
-  }, [contentResults, pluginSearchResults, plugins, query, searchResults]);
+  }, [contentResults, launcherUsage, pluginSearchResults, plugins, query, searchResults]);
   const spotlightSearchResults = useMemo<SpotlightLauncherItem[]>(
     () => results.map((result) => spotlightItemForSearchResult(
       result,
@@ -1292,10 +1362,13 @@ export function App() {
     [launcherItemById, launcherShortcutItems, pinnedItemIds],
   );
   const recentItems = useMemo(
-    () => recentItemIds
-      .map((id) => launcherItemById.get(id))
-      .filter((item): item is SpotlightLauncherItem => Boolean(item)),
-    [launcherItemById, recentItemIds],
+    () => sortLauncherItemsByUsage(
+      recentItemIds
+        .map((id) => launcherItemById.get(id))
+        .filter((item): item is SpotlightLauncherItem => Boolean(item)),
+      launcherUsage,
+    ),
+    [launcherItemById, launcherUsage, recentItemIds],
   );
   const launcherHotkeyPresentation = useMemo(
     () => describeLauncherHotkey(
@@ -1572,13 +1645,17 @@ export function App() {
     }
 
     try {
-      const [nextStatus, nextHealth] = await Promise.all([
+      const [nextStatus, nextHealth, nextSuperPanelStatus] = await Promise.all([
         command<IndexStatus>("get_index_status"),
         command<AppHealth>("get_app_health"),
+        command<SuperPanelStatus>("get_super_panel_status").catch(() => null),
       ]);
       setStatus(nextStatus);
       setHealth(nextHealth);
       setAutostartEnabled(nextHealth.autostart ?? null);
+      if (nextSuperPanelStatus) {
+        setSuperPanelStatus(nextSuperPanelStatus);
+      }
     } catch (error) {
       setStatus((current) => ({
         ...current,
@@ -1599,6 +1676,48 @@ export function App() {
       showToast(error instanceof Error ? error.message : "无法读取插件列表。");
     }
   }, [showToast]);
+
+  useEffect(() => {
+    if (!isDesktop()) {
+      return;
+    }
+    let disposed = false;
+    const unlisten: Array<() => void> = [];
+    void Promise.all([
+      onPluginGlobalShortcut((payload) => {
+        if (!disposed) {
+          setPendingPluginShortcut(payload);
+        }
+      }),
+      onPluginShortcutsChanged(() => {
+        if (!disposed) {
+          void refreshPlugins();
+        }
+      }),
+      onTrayNavigation(({ section }) => {
+        if (disposed) {
+          return;
+        }
+        setSurface("settings");
+        if (section === "about") {
+          showToast("关于 iHub：版本与平台信息显示在偏好设置底部。");
+        }
+      }),
+    ]).then((listeners) => {
+      if (disposed) {
+        listeners.forEach((dispose) => dispose());
+      } else {
+        unlisten.push(...listeners);
+      }
+    }).catch(() => {
+      // The resident launcher and its primary Alt+Space binding remain usable
+      // even when an optional tray/plugin event listener is unavailable.
+    });
+    return () => {
+      disposed = true;
+      unlisten.forEach((dispose) => dispose());
+    };
+  }, [refreshPlugins, showToast]);
 
   /**
    * Update handles are short-lived native resources. A check owns at most one
@@ -1789,6 +1908,128 @@ export function App() {
     });
   }, []);
 
+  const applyRegisteredSearchProviderSnapshot = useCallback((
+    snapshot: RegisteredPluginSearchProvider[],
+  ) => {
+    const declared = new Set(
+      plugins
+        .filter((plugin) => plugin.enabled !== false)
+        .flatMap((plugin) => plugin.searchProviders?.map((provider) =>
+          pluginSearchProviderKey(plugin.id, provider.id)
+        ) ?? []),
+    );
+    const next = snapshot
+      .map((provider) => pluginSearchProviderKey(provider.pluginId, provider.providerId))
+      .filter((key) => declared.has(key));
+    setRegisteredSearchProviderKeys([...new Set(next)]);
+  }, [plugins]);
+
+  useEffect(() => {
+    if (!isDesktop()) {
+      return;
+    }
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+    let readinessBootstrap = createPluginSearchProviderReadinessBootstrap();
+    const declaredProviderKeys = new Set(
+      plugins
+        .filter((plugin) => plugin.enabled !== false)
+        .flatMap((plugin) => plugin.searchProviders?.map((provider) =>
+          pluginSearchProviderKey(plugin.id, provider.id)
+        ) ?? []),
+    );
+    const declaredPluginIds = new Set(
+      plugins
+        .filter((plugin) => plugin.enabled !== false)
+        .map((plugin) => plugin.id),
+    );
+    const applyReadinessEvent = (payload: PluginSearchProviderReadinessEvent) => {
+      if (payload.registered && payload.providerId !== undefined) {
+        markSearchProviderRegistered(payload.pluginId, payload.providerId);
+      } else if (payload.providerId !== undefined) {
+        unmarkSearchProvider(payload.pluginId, payload.providerId);
+      } else {
+        clearPluginSearchProviders(payload.pluginId);
+        // A plugin-level native dispose means the iframe that owned this
+        // runtime is gone (including a detached window that just closed).
+        // Remove the stale mount request so an unchanged launcher query can
+        // re-add it on the next search pass and obtain a fresh native lease.
+        setRequestedSearchRuntimePluginIds((current) => {
+          const next = current.filter((pluginId) => pluginId !== payload.pluginId);
+          return next.length === current.length ? current : next;
+        });
+      }
+    };
+    const receiveReadinessEvent = (payload: PluginSearchProviderReadinessEvent) => {
+      if (
+        disposed
+        || (
+          payload.providerId !== undefined
+            ? !declaredProviderKeys.has(
+              pluginSearchProviderKey(payload.pluginId, payload.providerId),
+            )
+            : !declaredPluginIds.has(payload.pluginId)
+        )
+      ) {
+        return;
+      }
+      const transition = transitionPluginSearchProviderReadiness(
+        readinessBootstrap,
+        payload,
+      );
+      readinessBootstrap = transition.bootstrap;
+      if (transition.eventToApply) {
+        applyReadinessEvent(transition.eventToApply);
+      }
+    };
+    const completeReadinessBootstrap = (
+      snapshot: RegisteredPluginSearchProvider[],
+    ) => {
+      const completion = completePluginSearchProviderReadiness(
+        readinessBootstrap,
+        snapshot,
+      );
+      readinessBootstrap = completion.bootstrap;
+      applyRegisteredSearchProviderSnapshot(completion.snapshot);
+      completion.eventsToReplay.forEach(applyReadinessEvent);
+    };
+    void onPluginSearchProvidersChanged((payload) => {
+      receiveReadinessEvent(payload);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return null;
+      }
+      stopListening = unlisten;
+      return command<RegisteredPluginSearchProvider[]>(
+        "list_registered_plugin_search_providers",
+      );
+    }).then((snapshot) => {
+      if (!disposed && snapshot) {
+        completeReadinessBootstrap(snapshot);
+      }
+    }, () => {
+      if (!disposed) {
+        // Preserve any events observed by the installed listener even if the
+        // optional initial snapshot could not be read.
+        completeReadinessBootstrap([]);
+      }
+    }).catch(() => {
+      // State setters above are non-throwing; this terminal guard prevents an
+      // optional readiness channel failure from becoming an unhandled promise.
+    });
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
+  }, [
+    applyRegisteredSearchProviderSnapshot,
+    clearPluginSearchProviders,
+    markSearchProviderRegistered,
+    plugins,
+    unmarkSearchProvider,
+  ]);
+
   useEffect(() => {
     const declared = new Set(
       plugins.filter((plugin) => plugin.enabled !== false).flatMap((plugin) => plugin.searchProviders?.map((provider) =>
@@ -1815,6 +2056,68 @@ export function App() {
   const refreshQuickNotes = useCallback(() => {
     setQuickNotes(readLauncherQuickNotes());
   }, []);
+
+  const revealLauncherSurface = useCallback(() => {
+    invalidateLauncherContextHandoff();
+    refreshQuickNotes();
+    setActivePlugin(null);
+    setPendingPluginEvent(null);
+    setToolboxLaunchContext(null);
+    setPluginCenterInitialSearch(null);
+    setSurface("launcher");
+    setLauncherFocusSignal((current) => current + 1);
+  }, [invalidateLauncherContextHandoff, refreshQuickNotes]);
+
+  const applySuperPanelContext = useCallback(async (context: SuperPanelContext) => {
+    revealLauncherSurface();
+    if (context.kind === "files") {
+      const seen = new Set<string>();
+      const next = context.files.flatMap((file, index) => {
+        if (!file.path || !file.name || seen.has(file.path)) {
+          return [];
+        }
+        seen.add(file.path);
+        return [{
+          id: `super-panel-file:${file.path}`,
+          name: file.name,
+          path: file.path,
+          kind: file.kind === "folder" ? "folder" as const : "file" as const,
+          score: 1_000 - index,
+          metadata: `超级面板 · ${file.path}`,
+        }];
+      });
+      setPastedImage(null);
+      setPastedFileResults(next);
+      setQuery("");
+      showToast(next.length
+        ? `超级面板已接收 ${next.length} 个文件。`
+        : "超级面板中的文件已经不存在或无法读取。");
+      return;
+    }
+    if (context.kind === "image") {
+      const response = await fetch(context.image.dataUrl);
+      const blob = await response.blob();
+      if (!blob.size) {
+        throw new Error("超级面板中的剪贴板图片为空。");
+      }
+      handlePastedImage({
+        blob,
+        name: context.image.name || "ihub-super-panel.png",
+        type: blob.type || context.image.mimeType || "image/png",
+      });
+      showToast("超级面板已接收当前剪贴板图片。");
+      return;
+    }
+    setPastedFileResults([]);
+    setPastedImage(null);
+    if (context.kind === "text") {
+      setQuery(context.text);
+      showToast("超级面板已把当前剪贴板文本带入搜索。");
+      return;
+    }
+    setQuery("");
+    showToast("超级面板已打开；当前剪贴板没有可用内容。");
+  }, [handlePastedImage, revealLauncherSurface, showToast]);
 
   const requestPluginSearch = useCallback(async (nextQuery: string, requestId: number) => {
     if (!isDesktop()) {
@@ -1981,6 +2284,10 @@ export function App() {
   useEffect(() => {
     persistLauncherValue(launcherRecentStorageKey, recentItemIds);
   }, [recentItemIds]);
+
+  useEffect(() => {
+    persistLauncherValue(launcherUsageStorageKey, launcherUsage);
+  }, [launcherUsage]);
 
   useEffect(() => {
     persistLauncherValue(launcherPinnedStorageKey, pinnedItemIds);
@@ -2273,6 +2580,53 @@ export function App() {
     }
   };
 
+  const toggleSuperPanel = async () => {
+    const nextEnabled = !(superPanelStatus?.enabled ?? false);
+    if (!isDesktop()) {
+      setSuperPanelStatus({
+        enabled: nextEnabled,
+        listenerRunning: nextEnabled,
+        holdMs: 460,
+      });
+      showToast(nextEnabled
+        ? "浏览器已启用超级面板模拟；不会安装系统鼠标监听。"
+        : "浏览器已关闭超级面板模拟。");
+      return;
+    }
+    if (isUpdatingSuperPanel) {
+      return;
+    }
+    setIsUpdatingSuperPanel(true);
+    try {
+      const result = await command<SuperPanelStatus>("set_super_panel_enabled", {
+        enabled: nextEnabled,
+      });
+      setSuperPanelStatus(result);
+      showToast(result.enabled
+        ? `超级面板已启用：静止长按右键 ${result.holdMs}ms。`
+        : "超级面板已关闭。");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法更新超级面板设置。");
+    } finally {
+      setIsUpdatingSuperPanel(false);
+    }
+  };
+
+  const previewSuperPanel = () => {
+    if (isDesktop()) {
+      showToast("桌面端请在其他应用中静止长按右键打开超级面板。");
+      return;
+    }
+    if (!superPanelStatus?.enabled) {
+      showToast("请先启用超级面板模拟。");
+      return;
+    }
+    void applySuperPanelContext({
+      kind: "text",
+      text: "iHub 超级面板浏览器验证",
+    });
+  };
+
   const beginLauncherHotkeyRecording = () => {
     if (!isDesktop()) {
       showToast("浏览器预览不会注册系统级快捷键；请在 iHub 桌面端设置。");
@@ -2394,16 +2748,74 @@ export function App() {
     : null;
   const hotkeyResetAction = launcherHotkeyResetAction(health?.launcherHotkey);
 
-  const returnToLauncher = () => {
-    invalidateLauncherContextHandoff();
-    refreshQuickNotes();
-    setActivePlugin(null);
-    setPendingPluginEvent(null);
-    setToolboxLaunchContext(null);
-    setPluginCenterInitialSearch(null);
-    setSurface("launcher");
-    setLauncherFocusSignal((current) => current + 1);
+  const returnToLauncher = revealLauncherSurface;
+
+  const detachActivePlugin = async () => {
+    const plugin = activePlugin;
+    if (!plugin) {
+      return;
+    }
+    if (!isDesktop()) {
+      showToast(
+        "浏览器不会创建原生窗口；可打开 ?ihubDetachedPlugin=browser.preview&ihubDetachedPreview=1 验证无权限安全预览。",
+      );
+      return;
+    }
+    try {
+      const opened = await command<DetachedPluginWindowOpened>(
+        "open_detached_plugin_window",
+        { pluginId: plugin.id },
+      );
+      // Native code has created a fixed local React host (or focused its
+      // existing instance). Returning home now unmounts this frame so the new
+      // host can own the plugin's single current loopback lease.
+      returnToLauncher();
+      showToast(
+        opened.created
+          ? `“${plugin.name}”已在分离窗口中打开。`
+          : `已切换到“${plugin.name}”的分离窗口。`,
+      );
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "无法创建插件分离窗口。",
+      );
+    }
   };
+
+  useEffect(() => {
+    if (!isDesktop()) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onSuperPanel((event) => {
+      void command<SuperPanelContext>("consume_super_panel_context", {
+        contextToken: event.contextToken,
+      }).then((context) => {
+        if (!disposed) {
+          return applySuperPanelContext(context);
+        }
+        return undefined;
+      }).catch((error) => {
+        if (!disposed) {
+          showToast(error instanceof Error ? error.message : "超级面板上下文已经失效。");
+        }
+      });
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    }).catch(() => {
+      // The primary launcher remains usable when the optional global pointer
+      // listener is unsupported or denied by the operating system.
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [applySuperPanelContext, showToast]);
 
   const dismissLauncher = async () => {
     invalidateLauncherContextHandoff();
@@ -2492,11 +2904,20 @@ export function App() {
   };
 
   const recordRecent = (item: SpotlightLauncherItem) => {
-    if (!launcherItemById.has(item.id) || !isLauncherRecentDestination(item.id)) {
+    const destinationId = canonicalLauncherRecentDestination(item.id);
+    if (
+      !launcherItemById.has(item.id)
+      || !launcherItemById.has(destinationId)
+      || !isLauncherRecentDestination(destinationId)
+    ) {
       return;
     }
     setRecentItemIds((current) =>
-      retainLauncherRecent([item.id, ...current.filter((id) => id !== item.id)]));
+      retainLauncherRecent([
+        destinationId,
+        ...current.filter((id) => id !== destinationId),
+      ]));
+    setLauncherUsage((current) => recordLauncherUsage(current, destinationId));
   };
 
   // The avatar is navigation chrome, so entering the center must not displace
@@ -2771,6 +3192,25 @@ export function App() {
           showToast("该插件搜索结果没有可用的前端入口。");
           return;
         }
+        if (result.pluginSearchRequestId) {
+          const deliveredToDetached = await command<boolean>(
+            "dispatch_detached_plugin_frontend_event",
+            {
+              request: {
+                kind: "searchSelection",
+                pluginId: plugin.id,
+                providerId: result.pluginProviderId,
+                requestId: result.pluginSearchRequestId,
+                resultId: result.pluginSearchResultId,
+              },
+            },
+          );
+          if (deliveredToDetached) {
+            recordSuccessfulAction();
+            await dismissLauncher();
+            return;
+          }
+        }
         // A provider result is data, never executable code. The existing
         // iframe bridge receives it as a generic SDK event after activation;
         // the plugin decides whether to render, copy, or ignore it.
@@ -2793,6 +3233,21 @@ export function App() {
         if (pluginCommand?.execution === "frontend" || (plugin?.frontendEntry && !plugin.hasNativeWorker)) {
           if (!plugin?.frontendEntry) {
             showToast("该插件命令需要前端入口，但当前插件没有可用界面。");
+            return;
+          }
+          const deliveredToDetached = await command<boolean>(
+            "dispatch_detached_plugin_frontend_event",
+            {
+              request: {
+                kind: "command",
+                pluginId: plugin.id,
+                commandId: result.commandId,
+              },
+            },
+          );
+          if (deliveredToDetached) {
+            recordSuccessfulAction();
+            await dismissLauncher();
             return;
           }
           invalidateLauncherContextHandoff();
@@ -2844,6 +3299,42 @@ export function App() {
       showToast(error instanceof Error ? error.message : "无法执行该项目。");
     }
   };
+
+  useEffect(() => {
+    if (!pendingPluginShortcut) {
+      return;
+    }
+    setPendingPluginShortcut(null);
+    const plugin = plugins.find((candidate) =>
+      candidate.id === pendingPluginShortcut.pluginId && candidate.enabled !== false,
+    );
+    if (!plugin) {
+      showToast("该全局快捷键对应的插件已停用、移除或更新；未执行任何命令。");
+      return;
+    }
+    if (pendingPluginShortcut.keyword !== undefined) {
+      setQuery(pendingPluginShortcut.keyword);
+      setSurface("launcher");
+      setLauncherFocusSignal((current) => current + 1);
+      return;
+    }
+    const pluginCommand = Array.isArray(plugin.commands)
+      ? plugin.commands.find((candidate) => candidate.id === pendingPluginShortcut.commandId)
+      : undefined;
+    if (!pluginCommand) {
+      showToast("该全局快捷键对应的插件命令已不存在；未执行任何内容。");
+      return;
+    }
+    void activateResult({
+      id: `plugin-command:${plugin.id}:${pluginCommand.id}`,
+      name: pluginCommand.name || pluginCommand.id,
+      kind: "plugin",
+      score: 1_000,
+      metadata: [plugin.name, pluginCommand.description].filter(Boolean).join(" · "),
+      pluginId: plugin.id,
+      commandId: pluginCommand.id,
+    });
+  }, [pendingPluginShortcut]);
 
   const activateLauncherShortcut = async (shortcutId: string, item: SpotlightLauncherItem) => {
     if (!isDesktop()) {
@@ -3195,6 +3686,53 @@ export function App() {
                 </div>
               </section>
 
+              <section className="settings-section" aria-labelledby="super-panel-title">
+                <div className="settings-section__icon">
+                  <Sparkles size={16} />
+                </div>
+                <div className="settings-section__copy">
+                  <h3 id="super-panel-title">超级面板</h3>
+                  <p>
+                    静止长按右键 {superPanelStatus?.holdMs ?? 460}ms，在指针附近打开紧凑启动器。
+                    只带入当前剪贴板，不模拟 Ctrl/Cmd+C、不拦截原右键，也不读取其他应用的选区。
+                  </p>
+                  <p aria-live="polite">
+                    {!isDesktop()
+                      ? superPanelStatus?.enabled
+                        ? "浏览器模拟已启用，可验证上下文打开流程。"
+                        : "浏览器预览不会安装系统鼠标监听。"
+                      : isUpdatingSuperPanel
+                        ? "正在更新只读系统监听…"
+                        : superPanelStatus?.error
+                          ? `系统监听不可用：${superPanelStatus.error}`
+                          : superPanelStatus?.enabled && superPanelStatus.listenerRunning
+                            ? "已启用；监听只观察右键按下、移动与释放。"
+                            : "已关闭；不会安装全局鼠标监听。"}
+                  </p>
+                  {!isDesktop() ? (
+                    <button
+                      className="settings-action"
+                      onClick={previewSuperPanel}
+                      type="button"
+                    >
+                      <Sparkles size={14} />
+                      模拟长按右键（开发验证）
+                    </button>
+                  ) : null}
+                </div>
+                <button
+                  aria-label={superPanelStatus?.enabled ? "关闭超级面板" : "启用超级面板"}
+                  aria-busy={isUpdatingSuperPanel}
+                  aria-pressed={superPanelStatus?.enabled ?? false}
+                  className={"settings-switch" + (superPanelStatus?.enabled ? " is-on" : "")}
+                  disabled={isUpdatingSuperPanel}
+                  onClick={() => void toggleSuperPanel()}
+                  type="button"
+                >
+                  <span />
+                </button>
+              </section>
+
               <section className="settings-section" aria-labelledby="recent-title">
                 <div className="settings-section__icon">
                   <History size={16} />
@@ -3325,6 +3863,7 @@ export function App() {
             />
           )) : null}
           <PluginFrontendFrame
+            onDetach={detachActivePlugin}
             onClose={returnToLauncher}
             onPendingEventHandled={(eventId) => {
               setPendingPluginEvent((current) => (current?.id === eventId ? null : current));

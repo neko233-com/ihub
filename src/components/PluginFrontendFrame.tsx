@@ -1,12 +1,41 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AnimatePresence, motion } from "motion/react";
-import { ChevronLeft, LoaderCircle, Puzzle, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ExternalLink,
+  LoaderCircle,
+  Puzzle,
+  Search,
+  ShieldCheck,
+  X,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { command, isDesktop } from "../lib/desktop";
+import { shouldDetachPluginSurface } from "../lib/detached-plugin-window";
+import {
+  PluginBridgeInFlightGate,
+  validatePluginBridgeCall,
+} from "../lib/plugin-bridge-boundary";
+import {
+  enqueueBoundedPluginHostEvent,
+  rememberBoundedPluginEventId,
+  restoreFailedPluginHostEventTail,
+} from "../lib/plugin-host-event-queue";
+import {
+  PLUGIN_SUB_INPUT_MAX_VALUE_LENGTH,
+  resolvePluginSubInputBridgeCall,
+  type PluginSubInputHostState,
+} from "../lib/plugin-sub-input";
 import type { PluginFrontendEvent, PluginFrontendLease, PluginInfo } from "../lib/types";
 import { PluginArtwork, safePluginArtworkSrc } from "./PluginArtwork";
 
-const REQUEST_CHANNEL = "ihub-plugin-bridge/v1";
 const RESPONSE_CHANNEL = "ihub-host-bridge/v1";
 const LEASE_HEARTBEAT_MS = 30_000;
 
@@ -31,6 +60,14 @@ interface PluginFrontendFrameProps {
   onRuntimeDisposed?: (pluginId: string) => void;
   onSearchProviderRegistered?: (pluginId: string, providerId: string) => void;
   onSearchProviderUnregistered?: (pluginId: string, providerId: string) => void;
+  /** A trusted launcher-host action. The iframe never receives this callback
+   * and cannot choose a native window label or URL. */
+  onDetach?: () => void | Promise<void>;
+  /** Changes only host chrome/close wording for the native detached host. */
+  placement?: "launcher" | "detached";
+  /** Browser QA renders the trusted host chrome and explicit security status
+   * without requesting a loopback lease or mounting a plugin iframe. */
+  browserPreviewStatus?: string;
 }
 
 interface HostBridgeEvent {
@@ -44,16 +81,6 @@ interface PluginFrontendSource extends PluginFrontendLease {
   pluginId: string;
 }
 
-interface BridgeCall {
-  channel: typeof REQUEST_CHANNEL;
-  type: "call";
-  id: string;
-  request: {
-    method: string;
-    params?: unknown;
-  };
-}
-
 interface PendingCursorColorRequest {
   id: string;
   pluginId: string;
@@ -65,19 +92,94 @@ interface CursorColorApproval {
   approvalId: string;
 }
 
-function isBridgeCall(value: unknown): value is BridgeCall {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const message = value as Record<string, unknown>;
-  const request = message.request;
+interface PluginSubInputFieldProps {
+  inputRef: RefObject<HTMLInputElement | null>;
+  onChange: (value: string) => void;
+  pluginName: string;
+  placeholder: string;
+  value: string;
+}
+
+interface PluginFrontendIframeProps {
+  allowDisplayCapture: boolean;
+  allowMicrophone: boolean;
+  ariaHidden?: boolean;
+  className?: string;
+  frameRef: RefObject<HTMLIFrameElement | null>;
+  onError: () => void;
+  onLoad: () => void;
+  purpose: "runtime" | "surface";
+  sourceUrl: string;
+  tabIndex?: number;
+  title: string;
+}
+
+/**
+ * The loopback plugin origin stays distinct from the trusted Tauri host. Keep
+ * enough capability for the verified plugin bundle to execute while refusing
+ * top navigation, popups, downloads, forms, and modal browser surfaces.
+ */
+export function PluginFrontendIframe({
+  allowDisplayCapture,
+  allowMicrophone,
+  ariaHidden,
+  className,
+  frameRef,
+  onError,
+  onLoad,
+  purpose,
+  sourceUrl,
+  tabIndex,
+  title,
+}: PluginFrontendIframeProps) {
+  const delegatedMediaFeatures = purpose === "surface"
+    ? [
+        allowDisplayCapture ? "display-capture" : null,
+        allowMicrophone ? "microphone" : null,
+      ].filter((feature): feature is string => feature !== null)
+    : [];
+
   return (
-    message.channel === REQUEST_CHANNEL &&
-    message.type === "call" &&
-    typeof message.id === "string" &&
-    Boolean(request) &&
-    typeof request === "object" &&
-    typeof (request as Record<string, unknown>).method === "string"
+    <iframe
+      allow={delegatedMediaFeatures.length > 0
+        ? delegatedMediaFeatures.join("; ")
+        : undefined}
+      aria-hidden={ariaHidden}
+      className={className}
+      onError={onError}
+      onLoad={onLoad}
+      ref={frameRef}
+      referrerPolicy="no-referrer"
+      sandbox="allow-scripts allow-same-origin"
+      src={sourceUrl}
+      tabIndex={tabIndex}
+      title={title}
+    />
+  );
+}
+
+export function PluginSubInputField({
+  inputRef,
+  onChange,
+  pluginName,
+  placeholder,
+  value,
+}: PluginSubInputFieldProps) {
+  return (
+    <label className="plugin-frame__sub-input">
+      <Search aria-hidden="true" size={15} strokeWidth={2} />
+      <input
+        aria-label={`${pluginName} 子输入框`}
+        autoComplete="off"
+        maxLength={PLUGIN_SUB_INPUT_MAX_VALUE_LENGTH}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        placeholder={placeholder}
+        ref={inputRef}
+        spellCheck={false}
+        type="text"
+        value={value}
+      />
+    </label>
   );
 }
 
@@ -116,6 +218,9 @@ export function PluginFrontendFrame({
   onRuntimeDisposed,
   onSearchProviderRegistered,
   onSearchProviderUnregistered,
+  onDetach,
+  placement = "launcher",
+  browserPreviewStatus,
 }: PluginFrontendFrameProps) {
   const frame = useRef<HTMLIFrameElement>(null);
   const queuedHostEvents = useRef<HostBridgeEvent[]>([]);
@@ -130,10 +235,14 @@ export function PluginFrontendFrame({
   const [bridgeReadyLeaseId, setBridgeReadyLeaseId] = useState<string | null>(null);
   const [leaseRetry, setLeaseRetry] = useState(0);
   const [pendingCursorColorRequest, setPendingCursorColorRequest] = useState<PendingCursorColorRequest | null>(null);
+  const [subInput, setSubInput] = useState<PluginSubInputHostState | null>(null);
   const [approvingCursorColor, setApprovingCursorColor] = useState(false);
+  const [detaching, setDetaching] = useState(false);
   const readyPluginIdRef = useRef<string | null>(null);
   const postEventToFrameRef = useRef<(name: string, payload: unknown) => boolean>(() => false);
   const pendingCursorColorRequestRef = useRef<PendingCursorColorRequest | null>(null);
+  const subInputRef = useRef<PluginSubInputHostState | null>(null);
+  const subInputElementRef = useRef<HTMLInputElement>(null);
   const announcedSurfaceReadyLeaseRef = useRef<string | null>(null);
   const pluginId = plugin?.id ?? null;
   const pluginSourceKey = frontendSourceKey(plugin);
@@ -142,6 +251,7 @@ export function PluginFrontendFrame({
   const sourceOrigin = sourceIsCurrent ? source?.origin ?? null : null;
   const sourceLeaseId = sourceIsCurrent ? source?.leaseId ?? null : null;
   const bridgeIsReady = sourceIsCurrent && bridgeReadyLeaseId === sourceLeaseId;
+  const detachedHost = placement === "detached";
   const postEventToFrame = useCallback((name: string, payload: unknown) => {
     const target = frame.current?.contentWindow;
     if (!target || !sourceOrigin || !bridgeIsReady) {
@@ -163,6 +273,64 @@ export function PluginFrontendFrame({
   useEffect(() => {
     postEventToFrameRef.current = postEventToFrame;
   }, [postEventToFrame]);
+
+  const detachPluginSurface = useCallback(() => {
+    if (!onDetach || !pluginId || runtimeOnly || detachedHost || detaching) {
+      return;
+    }
+    setDetaching(true);
+    void (async () => {
+      try {
+        await onDetach();
+      } catch (reason) {
+        onToast(
+          reason instanceof Error ? reason.message : "无法创建插件分离窗口。",
+        );
+      } finally {
+        setDetaching(false);
+      }
+    })();
+  }, [detachedHost, detaching, onDetach, onToast, pluginId, runtimeOnly]);
+
+  useEffect(() => {
+    if (!onDetach || !pluginId || runtimeOnly || detachedHost) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!shouldDetachPluginSurface(event, true)) {
+        return;
+      }
+      event.preventDefault();
+      detachPluginSurface();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [detachPluginSurface, detachedHost, onDetach, pluginId, runtimeOnly]);
+
+  const updateSubInput = useCallback((next: PluginSubInputHostState | null) => {
+    subInputRef.current = next;
+    setSubInput(next);
+  }, []);
+
+  useEffect(() => {
+    if (!subInput || subInput.focusVersion === 0) {
+      return;
+    }
+    subInputElementRef.current?.focus({ preventScroll: true });
+  }, [subInput?.focusVersion]);
+
+  const handleSubInputChange = useCallback((value: string) => {
+    const current = subInputRef.current;
+    if (!current || !pluginId) {
+      return;
+    }
+    const boundedValue = value.slice(0, PLUGIN_SUB_INPUT_MAX_VALUE_LENGTH);
+    updateSubInput({ ...current, value: boundedValue });
+    postEventToFrameRef.current(
+      `ihub://plugin/${pluginId}/event/subInput.change`,
+      { text: boundedValue },
+    );
+  }, [pluginId, updateSubInput]);
 
   const clearPendingCursorColorRequest = useCallback((request: PendingCursorColorRequest) => {
     if (pendingCursorColorRequestRef.current !== request) {
@@ -262,13 +430,14 @@ export function PluginFrontendFrame({
     queuedHostEvents.current = [];
     dispatchedPendingEvents.current.clear();
     registeredSearchProviders.current.clear();
+    updateSubInput(null);
     setReadyPluginId(null);
     setCommandEventSubscriptionLeaseId(null);
     announcedSurfaceReadyLeaseRef.current = null;
     previousPluginSource.current = pluginId && pluginSourceKey
       ? { pluginId, key: pluginSourceKey }
       : null;
-  }, [onRuntimeDisposed, pluginId, pluginSourceKey]);
+  }, [onRuntimeDisposed, pluginId, pluginSourceKey, updateSubInput]);
 
   useEffect(() => {
     readyPluginIdRef.current = readyPluginId;
@@ -330,7 +499,7 @@ export function PluginFrontendFrame({
     setBridgeReadyLeaseId(null);
     setError(null);
 
-    if (!pluginId || !pluginSourceKey) {
+    if (!pluginId || !pluginSourceKey || browserPreviewStatus) {
       return () => {
         alive = false;
       };
@@ -370,7 +539,7 @@ export function PluginFrontendFrame({
           .catch(() => undefined);
       }
     };
-  }, [leaseRetry, pluginId, pluginSourceKey, runtimeOnly]);
+  }, [browserPreviewStatus, leaseRetry, pluginId, pluginSourceKey, runtimeOnly]);
 
   useEffect(() => {
     if (!sourceLeaseId || !isDesktop()) {
@@ -415,6 +584,7 @@ export function PluginFrontendFrame({
     // listener and marked the lease ready. That avoids losing an SDK's first
     // register/ready call when a loopback document loads immediately.
     let bridgeActive = true;
+    const inFlight = new PluginBridgeInFlightGate();
 
     const onMessage = (event: MessageEvent<unknown>) => {
       const sourceWindow = frame.current?.contentWindow;
@@ -422,20 +592,102 @@ export function PluginFrontendFrame({
         !sourceWindow
         || event.source !== sourceWindow
         || event.origin !== sourceOrigin
-        || !isBridgeCall(event.data)
       ) {
         return;
       }
 
+      const validation = validatePluginBridgeCall(event.data, pluginId);
+      if (!validation.ok) {
+        if (validation.responseId) {
+          try {
+            sourceWindow.postMessage({
+              channel: RESPONSE_CHANNEL,
+              type: "response",
+              id: validation.responseId,
+              ok: false,
+              error: validation.error,
+            }, sourceOrigin);
+          } catch {
+            // The source navigated while its rejected call was handled.
+          }
+        }
+        return;
+      }
+
+      const bridgeCall = validation.call;
+      const admission = inFlight.begin(bridgeCall.id);
+      if (admission !== "accepted") {
+        try {
+          sourceWindow.postMessage({
+            channel: RESPONSE_CHANNEL,
+            type: "response",
+            id: bridgeCall.id,
+            ok: false,
+            error: admission === "duplicate"
+              ? "A plugin Bridge request with this ID is already running."
+              : "The plugin Bridge has reached its bounded in-flight request limit.",
+          }, sourceOrigin);
+        } catch {
+          // The source navigated while its rejected call was handled.
+        }
+        return;
+      }
+
+      let replied = false;
       const reply = (payload: Record<string, unknown>) => {
-        if (bridgeActive) {
-          // Capture the WindowProxy that sent this request. A delayed response
-          // must never be redirected to whatever iframe React mounts later.
-          sourceWindow.postMessage(payload, sourceOrigin);
+        if (replied) {
+          return;
+        }
+        replied = true;
+        try {
+          if (bridgeActive) {
+            // Capture the WindowProxy that sent this request. A delayed
+            // response must never be redirected to a replacement iframe.
+            sourceWindow.postMessage(payload, sourceOrigin);
+          }
+        } finally {
+          inFlight.finish(bridgeCall.id);
         }
       };
 
-      const bridgeCall = event.data;
+      const subInputCall = resolvePluginSubInputBridgeCall(
+        subInputRef.current,
+        bridgeCall.request.method,
+        bridgeCall.request.params,
+        runtimeOnly,
+      );
+      if (subInputCall.handled) {
+        if (!subInputCall.ok) {
+          reply({
+            channel: RESPONSE_CHANNEL,
+            type: "response",
+            id: bridgeCall.id,
+            ok: false,
+            error: subInputCall.error,
+          });
+          return;
+        }
+
+        updateSubInput(subInputCall.state);
+        if (subInputCall.focusPluginFrame) {
+          window.requestAnimationFrame(() => frame.current?.focus());
+        }
+        if (subInputCall.emitText !== undefined) {
+          postEventToFrameRef.current(
+            `ihub://plugin/${pluginId}/event/subInput.change`,
+            { text: subInputCall.emitText },
+          );
+        }
+        reply({
+          channel: RESPONSE_CHANNEL,
+          type: "response",
+          id: bridgeCall.id,
+          ok: true,
+          result: subInputCall.result,
+        });
+        return;
+      }
+
       if (bridgeCall.request.method === "cursorColor.sampleOnce") {
         if (runtimeOnly) {
           reply({
@@ -522,6 +774,7 @@ export function PluginFrontendFrame({
           }
           if (bridgeCall.request.method === "lifecycle.dispose") {
             setReadyPluginId((current) => (current === pluginId ? null : current));
+            updateSubInput(null);
             onRuntimeDisposed?.(pluginId);
           }
           if (bridgeCall.request.method === "search.register" && typeof providerId === "string") {
@@ -556,6 +809,7 @@ export function PluginFrontendFrame({
     setBridgeReadyLeaseId(sourceLeaseId);
     return () => {
       bridgeActive = false;
+      inFlight.clear();
       window.removeEventListener("message", onMessage);
     };
   }, [
@@ -566,6 +820,7 @@ export function PluginFrontendFrame({
     runtimeOnly,
     sourceLeaseId,
     sourceOrigin,
+    updateSubInput,
   ]);
 
   useEffect(() => {
@@ -579,9 +834,11 @@ export function PluginFrontendFrame({
       if (readyPluginIdRef.current === pluginId && postEventToFrameRef.current(name, payload)) {
         return;
       }
-      queuedHostEvents.current.push({ name, payload });
+      enqueueBoundedPluginHostEvent(queuedHostEvents.current, { name, payload });
     };
-    const subscribe = async (kind: "command" | "search") => {
+    const subscribe = async (
+      kind: "command" | "search" | "event/search.select",
+    ) => {
       try {
         const stop = await listen<unknown>(`ihub://plugin/${pluginId}/${kind}`, (event) => {
           forward(`ihub://plugin/${pluginId}/${kind}`, event.payload);
@@ -603,7 +860,11 @@ export function PluginFrontendFrame({
       }
     };
 
-    void Promise.all([subscribe("command"), subscribe("search")]);
+    void Promise.all([
+      subscribe("command"),
+      subscribe("search"),
+      subscribe("event/search.select"),
+    ]);
     return () => {
       disposed = true;
       unlisten.forEach((stop) => stop());
@@ -618,9 +879,9 @@ export function PluginFrontendFrame({
 
     const events = queuedHostEvents.current;
     queuedHostEvents.current = [];
-    for (const event of events) {
+    for (const [index, event] of events.entries()) {
       if (!postEventToFrame(event.name, event.payload)) {
-        queuedHostEvents.current.unshift(event);
+        restoreFailedPluginHostEventTail(queuedHostEvents.current, events, index);
         break;
       }
     }
@@ -639,7 +900,7 @@ export function PluginFrontendFrame({
     if (!postEventToFrame(pendingEvent.name, pendingEvent.payload)) {
       return;
     }
-    dispatchedPendingEvents.current.add(pendingEvent.id);
+    rememberBoundedPluginEventId(dispatchedPendingEvents.current, pendingEvent.id);
     onPendingEventHandled(pendingEvent.id);
   }, [onPendingEventHandled, pendingEvent, pluginId, postEventToFrame, readyPluginId]);
 
@@ -657,17 +918,19 @@ export function PluginFrontendFrame({
 
   if (runtimeOnly) {
     return source && bridgeIsReady ? (
-      <iframe
-        aria-hidden="true"
+      <PluginFrontendIframe
+        allowDisplayCapture={source.allowsDisplayCapture}
+        allowMicrophone={source.allowsMicrophone}
+        ariaHidden
         className="plugin-search-runtime-frame"
+        frameRef={frame}
         onError={() => {
           setLoading(false);
           setError("插件前端页面无法加载。");
         }}
         onLoad={() => setLoading(false)}
-        ref={frame}
-        referrerPolicy="no-referrer"
-        src={source.url}
+        purpose="runtime"
+        sourceUrl={source.url}
         tabIndex={-1}
         title={plugin ? `${plugin.name} search runtime` : "plugin search runtime"}
       />
@@ -679,7 +942,7 @@ export function PluginFrontendFrame({
       {plugin ? (
         <motion.section
           aria-label={`${plugin.name} 插件界面`}
-          className="plugin-frame-overlay"
+          className={`plugin-frame-overlay${detachedHost ? " is-detached" : ""}`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -688,14 +951,18 @@ export function PluginFrontendFrame({
           <header className="plugin-frame__header">
             <div className="plugin-frame__identity">
               <button
-                aria-label="返回 iHub 启动器"
+                aria-label={detachedHost ? "关闭插件分离窗口" : "返回 iHub 启动器"}
                 className="plugin-frame__back"
                 onClick={onClose}
-                title="返回 iHub"
+                title={detachedHost ? "关闭窗口" : "返回 iHub"}
                 type="button"
               >
-                <ChevronLeft aria-hidden="true" size={16} strokeWidth={2.1} />
-                <span>返回</span>
+                {detachedHost ? (
+                  <X aria-hidden="true" size={15} strokeWidth={2.1} />
+                ) : (
+                  <ChevronLeft aria-hidden="true" size={16} strokeWidth={2.1} />
+                )}
+                <span>{detachedHost ? "关闭" : "返回"}</span>
               </button>
               <span className="plugin-frame__tag">
                 <span
@@ -710,17 +977,65 @@ export function PluginFrontendFrame({
                 <h1>{plugin.name}</h1>
               </span>
             </div>
-            <span
-              aria-label="安全状态：插件界面已隔离加载"
-              className="plugin-frame__security"
-              title="插件界面在独立来源中运行，只能通过受限桥接访问宿主能力。"
-            >
-              <ShieldCheck aria-hidden="true" size={14} strokeWidth={1.9} />
-              <span>隔离加载</span>
-            </span>
+            {subInput ? (
+              <PluginSubInputField
+                inputRef={subInputElementRef}
+                onChange={handleSubInputChange}
+                placeholder={subInput.placeholder}
+                pluginName={plugin.name}
+                value={subInput.value}
+              />
+            ) : null}
+            <div className="plugin-frame__host-actions">
+              {onDetach && !detachedHost ? (
+                <button
+                  aria-label={`在分离窗口中打开 ${plugin.name}`}
+                  aria-busy={detaching}
+                  className="plugin-frame__detach"
+                  disabled={detaching}
+                  onClick={detachPluginSurface}
+                  title="分离窗口 (Ctrl+D)"
+                  type="button"
+                >
+                  {detaching ? (
+                    <LoaderCircle aria-hidden="true" className="spin" size={13} />
+                  ) : (
+                    <ExternalLink aria-hidden="true" size={13} strokeWidth={1.9} />
+                  )}
+                  <span>{detaching ? "正在分离…" : "分离窗口"}</span>
+                  <kbd>Ctrl D</kbd>
+                </button>
+              ) : null}
+              <span
+                aria-label={browserPreviewStatus
+                  ? "安全状态：浏览器预览未签发插件租约"
+                  : "安全状态：插件界面已隔离加载"}
+                className="plugin-frame__security"
+                title={browserPreviewStatus
+                  ? browserPreviewStatus
+                  : "插件界面在独立来源中运行，只能通过受限桥接访问宿主能力。"}
+              >
+                <ShieldCheck aria-hidden="true" size={14} strokeWidth={1.9} />
+                <span>{browserPreviewStatus ? "安全预览" : "隔离加载"}</span>
+              </span>
+            </div>
           </header>
 
           <div className="plugin-frame__content">
+            {browserPreviewStatus ? (
+              <div className="plugin-frame__detached-preview" role="status">
+                <span className="plugin-frame__detached-preview-icon">
+                  <ShieldCheck aria-hidden="true" size={22} strokeWidth={1.8} />
+                </span>
+                <p>插件分离窗口 · 安全预览</p>
+                <small>{browserPreviewStatus}</small>
+                <ul>
+                  <li>固定 800 × 600 宿主窗口，可由系统边框调整大小</li>
+                  <li>真实桌面端只加载 iHub 同源 React host</li>
+                  <li>插件仍位于独立 loopback iframe 与受限 Bridge 内</li>
+                </ul>
+              </div>
+            ) : null}
             {pendingCursorColorRequest ? (
               <div
                 aria-describedby="plugin-cursor-confirm-copy"
@@ -769,17 +1084,19 @@ export function PluginFrontendFrame({
                 <small>{error}</small>
               </div>
             ) : null}
-            {source && bridgeIsReady ? (
-              <iframe
+            {!browserPreviewStatus && source && bridgeIsReady ? (
+              <PluginFrontendIframe
+                allowDisplayCapture={source.allowsDisplayCapture}
+                allowMicrophone={source.allowsMicrophone}
+                frameRef={frame}
                 key={`${plugin.id}:${source.leaseId}`}
                 onError={() => {
                   setLoading(false);
                   setError("插件前端页面无法加载。");
                 }}
                 onLoad={() => setLoading(false)}
-                ref={frame}
-                referrerPolicy="no-referrer"
-                src={source.url}
+                purpose="surface"
+                sourceUrl={source.url}
                 title={plugin.name + " plugin frontend"}
               />
             ) : null}

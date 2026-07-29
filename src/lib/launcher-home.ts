@@ -13,6 +13,7 @@ const launcherChromeDestinationIds = new Set([
   "ihub.open-settings",
   "system-command:ihub.open-settings",
 ]);
+const builtinCommandResultPrefix = "builtin-command:";
 
 /** Keeps the newest launcher history entries inside one shared, explicit bound. */
 export function retainLauncherRecent<T>(items: readonly T[]): T[] {
@@ -31,6 +32,21 @@ export function launcherHomePreview<T>(
 /** Settings and center navigation are shell chrome, not completed user work. */
 export function isLauncherRecentDestination(itemId: string): boolean {
   return !launcherChromeDestinationIds.has(itemId);
+}
+
+/**
+ * Search results use a transient wrapper ID so the launcher can recover the
+ * underlying SearchResult. History instead keeps the stable host command ID;
+ * otherwise activating a built-in from search would duplicate the same tool
+ * beside its pinned/home entry.
+ */
+export function canonicalLauncherRecentDestination(itemId: string): string {
+  if (!itemId.startsWith(builtinCommandResultPrefix)) {
+    return itemId;
+  }
+
+  const commandId = itemId.slice(builtinCommandResultPrefix.length);
+  return commandId.startsWith("ihub.tool.") ? commandId : itemId;
 }
 
 /**

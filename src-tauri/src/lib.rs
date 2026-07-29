@@ -4,6 +4,7 @@ mod clipboard_access;
 mod clipboard_history;
 mod cloud_credentials;
 mod cloud_drive;
+mod detached_plugin_window;
 mod indexer;
 mod launcher_hotkey;
 mod launcher_shortcuts;
@@ -15,8 +16,10 @@ mod ntfs_usn;
 mod plugin_artwork;
 mod plugin_asset_server;
 mod plugin_settings;
+mod plugin_shortcuts;
 mod plugins;
 mod project_template;
+mod super_panel;
 mod window_management;
 
 pub use app::run;

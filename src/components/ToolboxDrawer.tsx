@@ -13,6 +13,7 @@ import {
   Clock3,
   Code2,
   Copy,
+  Crop,
   Download,
   Files,
   FolderSearch,
@@ -32,7 +33,9 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LiveColorPicker } from "./LiveColorPicker";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
+import { RegionCaptureEditor } from "./RegionCaptureEditor";
 import {
   clipboardHistoryKindLabel,
   clipboardHistoryRestoreLabel,
@@ -42,6 +45,12 @@ import { evaluateCalculatorExpression } from "../lib/calculator";
 import { command, isDesktop } from "../lib/desktop";
 import { decodeQrImageFile } from "../lib/qr-image-decode";
 import { activeRecordingElapsedMs, remainingActiveRecordingMs } from "../lib/recording-timing";
+import {
+  createRegionCaptureDemoSource,
+  validateRegionCaptureSize,
+  type CroppedCapture,
+  type RegionCaptureSource,
+} from "../lib/region-capture";
 import {
   createTimeSnapshot,
   parseTimeInput,
@@ -204,13 +213,6 @@ interface EyeDropperConstructor {
   new (): EyeDropperInstance;
 }
 
-interface CursorColorSample {
-  hex: string;
-  rgb: string;
-  x: number;
-  y: number;
-}
-
 /** A bounded, one-shot PNG returned by the trusted iHub shell. This is only
  * used by the built-in UI after a direct click; plugins do not receive this
  * native capture channel. */
@@ -224,7 +226,6 @@ interface NativeScreenshot {
 }
 
 const quickNotesStorageKey = "ihub.toolbox.quick-notes.v1";
-const nativeCursorColorDelayMs = 2_000;
 /**
  * MediaRecorder buffers every chunk in the WebView until the final WebM is
  * downloaded. Keep the built-in recorder intentionally bounded so a forgotten
@@ -761,6 +762,7 @@ export function ToolboxDrawer({
   const mountedRef = useRef(true);
   const openRef = useRef(open);
   const screenshotPreviewUrlRef = useRef<string | null>(null);
+  const regionCaptureSourceRef = useRef<RegionCaptureSource | null>(null);
   const handledPastedImageRef = useRef<Blob | null>(null);
   const handledLaunchContextRequestRef = useRef<number | null>(null);
   const calculatorInputRef = useRef<HTMLInputElement | null>(null);
@@ -768,9 +770,8 @@ export function ToolboxDrawer({
   const qrDecodeInputRef = useRef<HTMLInputElement | null>(null);
   const webDavRequestIdRef = useRef(0);
   const [color, setColor] = useState("#76e8d6");
-  const [isSamplingNativeColor, setIsSamplingNativeColor] = useState(false);
-  const [nativeColorCountdown, setNativeColorCountdown] = useState<number | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
+  const [regionCaptureSource, setRegionCaptureSource] = useState<RegionCaptureSource | null>(null);
   const [screenshotPreviewUrl, setScreenshotPreviewUrl] = useState<string | null>(null);
   const [screenshotPreviewDescription, setScreenshotPreviewDescription] = useState("最新截图会显示在这里。");
   const [screenshotDownloadName, setScreenshotDownloadName] = useState("ihub-capture.png");
@@ -859,6 +860,15 @@ export function ToolboxDrawer({
     revokeScreenshotObjectUrl(screenshotPreviewUrlRef.current);
     screenshotPreviewUrlRef.current = previewUrl;
     setScreenshotPreviewUrl(previewUrl);
+  }, []);
+
+  const replaceRegionCaptureSource = useCallback((source: RegionCaptureSource | null) => {
+    const previous = regionCaptureSourceRef.current;
+    if (previous?.revokeOnClose) {
+      revokeScreenshotObjectUrl(previous.url);
+    }
+    regionCaptureSourceRef.current = source;
+    setRegionCaptureSource(source);
   }, []);
 
   const rgb = useMemo(() => hexToRgb(color), [color]);
@@ -1266,6 +1276,9 @@ export function ToolboxDrawer({
   useEffect(
     () => () => {
       revokeScreenshotObjectUrl(screenshotPreviewUrlRef.current);
+      if (regionCaptureSourceRef.current?.revokeOnClose) {
+        revokeScreenshotObjectUrl(regionCaptureSourceRef.current.url);
+      }
     },
     [],
   );
@@ -1852,38 +1865,6 @@ export function ToolboxDrawer({
     }
   };
 
-  const pickNativeCursorColor = async () => {
-    if (!isDesktop()) {
-      onToast("桌面端原生取色仅在 iHub 桌面应用中可用。");
-      return;
-    }
-    if (isSamplingNativeColor) {
-      return;
-    }
-
-    setIsSamplingNativeColor(true);
-    setNativeColorCountdown(2);
-    const startedAt = Date.now();
-    const countdownTimer = window.setInterval(() => {
-      const remainingMs = Math.max(0, nativeCursorColorDelayMs - (Date.now() - startedAt));
-      setNativeColorCountdown(Math.ceil(remainingMs / 1_000));
-    }, 100);
-
-    try {
-      const sample = await command<CursorColorSample>("sample_cursor_color", {
-        delayMs: nativeCursorColorDelayMs,
-      });
-      setColor(sample.hex);
-      onToast(`已从光标位置 (${sample.x}, ${sample.y}) 拾取 ${sample.hex.toUpperCase()}。`);
-    } catch (error) {
-      onToast(error instanceof Error ? error.message : "无法从光标位置拾取颜色。");
-    } finally {
-      window.clearInterval(countdownTimer);
-      setNativeColorCountdown(null);
-      setIsSamplingNativeColor(false);
-    }
-  };
-
   const saveQuickNote = () => {
     const text = quickNoteDraft.trim();
     if (!text) {
@@ -2002,6 +1983,7 @@ export function ToolboxDrawer({
       if (!width || !height) {
         throw new Error("无法确定截图尺寸。");
       }
+      validateRegionCaptureSize({ width, height });
 
       const canvas = document.createElement("canvas");
       canvas.width = width;
@@ -2024,12 +2006,15 @@ export function ToolboxDrawer({
         }, "image/png");
       });
 
-      const previewUrl = URL.createObjectURL(blob);
-      replaceScreenshotPreview(previewUrl);
       const fileName = `ihub-capture-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
-      setScreenshotDownloadName(fileName);
-      setScreenshotPreviewDescription("已通过系统选择器生成 PNG；只保留在当前预览，点击下载才会保存文件。");
-      onToast("截图已生成 PNG；点击“下载图片”才会保存。");
+      replaceRegionCaptureSource({
+        height,
+        name: fileName,
+        revokeOnClose: true,
+        url: URL.createObjectURL(blob),
+        width,
+      });
+      onToast("画面已就绪；请拖拽选择要导出的矩形区域。");
     } catch (error) {
       onToast(error instanceof Error ? error.message : "未能完成截图。");
     } finally {
@@ -2040,7 +2025,7 @@ export function ToolboxDrawer({
 
   const capturePrimaryMonitorNatively = async () => {
     if (!isDesktop()) {
-      onToast("原生快速截图仅在 iHub 桌面应用中提供。");
+      onToast("原生显示器帧仅在 iHub 桌面应用中提供。");
       return;
     }
     if (isCapturingScreenshot) {
@@ -2053,18 +2038,36 @@ export function ToolboxDrawer({
       if (screenshot.mimeType !== "image/png" || !screenshot.dataUrl.startsWith("data:image/png;base64,")) {
         throw new Error("原生截图返回了无效的 PNG 数据。");
       }
-      replaceScreenshotPreview(screenshot.dataUrl);
       const fileName = screenshot.name.trim() || `ihub-monitor-${screenshot.displayIndex + 1}.png`;
-      setScreenshotDownloadName(fileName);
-      setScreenshotPreviewDescription(
-        `已原生截取一个完整显示器（${screenshot.width} × ${screenshot.height} PNG）；图片仅保留在当前预览，点击下载才会保存文件。`,
-      );
-      onToast("已原生截取显示器；点击“下载图片”才会保存。");
+      validateRegionCaptureSize(screenshot);
+      replaceRegionCaptureSource({
+        height: screenshot.height,
+        name: fileName,
+        url: screenshot.dataUrl,
+        width: screenshot.width,
+      });
+      onToast("已读取显示器的一帧；请拖拽选择要导出的矩形区域。");
     } catch (error) {
       onToast(error instanceof Error ? error.message : "未能完成原生截图。");
     } finally {
       setIsCapturingScreenshot(false);
     }
+  };
+
+  const loadRegionCaptureDemo = () => {
+    replaceRegionCaptureSource(createRegionCaptureDemoSource());
+    onToast("已载入本地模拟画面；可在浏览器中验证拖拽、取消与导出。");
+  };
+
+  const exportRegionCapture = async (capture: CroppedCapture) => {
+    const previewUrl = URL.createObjectURL(capture.blob);
+    replaceScreenshotPreview(previewUrl);
+    setScreenshotDownloadName(capture.name);
+    setScreenshotPreviewDescription(
+      `已裁剪 ${capture.width} × ${capture.height} PNG；只保留在当前预览，点击下载才会保存文件。`,
+    );
+    replaceRegionCaptureSource(null);
+    onToast(`已导出 ${capture.width} × ${capture.height} 的矩形选区。`);
   };
 
   const downloadScreenshotPreview = () => {
@@ -3019,22 +3022,15 @@ export function ToolboxDrawer({
                       <p>点击色块，使用系统颜色选择器。</p>
                     </div>
                   </div>
+                  <LiveColorPicker
+                    onConfirm={async (sample) => {
+                      setColor(sample.hex);
+                      await copyText(sample.hex, "HEX");
+                    }}
+                    onStatus={onToast}
+                  />
                   <button
                     className="toolbox-secondary-action"
-                    disabled={isSamplingNativeColor}
-                    onClick={() => void pickNativeCursorColor()}
-                    type="button"
-                  >
-                    <Palette size={15} />
-                    {isSamplingNativeColor
-                      ? nativeColorCountdown && nativeColorCountdown > 0
-                        ? `${nativeColorCountdown} 秒后从光标取色`
-                        : "正在读取光标颜色…"
-                      : "桌面端原生取色"}
-                  </button>
-                  <button
-                    className="toolbox-secondary-action"
-                    disabled={isSamplingNativeColor}
                     onClick={() => void pickScreenColor()}
                     type="button"
                   >
@@ -3055,7 +3051,7 @@ export function ToolboxDrawer({
                       </button>
                     ))}
                   </div>
-                  <p className="toolbox-note">Windows 与 macOS 的桌面端原生取色会在点击后倒计时 2 秒，再只读取一次光标下的像素；倒计时期间可将鼠标移至目标位置，不会轮询或保存颜色历史。macOS 首次取样需要用户授予“屏幕录制”权限。WebView 不支持屏幕吸管时，仍可使用系统颜色面板。颜色历史与更深系统集成保留给官方 Color Pick 原生插件。</p>
+                  <p className="toolbox-note">Windows 与 macOS 桌面端使用短时、限频的实时放大镜；macOS 首次取样需要用户授予“屏幕录制”权限。WebView 不支持屏幕吸管时，仍可使用系统颜色面板。</p>
                 </section>
               ) : null}
 
@@ -3065,7 +3061,7 @@ export function ToolboxDrawer({
                     <span className="toolbox-section-heading__icon"><Camera size={17} /></span>
                     <div>
                       <h3 id="toolbox-screenshot-title">截图</h3>
-                      <p>原生快速截取一个完整显示器，或通过系统选择器截取显示器、窗口、标签页的一帧。</p>
+                      <p>读取一帧后，在预览中拖拽真正的矩形选区；确认前不会写入磁盘。</p>
                     </div>
                   </div>
                   <div className="toolbox-action-row toolbox-screenshot-actions">
@@ -3077,7 +3073,7 @@ export function ToolboxDrawer({
                         type="button"
                       >
                         {isCapturingScreenshot ? <LoaderCircle className="spin" size={16} /> : <Camera size={16} />}
-                        {isCapturingScreenshot ? "正在生成 PNG…" : "快速截取显示器（原生）"}
+                        {isCapturingScreenshot ? "正在读取画面…" : "截取显示器后选择区域"}
                       </button>
                     ) : null}
                     <button
@@ -3087,9 +3083,32 @@ export function ToolboxDrawer({
                       type="button"
                     >
                       <Camera size={15} />
-                      选择屏幕、窗口或标签页
+                      选择来源后框选区域
                     </button>
+                    {import.meta.env.DEV && !isDesktop() ? (
+                      <button
+                        className="toolbox-secondary-action"
+                        disabled={isCapturingScreenshot}
+                        onClick={loadRegionCaptureDemo}
+                        type="button"
+                      >
+                        <Crop size={15} />
+                        载入模拟画面（开发验证）
+                      </button>
+                    ) : null}
                   </div>
+                  {regionCaptureSource ? (
+                    <RegionCaptureEditor
+                      developmentPreview={!isDesktop()}
+                      onCancel={() => {
+                        replaceRegionCaptureSource(null);
+                        onToast("已取消矩形截图。");
+                      }}
+                      onExport={exportRegionCapture}
+                      onStatus={onToast}
+                      source={regionCaptureSource}
+                    />
+                  ) : null}
                   {screenshotPreviewUrl ? (
                     <figure className="toolbox-screenshot-preview">
                       <img alt="截图或粘贴图片预览" src={screenshotPreviewUrl} />
@@ -3104,7 +3123,7 @@ export function ToolboxDrawer({
                       </button>
                     </figure>
                   ) : null}
-                  <p className="toolbox-note">iHub 不会持续读取屏幕；两种截图都只能由你点击触发。原生按钮只截取一个完整显示器，不写入磁盘；系统选择器可选窗口、标签页或任意显示器。macOS 首次原生截图可能要求“屏幕录制”权限。</p>
+                  <p className="toolbox-note">两种来源都只能由你点击触发：桌面端复用一次受限的原生显示器帧，浏览器来源复用系统共享选择器的一帧。拖拽完成后才在当前 WebView 裁剪 PNG；取消会丢弃帧，下载按钮才会保存。macOS 首次读取显示器可能要求“屏幕录制”权限。</p>
                 </section>
               ) : null}
 

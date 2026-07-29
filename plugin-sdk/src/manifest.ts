@@ -22,6 +22,88 @@ const minNativeCommandTimeoutMs = 1_000;
 const maxNativeCommandTimeoutMs = 30 * 60 * 1_000;
 const maxManifestCommands = 64;
 const maxArtworkCandidates = 32;
+const maxGlobalShortcuts = 16;
+const maxShortcutKeywordCharacters = 64;
+const maxPermissionListItems = 64;
+const maxPermissionValueCharacters = 512;
+const permissionControlCharacterPattern = /[\u0000-\u001f\u007f-\u009f]/;
+const supportedPermissionKeys = new Set([
+  "filesystem",
+  "network",
+  "clipboard",
+  "process",
+  "shell",
+  "screenCapture",
+  "microphone",
+  "cursorColor",
+  "globalShortcut",
+  "notifications",
+  "nativeApi",
+  "windowManagement",
+  "launcherContext",
+]);
+const booleanPermissionKeys = new Set([
+  "screenCapture",
+  "microphone",
+  "cursorColor",
+  "globalShortcut",
+  "notifications",
+  "nativeApi",
+  "windowManagement",
+]);
+const namedShortcutKeys = [
+  "Space", "Minus", "Equal", "Comma", "Period", "Semicolon", "Quote", "Slash",
+  "Backslash", "BracketLeft", "BracketRight", "Backquote",
+] as const;
+
+function normalizeGlobalShortcut(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128 || /[^\x20-\x7e]/.test(value)) {
+    return undefined;
+  }
+  let cmdOrCtrl = false;
+  let alt = false;
+  let shift = false;
+  let key: string | undefined;
+  const canonicalKeys = [
+    ...namedShortcutKeys,
+    ...Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
+    ...Array.from({ length: 26 }, (_, index) => `Key${String.fromCharCode(65 + index)}`),
+    ...Array.from({ length: 10 }, (_, index) => `Digit${index}`),
+  ];
+  for (const rawToken of value.split("+")) {
+    const token = rawToken.trim();
+    if (!token) {
+      return undefined;
+    }
+    if (token.toLowerCase() === "cmdorctrl") {
+      if (cmdOrCtrl) return undefined;
+      cmdOrCtrl = true;
+    } else if (token.toLowerCase() === "alt") {
+      if (alt) return undefined;
+      alt = true;
+    } else if (token.toLowerCase() === "shift") {
+      if (shift) return undefined;
+      shift = true;
+    } else {
+      const canonical = canonicalKeys.find((candidate) => candidate.toLowerCase() === token.toLowerCase());
+      if (!canonical || key !== undefined) {
+        return undefined;
+      }
+      key = canonical;
+    }
+  }
+  if ((!cmdOrCtrl && !alt) || !key || (alt && key === "F4")) {
+    return undefined;
+  }
+  return [...(cmdOrCtrl ? ["CmdOrCtrl"] : []), ...(alt ? ["Alt"] : []), ...(shift ? ["Shift"] : []), key].join("+");
+}
+
+function validShortcutKeyword(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && Array.from(value).length <= maxShortcutKeywordCharacters
+    && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,6 +121,72 @@ function stringAt(value: Record<string, unknown>, key: string, path: string, iss
 function checkRelativePath(value: unknown, path: string, issues: ManifestIssue[]): void {
   if (typeof value !== "string" || !relativePathPattern.test(value)) {
     issues.push({ path, message: "must be a package-relative path and may not escape the package" });
+  }
+}
+
+function checkPermissionStringList(
+  value: unknown,
+  path: string,
+  issues: ManifestIssue[],
+): void {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: "must be an array of bounded, unique strings" });
+    return;
+  }
+  if (value.length > maxPermissionListItems) {
+    issues.push({
+      path,
+      message: `must contain at most ${maxPermissionListItems} entries`,
+    });
+  }
+
+  const seen = new Set<string>();
+  value.forEach((candidate, index) => {
+    const candidatePath = `${path}[${index}]`;
+    if (
+      typeof candidate !== "string"
+      || candidate.trim() !== candidate
+      || candidate.length === 0
+      || Array.from(candidate).length > maxPermissionValueCharacters
+      || permissionControlCharacterPattern.test(candidate)
+    ) {
+      issues.push({
+        path: candidatePath,
+        message:
+          `must be a non-empty, trimmed, non-control string of at most ${maxPermissionValueCharacters} characters`,
+      });
+      return;
+    }
+    if (seen.has(candidate)) {
+      issues.push({ path: candidatePath, message: "must be unique" });
+      return;
+    }
+    seen.add(candidate);
+  });
+}
+
+function checkNestedPermissionObject(
+  value: unknown,
+  path: string,
+  booleanKeys: readonly string[],
+  listKeys: readonly string[],
+  issues: ManifestIssue[],
+): void {
+  if (!isRecord(value)) {
+    issues.push({ path, message: "must be an object when declared" });
+    return;
+  }
+
+  const allowedKeys = new Set([...booleanKeys, ...listKeys]);
+  for (const [key, declared] of Object.entries(value)) {
+    const keyPath = `${path}.${key}`;
+    if (!allowedKeys.has(key)) {
+      issues.push({ path: keyPath, message: "is not supported" });
+    } else if (booleanKeys.includes(key) && typeof declared !== "boolean") {
+      issues.push({ path: keyPath, message: "must be a boolean" });
+    } else if (listKeys.includes(key)) {
+      checkPermissionStringList(declared, keyPath, issues);
+    }
   }
 }
 
@@ -143,16 +291,71 @@ export function validateManifest(value: unknown): ManifestValidationResult {
 
   if (!isRecord(value.permissions)) {
     issues.push({ path: "$.permissions", message: "must be an object (use {} when no host capability is needed)" });
-  } else if (value.permissions.launcherContext !== undefined) {
-    const launcherContext = value.permissions.launcherContext;
-    if (!isRecord(launcherContext)) {
-      issues.push({ path: "$.permissions.launcherContext", message: "must be an object when declared" });
-    } else {
-      for (const [key, declared] of Object.entries(launcherContext)) {
-        if (!(["text", "files", "image"] as const).includes(key as "text" | "files" | "image")) {
-          issues.push({ path: `$.permissions.launcherContext.${key}`, message: "is not supported" });
-        } else if (typeof declared !== "boolean") {
-          issues.push({ path: `$.permissions.launcherContext.${key}`, message: "must be a boolean" });
+  } else {
+    for (const [key, declared] of Object.entries(value.permissions)) {
+      if (!supportedPermissionKeys.has(key)) {
+        issues.push({ path: `$.permissions.${key}`, message: "is not supported" });
+      } else if (booleanPermissionKeys.has(key) && typeof declared !== "boolean") {
+        issues.push({ path: `$.permissions.${key}`, message: "must be a boolean" });
+      }
+    }
+
+    if (value.permissions.filesystem !== undefined) {
+      checkNestedPermissionObject(
+        value.permissions.filesystem,
+        "$.permissions.filesystem",
+        [],
+        ["read", "write"],
+        issues,
+      );
+    }
+    if (value.permissions.network !== undefined) {
+      checkNestedPermissionObject(
+        value.permissions.network,
+        "$.permissions.network",
+        [],
+        ["allow"],
+        issues,
+      );
+    }
+    if (value.permissions.clipboard !== undefined) {
+      checkNestedPermissionObject(
+        value.permissions.clipboard,
+        "$.permissions.clipboard",
+        ["read", "write", "history"],
+        [],
+        issues,
+      );
+    }
+    if (value.permissions.process !== undefined) {
+      checkNestedPermissionObject(
+        value.permissions.process,
+        "$.permissions.process",
+        ["spawn"],
+        ["allow"],
+        issues,
+      );
+    }
+    if (value.permissions.shell !== undefined) {
+      checkNestedPermissionObject(
+        value.permissions.shell,
+        "$.permissions.shell",
+        ["openExternal", "openPath"],
+        [],
+        issues,
+      );
+    }
+    if (value.permissions.launcherContext !== undefined) {
+      const launcherContext = value.permissions.launcherContext;
+      if (!isRecord(launcherContext)) {
+        issues.push({ path: "$.permissions.launcherContext", message: "must be an object when declared" });
+      } else {
+        for (const [key, declared] of Object.entries(launcherContext)) {
+          if (!(["text", "files", "image"] as const).includes(key as "text" | "files" | "image")) {
+            issues.push({ path: `$.permissions.launcherContext.${key}`, message: "is not supported" });
+          } else if (typeof declared !== "boolean") {
+            issues.push({ path: `$.permissions.launcherContext.${key}`, message: "must be a boolean" });
+          }
         }
       }
     }
@@ -194,11 +397,15 @@ export function validateManifest(value: unknown): ManifestValidationResult {
     issues.push({ path: "$.contributes", message: "must be an object" });
   } else if (isRecord(contributions)) {
     for (const [key, value] of Object.entries(contributions)) {
-      if (["commands", "searchProviders", "settings", "quickActions"].includes(key) && !Array.isArray(value)) {
+      if (["commands", "searchProviders", "settings", "globalShortcuts", "quickActions"].includes(key) && !Array.isArray(value)) {
         issues.push({ path: `$.contributes.${key}`, message: "must be an array" });
       }
     }
 
+    const shortcutCandidates = new Map<string, string>();
+    const commandIds = new Set<string>();
+    let shortcutCount = 0;
+    const globalShortcutAllowed = isRecord(value.permissions) && value.permissions.globalShortcut === true;
     if (Array.isArray(contributions.commands)) {
       if (contributions.commands.length > maxManifestCommands) {
         issues.push({
@@ -212,8 +419,37 @@ export function validateManifest(value: unknown): ManifestValidationResult {
           issues.push({ path, message: "must be an object" });
           return;
         }
+        if (typeof command.id === "string") {
+          commandIds.add(command.id);
+        }
         if (command.icon !== undefined) {
           checkArtworkPath(command.icon, `${path}.icon`, issues, artworkCandidates);
+        }
+        if (command.keywords !== undefined) {
+          if (
+            !Array.isArray(command.keywords)
+            || command.keywords.length > 16
+            || command.keywords.some((keyword) => !validShortcutKeyword(keyword))
+            || new Set(command.keywords.map((keyword) => typeof keyword === "string" ? keyword.trim().toLowerCase() : keyword)).size !== command.keywords.length
+          ) {
+            issues.push({ path: `${path}.keywords`, message: "must contain at most 16 unique, bounded, non-control strings" });
+          }
+        }
+        if (command.shortcut !== undefined) {
+          shortcutCount += 1;
+          const shortcut = normalizeGlobalShortcut(command.shortcut);
+          if (!globalShortcutAllowed) {
+            issues.push({ path: `${path}.shortcut`, message: "requires permissions.globalShortcut: true" });
+          }
+          if (!shortcut) {
+            issues.push({ path: `${path}.shortcut`, message: "must use the portable CmdOrCtrl/Alt/Shift accelerator grammar and may not be Alt+F4" });
+          } else if (shortcut === "Alt+Space" || shortcut === "Alt+Shift+Space") {
+            issues.push({ path: `${path}.shortcut`, message: "is reserved for the iHub launcher" });
+          } else if (shortcutCandidates.has(shortcut)) {
+            issues.push({ path: `${path}.shortcut`, message: `duplicates ${shortcutCandidates.get(shortcut)}` });
+          } else {
+            shortcutCandidates.set(shortcut, `${path}.shortcut`);
+          }
         }
 
         if (command.run === undefined) {
@@ -246,6 +482,57 @@ export function validateManifest(value: unknown): ManifestValidationResult {
         if (command.execution !== "native") {
           issues.push({ path: `${path}.execution`, message: "must be native when run.timeoutMs is declared" });
         }
+      });
+    }
+
+    if (Array.isArray(contributions.globalShortcuts)) {
+      if (contributions.globalShortcuts.length > maxGlobalShortcuts) {
+        issues.push({
+          path: "$.contributes.globalShortcuts",
+          message: `must contain at most ${maxGlobalShortcuts} mappings`,
+        });
+      }
+      const bindingIds = new Set<string>();
+      contributions.globalShortcuts.forEach((binding, index) => {
+        const path = `$.contributes.globalShortcuts[${index}]`;
+        shortcutCount += 1;
+        if (!isRecord(binding)) {
+          issues.push({ path, message: "must be an object" });
+          return;
+        }
+        if (typeof binding.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(binding.id) || bindingIds.has(binding.id)) {
+          issues.push({ path: `${path}.id`, message: "must be a unique lowercase kebab-case identifier" });
+        } else {
+          bindingIds.add(binding.id);
+        }
+        if (!globalShortcutAllowed) {
+          issues.push({ path, message: "requires permissions.globalShortcut: true" });
+        }
+        const hasCommand = typeof binding.commandId === "string";
+        const hasKeyword = typeof binding.keyword === "string";
+        if (hasCommand === hasKeyword) {
+          issues.push({ path, message: "must declare exactly one of commandId or keyword" });
+        } else if (hasCommand && !commandIds.has(binding.commandId as string)) {
+          issues.push({ path: `${path}.commandId`, message: "must target a declared command" });
+        } else if (hasKeyword && !validShortcutKeyword(binding.keyword)) {
+          issues.push({ path: `${path}.keyword`, message: `must be a non-control string of at most ${maxShortcutKeywordCharacters} characters` });
+        }
+        const shortcut = normalizeGlobalShortcut(binding.shortcut);
+        if (!shortcut) {
+          issues.push({ path: `${path}.shortcut`, message: "must use the portable CmdOrCtrl/Alt/Shift accelerator grammar and may not be Alt+F4" });
+        } else if (shortcut === "Alt+Space" || shortcut === "Alt+Shift+Space") {
+          issues.push({ path: `${path}.shortcut`, message: "is reserved for the iHub launcher" });
+        } else if (shortcutCandidates.has(shortcut)) {
+          issues.push({ path: `${path}.shortcut`, message: `duplicates ${shortcutCandidates.get(shortcut)}` });
+        } else {
+          shortcutCandidates.set(shortcut, `${path}.shortcut`);
+        }
+      });
+    }
+    if (shortcutCount > maxGlobalShortcuts) {
+      issues.push({
+        path: "$.contributes",
+        message: `must declare at most ${maxGlobalShortcuts} command and plugin-level global shortcuts in total`,
       });
     }
   }
