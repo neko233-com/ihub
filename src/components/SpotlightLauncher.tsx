@@ -899,7 +899,7 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__content {
     max-height: calc(100dvh - 60px);
     overflow: auto;
-    padding: 3px 13px 15px;
+    padding: 3px 13px 0;
     scrollbar-color: rgba(255, 255, 255, .22) transparent;
   }
 
