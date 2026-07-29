@@ -349,7 +349,14 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
 
 #[cfg(target_os = "windows")]
 mod windows_backend {
-    use std::{ffi::c_void, iter, mem::size_of, os::windows::ffi::OsStrExt, path::Path, ptr};
+    use std::{
+        ffi::{c_void, OsString},
+        iter,
+        mem::size_of,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::{Component, Path, PathBuf, Prefix},
+        ptr,
+    };
 
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use image::{
@@ -358,7 +365,7 @@ mod windows_backend {
         ColorType, ImageEncoder, RgbaImage,
     };
     use windows::{
-        core::PCWSTR,
+        core::{Interface, PCWSTR},
         Win32::{
             Foundation::SIZE,
             Graphics::Gdi::{
@@ -368,12 +375,14 @@ mod windows_backend {
             },
             Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
             System::Com::{
-                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+                CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, STGM_READ,
             },
             UI::{
                 Shell::{
-                    IShellItemImageFactory, SHCreateItemFromParsingName, SHGetFileInfoW,
-                    SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SIIGBF_ICONONLY,
+                    IShellItemImageFactory, IShellLinkW, SHCreateItemFromParsingName,
+                    SHGetFileInfoW, ShellLink, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+                    SIIGBF_ICONONLY,
                 },
                 WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL, HICON},
             },
@@ -529,17 +538,69 @@ mod windows_backend {
     }
 
     pub(super) fn icon_data_url(path: &Path) -> Option<String> {
-        let wide_path = path
+        let wide_path = nul_terminated_wide(path)?;
+        // Launcher applications should use the program glyph, not a generic
+        // .lnk document/overlay. If a local shortcut cannot be resolved, the
+        // original Shell item remains the bounded fallback.
+        let shortcut_target = shortcut_target_path(path, &wide_path)
+            .as_deref()
+            .and_then(nul_terminated_wide);
+        let extract =
+            |source: &[u16]| shell_item_image(source).or_else(|| shell_icon_fallback(source));
+        let image = shortcut_target
+            .as_deref()
+            .and_then(extract)
+            .or_else(|| extract(&wide_path))?;
+        encode_png_data_url(image.0, image.1, image.2)
+    }
+
+    fn nul_terminated_wide(path: &Path) -> Option<Vec<u16>> {
+        let wide = path
             .as_os_str()
             .encode_wide()
             .chain(iter::once(0))
             .collect::<Vec<_>>();
-        if wide_path.len() > MAX_PATH_CODE_UNITS + 1 {
+        (wide.len() <= MAX_PATH_CODE_UNITS + 1).then_some(wide)
+    }
+
+    fn shortcut_target_path(path: &Path, wide_path: &[u16]) -> Option<PathBuf> {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+        {
             return None;
         }
 
-        let image = shell_item_image(&wide_path).or_else(|| shell_icon_fallback(&wide_path))?;
-        encode_png_data_url(image.0, image.1, image.2)
+        // SAFETY: this function only runs on the dedicated STA. The shortcut
+        // and persistence interfaces are created, loaded, used, and released
+        // on that same thread. GetPath writes into the bounded live buffer.
+        let target = unsafe {
+            let shortcut: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+            let persistence: IPersistFile = shortcut.cast().ok()?;
+            persistence
+                .Load(PCWSTR(wide_path.as_ptr()), STGM_READ)
+                .ok()?;
+            let mut target = vec![0_u16; MAX_PATH_CODE_UNITS + 1];
+            shortcut.GetPath(&mut target, ptr::null_mut(), 0).ok()?;
+            let end = target.iter().position(|unit| *unit == 0)?;
+            (end > 0).then(|| PathBuf::from(OsString::from_wide(&target[..end])))?
+        };
+
+        let mut components = target.components();
+        let local_drive = matches!(
+            components.next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        );
+        if !local_drive
+            || !matches!(components.next(), Some(Component::RootDir))
+            || target.as_os_str().encode_wide().count() > MAX_PATH_CODE_UNITS
+        {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(&target).ok()?;
+        (metadata.is_file() && !metadata.file_type().is_symlink()).then_some(target)
     }
 
     fn shell_item_image(wide_path: &[u16]) -> Option<(Vec<u8>, u32, u32)> {
@@ -760,6 +821,29 @@ mod windows_backend {
     ) -> Option<String> {
         encode_png_data_url(rgba, width, height)
     }
+
+    #[cfg(test)]
+    pub(super) fn test_create_shortcut(shortcut_path: &Path, target_path: &Path) -> Option<()> {
+        let shortcut_wide = nul_terminated_wide(shortcut_path)?;
+        let target_wide = nul_terminated_wide(target_path)?;
+        // SAFETY: the caller owns a live STA apartment. The COM objects and
+        // both NUL-terminated path buffers remain alive for every call.
+        unsafe {
+            let shortcut: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+            shortcut.SetPath(PCWSTR(target_wide.as_ptr())).ok()?;
+            let persistence: IPersistFile = shortcut.cast().ok()?;
+            persistence
+                .Save(PCWSTR(shortcut_wide.as_ptr()), true)
+                .ok()?;
+        }
+        Some(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_shortcut_target_path(path: &Path) -> Option<PathBuf> {
+        shortcut_target_path(path, &nul_terminated_wide(path)?)
+    }
 }
 
 #[cfg(test)]
@@ -910,11 +994,44 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn sta_service_extracts_a_real_executable_icon() {
-        let executable = std::env::current_exe().expect("current executable");
+    fn shortcut_icon_resolves_to_its_local_target() {
+        struct TempShortcut(PathBuf);
+
+        impl Drop for TempShortcut {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let _apartment =
+            windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+        let target = std::env::current_exe().expect("current executable");
+        let shortcut = TempShortcut(
+            std::env::temp_dir().join(format!("ihub-native-icon-{}.lnk", uuid::Uuid::new_v4())),
+        );
+        windows_backend::test_create_shortcut(&shortcut.0, &target).expect("create test shortcut");
+
+        let resolved =
+            windows_backend::test_shortcut_target_path(&shortcut.0).expect("shortcut target");
+        assert_eq!(
+            std::fs::canonicalize(resolved).expect("resolved target"),
+            std::fs::canonicalize(&target).expect("expected target")
+        );
+        assert_eq!(
+            windows_backend::icon_data_url(&shortcut.0),
+            windows_backend::icon_data_url(&target)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sta_service_extracts_a_real_shell_item_icon() {
+        let shell_item = std::env::var_os("IHUB_NATIVE_ICON_TEST_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_exe().expect("current executable"));
         let service = NativeIconService::new();
         let pending = service
-            .try_request(&executable, "application")
+            .try_request(&shell_item, "application")
             .expect("STA worker accepted request");
         let icon = pending
             .wait_timeout(Duration::from_secs(5))
