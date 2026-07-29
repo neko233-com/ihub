@@ -19,9 +19,9 @@ iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿
 ## 现在能做什么
 
 - Rust 后台并行扫描用户常用目录；搜索过程不在 WebView 中访问文件系统。
-- Windows 只读扫描当前用户与所有用户的 Start Menu 快捷方式，macOS 只读扫描 `/Applications` 与 `~/Applications` 的 `.app`；它们以真实“应用”结果与文件、文件夹、命令和插件并列，只有显式选择才会启动。
+- Windows 只读扫描当前用户与所有用户的 Start Menu 快捷方式，macOS 只读扫描 `/Applications` 与 `~/Applications` 的 `.app`；它们以真实“应用”结果与文件、文件夹、命令和插件并列，只有显式选择才会启动。Windows 的命中结果和固定项会由专用 Shell STA worker 异步补齐 48px 系统图标；文字搜索不等待图标，路径也不会因图标 IPC 新增暴露面。
 - **文件启动**：在搜索结果中右键真实、可固定的本地文件、文件夹或应用即可固定到启动页“已固定”。最多保存 18 个此类快捷项；路径和索引来源只保存在 iHub 原生 app-data，前端只拿不透明 ID。打开时 Rust 会从当前索引重新解析、检查类型/授权范围并 canonicalize；失效、链接重定向或不受支持的目标会安全报错而不会猜测替代目标。Windows Start Menu 的 `.lnk/.url` 仍可即时搜索打开，但不会作为持久启动项固定。
-- 通过 Tauri v2 的单实例、托盘、全局快捷键与开机自启能力保持随叫随到。默认使用 `Alt+Space`（macOS 为 `Option+Space`）：后台时居中唤出，已显示且聚焦时再次按下隐藏；可见但失焦时只恢复焦点并保留当前查询/工具表面。原生层会抑制按键自动重复；托盘与第二实例始终只显示，不会误触反向隐藏。设置页可直接录制跨平台自定义组合并恢复默认。
+- 通过 Tauri v2 的单实例、托盘、全局快捷键与开机自启能力保持随叫随到。默认使用 `Alt+Space`（macOS 为 `Option+Space`）：后台时居中唤出，已显示且聚焦时再次按下隐藏；可见但失焦时只恢复焦点并保留当前查询/工具表面。原生层会抑制按键自动重复；托盘与第二实例始终只显示，不会误触反向隐藏。设置页可直接录制跨平台自定义组合；若启动时被其他应用占用，会明确显示备用键和“重新尝试 Alt + Space”，占用者退出后无需重启即可取回默认键。标题栏关闭、Esc 和失焦只隐藏；托盘或设置页的“退出 iHub”才会结束驻留进程并释放全局键。
 - 从 GitHub URL、<code>github:owner/repo@tag</code> 或 <code>owner/repo@tag</code> 导入插件。安装器先解析远端 ref，再锁定实际 commit，且不执行仓库的 npm、Git hook、PowerShell 或 shell 脚本。
 - 为插件提供自包含 TypeScript iframe bridge、manifest schema、stdio JSON-RPC worker 协议和前端 + Rust worker 模板。
 - 已接入 Tauri 签名 updater 的客户端配置与发布管线；Windows 与 macOS 各自产出原生包。生产更新仍需实际私钥、签名／公证凭据和已发布的 HTTPS `latest.json`。

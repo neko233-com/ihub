@@ -376,7 +376,7 @@ function activeGridColumnCount() {
   if (window.innerWidth <= 690) {
     return 4;
   }
-  if (window.innerWidth <= 980) {
+  if (window.innerWidth <= 760) {
     return 7;
   }
   return 9;
@@ -814,10 +814,10 @@ const spotlightLauncherStyles = `
   .ihub-spotlight-scrim { background: transparent; }
 
   .ihub-spotlight {
-    background: #2c2d2f;
-    border: 1px solid rgba(255, 255, 255, .13);
-    border-radius: 12px;
-    box-shadow: 0 22px 68px rgba(0, 0, 0, .46), 0 1px 0 rgba(255, 255, 255, .055) inset;
+    background: #303133;
+    border: 1px solid #3a3b3d;
+    border-radius: 8px;
+    box-shadow: 0 15px 45px rgba(0, 0, 0, .46), 0 1px 0 rgba(255, 255, 255, .045) inset;
     height: 100dvh;
     inset: 0;
     margin: 0;
@@ -830,18 +830,22 @@ const spotlightLauncherStyles = `
     border-bottom: 0;
     gap: 0;
     grid-template-columns: minmax(0, 1fr) auto;
-    min-height: 88px;
-    padding: 0 16px 0 19px;
+    min-height: 60px;
+    padding: 0 10px 0 13px;
   }
 
   /* Keep the long-press grab affordance in the genuinely empty top strip.
      A broader overlay used to sit above the centre of the text field, so a
      click intended to place the caret could begin a window drag instead. */
   .ihub-spotlight__drag-zone {
-    height: 15px;
+    height: 10px;
     top: 0;
-    width: min(240px, 24vw);
+    width: min(160px, 24vw);
   }
+
+  .ihub-spotlight__drag-zone::before { height: 2px; width: 17px; }
+  .ihub-spotlight__drag-zone:hover::before { width: 23px; }
+  .ihub-spotlight__drag-zone.is-armed::before { width: 25px; }
 
   .ihub-spotlight__brand,
   .ihub-spotlight__search-field > svg,
@@ -851,14 +855,14 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__search-field { display: block; }
 
   .ihub-spotlight__search-field input {
-    color: #dce0e3;
-    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    font-size: 31px;
+    color: #e6e6e6;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    font-size: 22px;
     font-weight: 400;
-    letter-spacing: -.055em;
+    letter-spacing: 0;
   }
 
-  .ihub-spotlight__search-field input::placeholder { color: #bcc0c4; }
+  .ihub-spotlight__search-field input::placeholder { color: #b5b6b6; }
 
   .ihub-spotlight__search-actions { gap: 0; }
 
@@ -866,10 +870,10 @@ const spotlightLauncherStyles = `
     background: #d9ada7;
     border: 1px solid rgba(255, 255, 255, .35);
     box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
-    height: 54px;
+    height: 36px;
     overflow: hidden;
     padding: 0;
-    width: 54px;
+    width: 36px;
   }
 
   .ihub-spotlight__profile-avatar {
@@ -887,20 +891,20 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__content {
-    max-height: calc(100dvh - 88px);
+    max-height: calc(100dvh - 60px);
     overflow: auto;
-    padding: 4px 19px 22px;
+    padding: 3px 13px 15px;
     scrollbar-color: rgba(255, 255, 255, .22) transparent;
   }
 
-  .ihub-spotlight__group + .ihub-spotlight__group { margin-top: 13px; }
+  .ihub-spotlight__group + .ihub-spotlight__group { margin-top: 9px; }
 
-  .ihub-spotlight__group-header { margin-bottom: 6px; }
+  .ihub-spotlight__group-header { margin-bottom: 4px; }
 
   .ihub-spotlight__group-heading {
     align-items: center;
     display: flex;
-    gap: 9px;
+    gap: 6px;
     min-width: 0;
   }
 
@@ -919,16 +923,16 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__group-action {
-    font-size: 18px;
+    font-size: 12px;
     font-weight: 400;
-    padding: 3px 5px;
+    padding: 2px 3px;
   }
 
   .ihub-spotlight__group-back {
     color: #d7d9d8;
-    font-size: 15px;
-    gap: 3px;
-    padding: 4px 6px;
+    font-size: 10px;
+    gap: 2px;
+    padding: 3px 4px;
   }
 
   .ihub-spotlight__group-action:hover,
@@ -943,18 +947,18 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__group.is-expanded .ihub-spotlight__grid { min-height: 0; }
 
   .ihub-spotlight__group-title {
-    color: #f2f2f1;
-    font-size: 22px;
+    color: #e6e6e6;
+    font-size: 16px;
     font-weight: 720;
-    letter-spacing: -.055em;
+    letter-spacing: 0;
   }
 
   .ihub-spotlight__group-count {
-    color: #c9c9c7;
-    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    font-size: 18px;
+    color: #c8c8c8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    font-size: 12px;
     font-weight: 400;
-    letter-spacing: -.05em;
+    letter-spacing: 0;
   }
 
   .ihub-spotlight__grid {
@@ -967,26 +971,26 @@ const spotlightLauncherStyles = `
      Installed plugins naturally fill this reserved second row. */
   .ihub-spotlight__group--pinned .ihub-spotlight__grid {
     align-content: start;
-    min-height: 256px;
+    min-height: 172px;
   }
 
   /* A filtered history keeps its row height, while first launch fills this
      same rhythm with explicitly labelled, real built-ins. */
   .ihub-spotlight__group--recent .ihub-spotlight__grid,
-  .ihub-spotlight__group--recent .ihub-spotlight__empty { min-height: 128px; }
+  .ihub-spotlight__group--recent .ihub-spotlight__empty { min-height: 86px; }
 
-  .ihub-spotlight__group--marketplace .ihub-spotlight__tile { min-height: 108px; }
+  .ihub-spotlight__group--marketplace .ihub-spotlight__tile { min-height: 72px; }
 
   /* Context actions are a dense, restrained handoff strip. They are kept
      visibly separate from search results so they never masquerade as files
      that can be opened directly. */
   .ihub-spotlight__group--context {
     border-bottom: 1px solid rgba(255, 255, 255, .085);
-    padding-bottom: 12px;
+    padding-bottom: 8px;
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__grid {
-    gap: 6px;
+    gap: 4px;
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
@@ -995,12 +999,12 @@ const spotlightLauncherStyles = `
     background: rgba(255, 255, 255, .035);
     border: 1px solid rgba(255, 255, 255, .07);
     display: grid;
-    gap: 2px 10px;
-    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 1px 7px;
+    grid-template-columns: 28px minmax(0, 1fr);
     grid-template-rows: auto auto;
     justify-content: stretch;
-    min-height: 68px;
-    padding: 8px 10px;
+    min-height: 45px;
+    padding: 5px 7px;
     text-align: left;
   }
 
@@ -1013,17 +1017,17 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__group--context .ihub-spotlight__tile-icon {
     grid-row: 1 / span 2;
-    height: 42px;
+    height: 28px;
     margin: 0;
-    width: 42px;
+    width: 28px;
   }
 
-  .ihub-spotlight__group--context .ihub-spotlight__tile-icon svg { height: 21px; width: 21px; }
-  .ihub-spotlight__group--context .ihub-spotlight__tile-label { font-size: 14px; text-align: left; }
+  .ihub-spotlight__group--context .ihub-spotlight__tile-icon svg { height: 14px; width: 14px; }
+  .ihub-spotlight__group--context .ihub-spotlight__tile-label { font-size: 10px; text-align: left; }
   .ihub-spotlight__group--context .ihub-spotlight__tile-detail {
     -webkit-line-clamp: 1;
     display: -webkit-box;
-    font-size: 10px;
+    font-size: 8px;
     margin: 0;
     text-align: left;
     white-space: normal;
@@ -1031,9 +1035,9 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__tile {
     border: 0;
-    border-radius: 11px;
-    min-height: 128px;
-    padding: 11px 5px 7px;
+    border-radius: 8px;
+    min-height: 86px;
+    padding: 7px 3px 5px;
     transform: translateZ(0);
     transition: background-color 145ms cubic-bezier(.16, 1, .3, 1), box-shadow 145ms cubic-bezier(.16, 1, .3, 1), transform 145ms cubic-bezier(.16, 1, .3, 1);
   }
@@ -1041,7 +1045,7 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__tile:hover,
   .ihub-spotlight__tile:focus-visible,
   .ihub-spotlight__tile.is-keyboard-selected {
-    background: #5e5e5f;
+    background: #575757;
     border: 0;
     box-shadow: inset 0 1px rgba(255, 255, 255, .055);
     transform: translateY(-1px);
@@ -1049,13 +1053,13 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__tile-icon {
     border: 0;
-    border-radius: 9px;
-    height: 48px;
-    margin-bottom: 10px;
-    width: 48px;
+    border-radius: 6px;
+    height: 32px;
+    margin-bottom: 7px;
+    width: 32px;
   }
 
-  .ihub-spotlight__tile-icon svg { height: 25px; width: 25px; }
+  .ihub-spotlight__tile-icon svg { height: 17px; width: 17px; }
   .ihub-spotlight__tile-icon img {
     border-radius: inherit;
     display: block;
@@ -1064,11 +1068,21 @@ const spotlightLauncherStyles = `
     width: 100%;
   }
 
+  .ihub-spotlight__tile-icon.is-native {
+    background: transparent;
+    border-radius: 0;
+  }
+
+  .ihub-spotlight__tile-icon.is-native img {
+    border-radius: 0;
+    object-fit: contain;
+  }
+
   .ihub-spotlight__tile-label {
-    color: #efefed;
-    font-size: 17px;
+    color: #e6e6e6;
+    font-size: 13px;
     font-weight: 430;
-    letter-spacing: -.055em;
+    letter-spacing: 0;
     line-height: 1.25;
   }
 
@@ -1079,31 +1093,31 @@ const spotlightLauncherStyles = `
     background: transparent;
     border: 0;
     border-radius: 0;
-    color: #b7b9b9;
-    font-size: 15px;
-    min-height: 66px;
-    padding: 0 7px;
+    color: #9fa0a0;
+    font-size: 10px;
+    min-height: 44px;
+    padding: 0 5px;
   }
 
-  .ihub-spotlight__empty svg { color: #b7b9b9; }
+  .ihub-spotlight__empty svg { color: #9fa0a0; }
 
   .ihub-spotlight__result-list { gap: 2px; }
   .ihub-spotlight__result-row {
     background: transparent;
     border: 0;
-    border-radius: 8px;
-    grid-template-columns: 46px minmax(0, 1fr) auto;
-    min-height: 59px;
-    padding: 6px 10px;
+    border-radius: 6px;
+    grid-template-columns: 31px minmax(0, 1fr) auto;
+    min-height: 40px;
+    padding: 4px 7px;
   }
   .ihub-spotlight__result-row:hover,
   .ihub-spotlight__result-row:focus-visible,
   .ihub-spotlight__result-row.is-keyboard-selected {
-    background: #5e5e5f;
+    background: #575757;
     border: 0;
     transform: none;
   }
-  .ihub-spotlight__result-icon { height: 42px; width: 42px; }
+  .ihub-spotlight__result-icon { height: 28px; width: 28px; }
   .ihub-spotlight__result-icon img {
     border-radius: inherit;
     display: block;
@@ -1111,26 +1125,34 @@ const spotlightLauncherStyles = `
     object-fit: cover;
     width: 100%;
   }
-  .ihub-spotlight__result-label { font-size: 16px; font-weight: 520; }
-  .ihub-spotlight__result-detail { color: #c0c1c0; font-size: 12px; }
-  .ihub-spotlight__result-badge { color: #d0d0ce; font-size: 12px; }
+  .ihub-spotlight__result-icon.is-native {
+    background: transparent;
+    border-radius: 0;
+  }
+  .ihub-spotlight__result-icon.is-native img {
+    border-radius: 0;
+    object-fit: contain;
+  }
+  .ihub-spotlight__result-label { color: #e6e6e6; font-size: 11px; font-weight: 520; }
+  .ihub-spotlight__result-detail { color: #9fa0a0; font-size: 8px; }
+  .ihub-spotlight__result-badge { color: #c8c8c8; font-size: 8px; }
 
-  @media (max-width: 980px) {
+  @media (max-width: 760px) {
     .ihub-spotlight__grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
-    .ihub-spotlight__tile { min-height: 115px; }
+    .ihub-spotlight__tile { min-height: 77px; }
     .ihub-spotlight__group--pinned .ihub-spotlight__grid { min-height: 0; }
     .ihub-spotlight__group--context .ihub-spotlight__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 
   @media (max-width: 690px) {
-    .ihub-spotlight { border-radius: 10px; height: 100dvh; inset: 0; max-width: none; top: 0; width: 100dvw; }
-    .ihub-spotlight__search-row { min-height: 70px; padding-inline: 14px; }
-    .ihub-spotlight__search-field input { font-size: 24px; }
-    .ihub-spotlight__profile-button { height: 42px; width: 42px; }
-    .ihub-spotlight__content { max-height: calc(100dvh - 70px); padding-inline: 14px; }
+    .ihub-spotlight { border-radius: 7px; height: 100dvh; inset: 0; max-width: none; top: 0; width: 100dvw; }
+    .ihub-spotlight__search-row { min-height: 47px; padding-inline: 9px; }
+    .ihub-spotlight__search-field input { font-size: 16px; }
+    .ihub-spotlight__profile-button { height: 28px; width: 28px; }
+    .ihub-spotlight__content { max-height: calc(100dvh - 47px); padding-inline: 9px; }
     .ihub-spotlight__grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .ihub-spotlight__tile { min-height: 105px; }
-    .ihub-spotlight__tile-label { font-size: 14px; }
+    .ihub-spotlight__tile { min-height: 70px; }
+    .ihub-spotlight__tile-label { font-size: 10px; }
     .ihub-spotlight__group--context .ihub-spotlight__grid { grid-template-columns: 1fr; }
   }
 
@@ -1862,7 +1884,7 @@ export function SpotlightLauncher({
                                 : { delay: Math.min(.1, itemIndex * .012), duration: .16, ease: [0.16, 1, 0.3, 1] }}
                               type="button"
                             >
-                              <span className="ihub-spotlight__result-icon">
+                              <span className={`ihub-spotlight__result-icon${item.iconSrc ? " is-native" : ""}`}>
                                 {item.iconSrc ? <img alt="" src={item.iconSrc} /> : <Icon size={17} strokeWidth={1.9} />}
                               </span>
                               <span className="ihub-spotlight__result-copy">
@@ -1918,7 +1940,7 @@ export function SpotlightLauncher({
                                 : { delay: Math.min(.12, (groupIndex * 6 + itemIndex) * .012), duration: .18, ease: [0.16, 1, 0.3, 1] }}
                               type="button"
                             >
-                              <span className={`ihub-spotlight__tile-icon ihub-spotlight__tile-icon--${item.tone ?? "slate"}`}>
+                              <span className={`ihub-spotlight__tile-icon ihub-spotlight__tile-icon--${item.tone ?? "slate"}${item.iconSrc ? " is-native" : ""}`}>
                                 {item.iconSrc ? <img alt="" src={item.iconSrc} /> : <Icon size={19} strokeWidth={1.85} />}
                               </span>
                               <span className="ihub-spotlight__tile-label">{item.label}</span>

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { describeLauncherHotkey } from "./launcher-hotkey-status";
+import {
+  describeLauncherHotkey,
+  launcherHotkeyResetAction,
+} from "./launcher-hotkey-status";
 
 describe("describeLauncherHotkey", () => {
   it("shows the native primary binding with a platform-specific label", () => {
@@ -64,9 +67,9 @@ describe("describeLauncherHotkey", () => {
     });
 
     expect(presentation.shortcutLabel).toBeUndefined();
-    expect(presentation.footerText).toContain("托盘 Show");
-    expect(presentation.settingsDescription).toContain("Show iHub");
-    expect(presentation.ariaLabel).toContain("Show iHub");
+    expect(presentation.footerText).toContain("托盘");
+    expect(presentation.settingsDescription).toContain("显示 iHub");
+    expect(presentation.ariaLabel).toContain("显示 iHub");
   });
 
   it("does not guess the registration result for an older native shell", () => {
@@ -92,5 +95,35 @@ describe("describeLauncherHotkey", () => {
     expect(presentation.shortcutLabel).toBeUndefined();
     expect(presentation.footerText).toContain("状态异常");
     expect(presentation.settingsDescription).toContain("没有返回实际按键");
+  });
+});
+
+describe("launcherHotkeyResetAction", () => {
+  it("lets a fallback or unavailable host retry the default binding", () => {
+    expect(launcherHotkeyResetAction({
+      registration: "fallback",
+      accelerator: "Alt+Shift+Space",
+      trayShowAvailable: true,
+    })).toMatchObject({
+      visible: true,
+      label: "重新尝试 Alt + Space",
+    });
+    expect(launcherHotkeyResetAction({
+      registration: "unavailable",
+      trayShowAvailable: true,
+    }).visible).toBe(true);
+  });
+
+  it("offers restore only for a custom binding and hides it for primary", () => {
+    expect(launcherHotkeyResetAction({
+      registration: "configured",
+      accelerator: "CmdOrCtrl+Space",
+      trayShowAvailable: true,
+    }).label).toBe("恢复默认");
+    expect(launcherHotkeyResetAction({
+      registration: "primary",
+      accelerator: "Alt+Space",
+      trayShowAvailable: true,
+    }).visible).toBe(false);
   });
 });

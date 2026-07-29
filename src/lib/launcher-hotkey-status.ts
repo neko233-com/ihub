@@ -12,6 +12,38 @@ export interface LauncherHotkeyPresentation {
   ariaLabel: string;
 }
 
+export interface LauncherHotkeyResetAction {
+  visible: boolean;
+  label: string;
+  successMessage: string;
+}
+
+export function launcherHotkeyResetAction(
+  status: LauncherHotkeyStatus | null | undefined,
+): LauncherHotkeyResetAction {
+  switch (status?.registration) {
+    case "configured":
+      return {
+        visible: true,
+        label: "恢复默认",
+        successMessage: "启动快捷键已恢复为 Alt / Option + Space。",
+      };
+    case "fallback":
+    case "unavailable":
+      return {
+        visible: true,
+        label: "重新尝试 Alt + Space",
+        successMessage: "已重新取得 Alt / Option + Space。",
+      };
+    default:
+      return {
+        visible: false,
+        label: "恢复默认",
+        successMessage: "启动快捷键已恢复为 Alt / Option + Space。",
+      };
+  }
+}
+
 function registeredShortcut(
   status: LauncherHotkeyStatus,
   platform: string,
@@ -22,9 +54,9 @@ function registeredShortcut(
 
 function missingAcceleratorPresentation(): LauncherHotkeyPresentation {
   return {
-    footerText: "快捷键状态异常 · 托盘 Show 可打开",
-    settingsDescription: "原生壳报告快捷键已注册，但没有返回实际按键；仍可从系统托盘菜单选择“Show iHub”打开 iHub。",
-    ariaLabel: "iHub 原生壳没有返回已注册快捷键的实际按键。仍可从系统托盘菜单选择 Show iHub 打开 iHub。",
+    footerText: "快捷键状态异常 · 托盘可打开",
+    settingsDescription: "原生壳报告快捷键已注册，但没有返回实际按键；仍可从系统托盘菜单选择“显示 iHub”打开。",
+    ariaLabel: "iHub 原生壳没有返回已注册快捷键的实际按键。仍可从系统托盘菜单选择显示 iHub。",
   };
 }
 
@@ -88,17 +120,17 @@ export function describeLauncherHotkey(
     }
     case "unavailable":
       return {
-        footerText: "快捷键不可用 · 托盘 Show 可打开",
-        settingsDescription: "未能注册启动快捷键；仍可从系统托盘菜单选择“Show iHub”打开 iHub。",
-        ariaLabel: "iHub 启动快捷键不可用。仍可从系统托盘菜单选择 Show iHub 打开 iHub。",
+        footerText: "快捷键不可用 · 托盘可打开",
+        settingsDescription: "未能注册启动快捷键；请先退出占用者，再选择“重新尝试 Alt + Space”。也可从系统托盘选择“显示 iHub”打开。",
+        ariaLabel: "iHub 启动快捷键不可用。退出占用者后可重新尝试 Alt 加 Space，或从系统托盘选择显示 iHub。",
       };
     default:
       // Old local shells do not expose the new health field. Do not claim a
       // shortcut is registered or unavailable until a current native host
       // supplies an explicit answer.
       return {
-        settingsDescription: "当前原生壳尚未返回启动快捷键状态；仍可从系统托盘菜单选择“Show iHub”打开 iHub。",
-        ariaLabel: "当前原生壳尚未返回 iHub 启动快捷键状态。仍可从系统托盘菜单选择 Show iHub 打开 iHub。",
+        settingsDescription: "当前原生壳尚未返回启动快捷键状态；仍可从系统托盘菜单选择“显示 iHub”打开。",
+        ariaLabel: "当前原生壳尚未返回 iHub 启动快捷键状态。仍可从系统托盘菜单选择显示 iHub。",
       };
   }
 }

@@ -175,12 +175,12 @@ const pluginCenterStyles = `
   }
 
   .plugin-center {
-    background: #303030;
-    border: 1px solid #555;
-    border-radius: 11px;
+    background: #303133;
+    border: 1px solid #3a3b3d;
+    border-radius: 8px;
     bottom: 0;
-    box-shadow: 0 22px 68px rgba(0, 0, 0, .45);
-    color: #f1f1f1;
+    box-shadow: 0 15px 45px rgba(0, 0, 0, .45);
+    color: #e6e6e6;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     left: 0;
@@ -194,13 +194,13 @@ const pluginCenterStyles = `
 
   .plugin-center__topbar {
     align-items: center;
-    background: #303030;
+    background: #303133;
     border-bottom: 1px solid #454545;
     display: grid;
-    gap: 17px;
-    grid-template-columns: 344px minmax(190px, 1fr) auto;
-    min-height: 86px;
-    padding: 0 17px 0 19px;
+    gap: 11px;
+    grid-template-columns: 229px minmax(127px, 1fr) auto;
+    min-height: 58px;
+    padding: 0 11px 0 13px;
     position: relative;
   }
 
@@ -208,15 +208,15 @@ const pluginCenterStyles = `
     align-items: center;
     cursor: grab;
     display: flex;
-    height: 34px;
+    height: 23px;
     justify-content: center;
     left: 50%;
     position: absolute;
-    top: 2px;
+    top: 1px;
     touch-action: none;
     transform: translateX(-50%);
     user-select: none;
-    width: min(260px, 28vw);
+    width: min(173px, 28vw);
     z-index: 2;
   }
 
@@ -224,14 +224,14 @@ const pluginCenterStyles = `
     background: rgba(255, 255, 255, .18);
     border-radius: 999px;
     content: "";
-    height: 3px;
+    height: 2px;
     transition: background-color 140ms ease, transform 140ms ease, width 140ms ease;
-    width: 25px;
+    width: 17px;
   }
 
-  .plugin-center__drag-zone:hover::before { background: rgba(255, 255, 255, .36); width: 34px; }
+  .plugin-center__drag-zone:hover::before { background: rgba(255, 255, 255, .36); width: 23px; }
   .plugin-center__drag-zone.is-armed { cursor: grabbing; }
-  .plugin-center__drag-zone.is-armed::before { background: #bdeee6; transform: scaleX(1.1); width: 38px; }
+  .plugin-center__drag-zone.is-armed::before { background: #bdeee6; transform: scaleX(1.1); width: 25px; }
 
   .plugin-center__crumbs,
   .plugin-center__top-actions,
@@ -248,14 +248,14 @@ const pluginCenterStyles = `
 
   .plugin-center__crumbs {
     background: #5a5a5a;
-    border-radius: 26px;
+    border-radius: 17px;
     color: #f1f1f1;
-    font-size: 16px;
+    font-size: 11px;
     font-weight: 520;
-    gap: 6px;
+    gap: 4px;
     letter-spacing: -.04em;
-    min-height: 47px;
-    padding: 0 7px;
+    min-height: 32px;
+    padding: 0 5px;
     white-space: nowrap;
   }
 
@@ -265,17 +265,17 @@ const pluginCenterStyles = `
     border-radius: 50%;
     color: #f0f0f0;
     display: inline-flex;
-    height: 34px;
+    height: 23px;
     justify-content: center;
-    width: 34px;
+    width: 23px;
   }
 
-  .plugin-center__crumb-title:first-of-type { padding-right: 7px; }
+  .plugin-center__crumb-title:first-of-type { padding-right: 5px; }
   .plugin-center__crumb-current {
     background: #6c6c6c;
-    border-radius: 19px;
-    margin-left: -3px;
-    padding: 7px 12px;
+    border-radius: 13px;
+    margin-left: -2px;
+    padding: 5px 8px;
   }
 
   .plugin-center__crumb-close {
@@ -286,10 +286,10 @@ const pluginCenterStyles = `
     color: #d7d7d7;
     cursor: pointer;
     display: inline-flex;
-    height: 30px;
+    height: 20px;
     justify-content: center;
     margin-left: auto;
-    width: 30px;
+    width: 20px;
   }
   .plugin-center__crumb-close:hover { background: rgba(255, 255, 255, .1); color: #fff; }
 
@@ -304,7 +304,7 @@ const pluginCenterStyles = `
     border-radius: 0;
     color: #a7a7a7;
     gap: 0;
-    min-height: 48px;
+    min-height: 32px;
     padding: 0;
   }
 
@@ -317,7 +317,7 @@ const pluginCenterStyles = `
     border: 0;
     color: #f0f0f0;
     font: inherit;
-    font-size: 27px;
+    font-size: 18px;
     font-weight: 400;
     min-width: 0;
     outline: 0;
@@ -327,7 +327,7 @@ const pluginCenterStyles = `
   .plugin-center__search svg { display: none; }
   .plugin-center__search input::placeholder { color: #aaa; }
 
-  .plugin-center__top-actions { gap: 8px; position: relative; }
+  .plugin-center__top-actions { gap: 5px; position: relative; }
 
   .plugin-center__action-menu-shell { position: relative; }
 
@@ -345,11 +345,11 @@ const pluginCenterStyles = `
   .plugin-center__action-menu-trigger {
     background: transparent;
     border: 0;
-    border-radius: 8px;
+    border-radius: 5px;
     color: #dedede;
-    height: 38px;
+    height: 26px;
     padding: 0;
-    width: 38px;
+    width: 26px;
   }
 
   .plugin-center__action-menu-trigger:hover,
@@ -364,15 +364,15 @@ const pluginCenterStyles = `
   .plugin-center__action-menu {
     background: #252525;
     border: 1px solid rgba(218, 232, 235, .16);
-    border-radius: 9px;
-    box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
+    border-radius: 6px;
+    box-shadow: 0 11px 28px rgba(0, 0, 0, .42);
     display: grid;
-    gap: 2px;
-    min-width: 218px;
-    padding: 5px;
+    gap: 1px;
+    min-width: 145px;
+    padding: 3px;
     position: absolute;
     right: 0;
-    top: calc(100% + 8px);
+    top: calc(100% + 5px);
     transform-origin: top right;
     z-index: 4;
   }
@@ -381,23 +381,23 @@ const pluginCenterStyles = `
     align-items: center;
     background: transparent;
     border: 0;
-    border-radius: 6px;
+    border-radius: 4px;
     color: #dedede;
     cursor: pointer;
     display: grid;
     font: inherit;
-    gap: 9px;
-    grid-template-columns: 22px minmax(0, 1fr);
-    min-height: 39px;
-    padding: 0 9px;
+    gap: 6px;
+    grid-template-columns: 15px minmax(0, 1fr);
+    min-height: 26px;
+    padding: 0 6px;
     text-align: left;
     width: 100%;
   }
 
   .plugin-center__action-menu-item:hover { background: #3e3e3e; color: #fff; }
   .plugin-center__action-menu-item svg { color: #a9dcd3; }
-  .plugin-center__action-menu-item span { font-size: 12px; font-weight: 620; letter-spacing: -.015em; }
-  .plugin-center__action-menu-separator { background: rgba(220, 230, 232, .1); height: 1px; margin: 3px 4px; }
+  .plugin-center__action-menu-item span { font-size: 8px; font-weight: 620; letter-spacing: 0; }
+  .plugin-center__action-menu-separator { background: rgba(220, 230, 232, .1); height: 1px; margin: 2px 3px; }
 
   .plugin-center__hub-mark {
     background: #252525;
@@ -405,19 +405,19 @@ const pluginCenterStyles = `
     border-radius: 50%;
     color: #f1f1f1;
     cursor: pointer;
-    height: 54px;
+    height: 36px;
     justify-content: center;
     padding: 0;
-    width: 54px;
+    width: 36px;
   }
   .plugin-center__hub-mark:hover { background: #3b3b3b; }
 
   .plugin-center__close {
     background: transparent;
-    border-radius: 7px;
+    border-radius: 5px;
     color: #d0d0d0;
-    height: 38px;
-    width: 38px;
+    height: 26px;
+    width: 26px;
   }
 
   .plugin-center__close:hover { background: rgba(255, 255, 255, .07); color: #f0f5f6; }
@@ -425,38 +425,38 @@ const pluginCenterStyles = `
   .plugin-center__import-popover {
     background: #20262c;
     border: 1px solid rgba(204, 224, 228, .15);
-    border-radius: 10px;
-    box-shadow: 0 18px 46px rgba(0, 0, 0, .36);
+    border-radius: 7px;
+    box-shadow: 0 12px 31px rgba(0, 0, 0, .36);
     display: grid;
-    gap: 9px;
-    padding: 12px;
+    gap: 6px;
+    padding: 8px;
     position: absolute;
     right: 0;
-    top: calc(100% + 8px);
-    width: min(360px, calc(100vw - 32px));
+    top: calc(100% + 5px);
+    width: min(240px, calc(100vw - 21px));
     z-index: 4;
   }
 
   .plugin-center__import-popover label {
     color: #cbd6d9;
-    font-size: 11px;
+    font-size: 8px;
     font-weight: 700;
   }
 
   .plugin-center__import-popover p {
     color: #77868d;
-    font-size: 9px;
+    font-size: 7px;
     line-height: 1.5;
-    margin: -4px 0 0;
+    margin: -3px 0 0;
   }
 
   .plugin-center__import-field {
     align-items: center;
     background: #151a1f;
     border: 1px solid rgba(204, 224, 228, .1);
-    border-radius: 7px;
+    border-radius: 5px;
     display: flex;
-    min-height: 36px;
+    min-height: 24px;
     overflow: hidden;
   }
 
@@ -468,21 +468,21 @@ const pluginCenterStyles = `
     color: #dce7e9;
     flex: 1;
     font-family: "DM Mono", monospace;
-    font-size: 10px;
+    font-size: 7px;
     min-width: 0;
     outline: 0;
-    padding: 0 9px;
+    padding: 0 6px;
   }
 
   .plugin-center__import-field input::placeholder { color: #607079; }
 
   .plugin-center__import-submit {
     background: #79e8d6;
-    border-radius: 5px;
+    border-radius: 4px;
     color: #0d1919;
-    height: 27px;
-    margin-right: 4px;
-    width: 29px;
+    height: 18px;
+    margin-right: 3px;
+    width: 19px;
   }
 
   .plugin-center__import-submit:disabled { cursor: not-allowed; opacity: .45; }
@@ -493,35 +493,35 @@ const pluginCenterStyles = `
 
   .plugin-center__body {
     display: grid;
-    grid-template-columns: 331px minmax(0, 1fr);
+    grid-template-columns: 221px minmax(0, 1fr);
     min-height: 0;
   }
 
   .plugin-center__sidebar {
-    background: #303030;
+    background: #303133;
     border-right: 1px solid #4a4a4a;
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    padding: 18px 12px 14px 19px;
+    padding: 12px 8px 9px 13px;
   }
 
   .plugin-center__side-heading {
     align-items: center;
     color: #e4e4e4;
     display: flex;
-    font-size: 18px;
+    font-size: 12px;
     font-weight: 540;
     justify-content: space-between;
-    letter-spacing: -.04em;
-    padding: 0 4px 12px 9px;
+    letter-spacing: 0;
+    padding: 0 3px 8px 6px;
   }
 
   .plugin-center__side-heading small {
     color: #9b9b9b;
     font-family: "DM Mono", monospace;
-    font-size: 10px;
+    font-size: 7px;
     font-weight: 500;
     letter-spacing: 0;
   }
@@ -537,22 +537,22 @@ const pluginCenterStyles = `
 
   .plugin-center__installed-empty {
     color: #74838a;
-    font-size: 10px;
+    font-size: 7px;
     line-height: 1.55;
-    margin: 2px 8px;
+    margin: 1px 5px;
   }
 
-  .plugin-center__installed-list { display: grid; gap: 4px; }
+  .plugin-center__installed-list { display: grid; gap: 3px; }
 
   .plugin-center__installed-item {
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 5px;
     color: #e1e1e1;
     cursor: pointer;
-    gap: 12px;
-    min-height: 56px;
-    padding: 5px 8px;
+    gap: 8px;
+    min-height: 38px;
+    padding: 3px 5px;
     text-align: left;
     width: 100%;
   }
@@ -573,10 +573,10 @@ const pluginCenterStyles = `
 
   .plugin-center__installed-icon {
     background: #394149;
-    border-radius: 6px;
+    border-radius: 4px;
     color: #f2f2f2;
-    height: 40px;
-    width: 40px;
+    height: 27px;
+    width: 27px;
   }
 
   .plugin-center__installed-icon--json { background: #53505d; }
@@ -592,18 +592,18 @@ const pluginCenterStyles = `
   .plugin-center__installed-icon--converter { background: #94783a; }
 
   .plugin-center__installed-copy { min-width: 0; }
-  .plugin-center__installed-copy strong { color: #eeeeee; display: block; font-size: 17px; font-weight: 510; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .plugin-center__installed-copy small { color: #aaaaaa; display: block; font-family: inherit; font-size: 10px; margin-top: 2px; }
+  .plugin-center__installed-copy strong { color: #e6e6e6; display: block; font-size: 12px; font-weight: 510; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plugin-center__installed-copy small { color: #9fa0a0; display: block; font-family: inherit; font-size: 7px; margin-top: 1px; }
 
   .plugin-center__side-footer {
     align-items: center;
-    background: #303030;
+    background: #303133;
     border-top: 1px solid #484848;
     display: flex;
     flex: 0 0 auto;
-    gap: 8px;
-    margin-top: 10px;
-    padding: 11px 6px 0 2px;
+    gap: 5px;
+    margin-top: 7px;
+    padding: 7px 4px 0 1px;
   }
 
   .plugin-center__profile-link {
@@ -612,64 +612,64 @@ const pluginCenterStyles = `
     color: #f1f1f1;
     cursor: pointer;
     flex: 1;
-    font-size: 16px;
+    font-size: 11px;
     font-weight: 520;
-    gap: 10px;
-    min-height: 47px;
+    gap: 7px;
+    min-height: 32px;
     padding: 0 2px;
     text-align: left;
   }
 
-  .plugin-center__profile-link img { border-radius: 50%; height: 42px; width: 42px; }
+  .plugin-center__profile-link img { border-radius: 50%; height: 28px; width: 28px; }
   .plugin-center__profile-link svg { color: #cfcfcf; margin-left: auto; }
   .plugin-center__profile-link:hover { color: #fff; }
 
   .plugin-center__developer-link {
     background: #424242;
     border: 1px solid #535353;
-    border-radius: 9px;
+    border-radius: 6px;
     color: #ededed;
     cursor: pointer;
-    height: 40px;
+    height: 27px;
     justify-content: center;
     padding: 0;
-    width: 42px;
+    width: 28px;
   }
 
   .plugin-center__developer-link:hover { background: #515151; }
 
   .plugin-center__main {
-    background: #303030;
+    background: #303133;
     min-height: 0;
     overflow: auto;
-    padding: 18px clamp(24px, 3vw, 31px) 34px;
-    scrollbar-color: #777 #303030;
+    padding: 12px clamp(16px, 3vw, 21px) 23px;
+    scrollbar-color: #777 #303133;
     scrollbar-width: thin;
   }
 
-  .plugin-center__installed { scrollbar-color: #626262 #303030; scrollbar-width: thin; }
+  .plugin-center__installed { scrollbar-color: #626262 #303133; scrollbar-width: thin; }
   .plugin-center__main::-webkit-scrollbar,
-  .plugin-center__installed::-webkit-scrollbar { width: 10px; }
+  .plugin-center__installed::-webkit-scrollbar { width: 7px; }
   .plugin-center__main::-webkit-scrollbar-track,
-  .plugin-center__installed::-webkit-scrollbar-track { background: #303030; }
+  .plugin-center__installed::-webkit-scrollbar-track { background: #303133; }
   .plugin-center__main::-webkit-scrollbar-thumb,
-  .plugin-center__installed::-webkit-scrollbar-thumb { background: #747474; border: 3px solid #303030; border-radius: 12px; }
+  .plugin-center__installed::-webkit-scrollbar-thumb { background: #747474; border: 2px solid #303133; border-radius: 8px; }
   .plugin-center__main::-webkit-scrollbar-thumb:hover,
   .plugin-center__installed::-webkit-scrollbar-thumb:hover { background: #929292; }
 
   .plugin-center__market-header { display: none; }
-  .plugin-center__market-header h2 { color: #f0f5f6; font-size: 20px; letter-spacing: -.055em; margin: 0; }
-  .plugin-center__market-header p { color: #7a8a91; font-size: 10px; margin: 5px 0 0; }
-  .plugin-center__market-count { color: #7fddd0; font-family: "DM Mono", monospace; font-size: 9px; white-space: nowrap; }
+  .plugin-center__market-header h2 { color: #e6e6e6; font-size: 14px; letter-spacing: 0; margin: 0; }
+  .plugin-center__market-header p { color: #7a8a91; font-size: 8px; margin: 3px 0 0; }
+  .plugin-center__market-count { color: #7fddd0; font-family: "DM Mono", monospace; font-size: 8px; white-space: nowrap; }
 
   .plugin-center__catalog-filters {
     align-items: center;
     display: flex;
-    gap: 5px;
-    margin: -3px 0 18px;
+    gap: 3px;
+    margin: -2px 0 12px;
     min-width: 0;
     overflow-x: auto;
-    padding: 3px 1px 5px;
+    padding: 2px 1px 3px;
     scrollbar-width: none;
   }
 
@@ -679,16 +679,16 @@ const pluginCenterStyles = `
     align-items: center;
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 7px;
+    border-radius: 5px;
     color: #aaa;
     cursor: pointer;
     display: inline-flex;
     flex: 0 0 auto;
     font: inherit;
-    font-size: 12px;
-    gap: 6px;
-    min-height: 31px;
-    padding: 0 10px;
+    font-size: 9px;
+    gap: 4px;
+    min-height: 21px;
+    padding: 0 7px;
     transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
   }
 
@@ -712,15 +712,15 @@ const pluginCenterStyles = `
   .plugin-center__catalog-filter.is-active small { color: #bdeee6; }
   .plugin-center__catalog-filter:focus-visible { outline: 2px solid rgba(125, 228, 211, .76); outline-offset: 1px; }
 
-  .plugin-center__feature-row { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 29px; }
+  .plugin-center__feature-row { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 19px; }
 
   .plugin-center__feature {
     border: 1px solid rgba(255, 255, 255, .18);
-    border-radius: 10px;
+    border-radius: 7px;
     color: #2d2d2d;
-    min-height: 180px;
+    min-height: 120px;
     overflow: hidden;
-    padding: 21px 25px;
+    padding: 14px 17px;
     position: relative;
   }
 
@@ -747,35 +747,35 @@ const pluginCenterStyles = `
   }
 
   .plugin-center__feature-copy { max-width: 59%; position: relative; z-index: 1; }
-  .plugin-center__feature-kicker { border: 1px solid currentColor; border-radius: 13px; color: currentColor; display: inline-flex; font-size: 10px; font-weight: 620; letter-spacing: .02em; margin: 0; padding: 2px 9px; }
-  .plugin-center__feature h3 { font-size: 40px; font-weight: 720; letter-spacing: -.065em; line-height: 1.03; margin: 12px 0 7px; }
-  .plugin-center__feature p { color: #555; font-size: 13px; line-height: 1.42; margin: 0; }
-  .plugin-center__feature.is-developer p { color: #cfe2ff; text-shadow: 0 1px 14px rgba(0, 0, 0, .4); }
+  .plugin-center__feature-kicker { border: 1px solid currentColor; border-radius: 9px; color: currentColor; display: inline-flex; font-size: 8px; font-weight: 620; letter-spacing: .02em; margin: 0; padding: 1px 6px; }
+  .plugin-center__feature h3 { font-size: 27px; font-weight: 720; letter-spacing: -.03em; line-height: 1.03; margin: 8px 0 5px; }
+  .plugin-center__feature p { color: #555; font-size: 9px; line-height: 1.42; margin: 0; }
+  .plugin-center__feature.is-developer p { color: #cfe2ff; text-shadow: 0 1px 9px rgba(0, 0, 0, .4); }
 
   .plugin-center__feature-icon {
     background: rgba(232, 253, 250, .16);
     border: 1px solid rgba(239, 255, 254, .2);
-    border-radius: 13px;
+    border-radius: 9px;
     color: #e8fff9;
-    height: 48px;
+    height: 32px;
     position: absolute;
-    right: 17px;
-    top: 57px;
+    right: 11px;
+    top: 38px;
     transform: rotate(-7deg);
-    width: 48px;
+    width: 32px;
     z-index: 1;
   }
 
   .plugin-center__feature-action {
     background: transparent;
     border: 0;
-    bottom: 18px;
+    bottom: 12px;
     color: currentColor;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 9px;
     font-weight: 720;
-    gap: 4px;
-    left: 25px;
+    gap: 3px;
+    left: 17px;
     padding: 0;
     position: absolute;
     z-index: 1;
@@ -784,16 +784,16 @@ const pluginCenterStyles = `
   .plugin-center__feature-action:hover { opacity: .65; }
   .plugin-center__feature-action:disabled { cursor: not-allowed; opacity: .56; }
 
-  .plugin-center__featured-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 13px; }
-  .plugin-center__featured-heading h3 { color: #f1f1f1; font-size: 22px; font-weight: 640; letter-spacing: -.055em; margin: 0; }
-  .plugin-center__featured-refresh { background: transparent; color: #d7d7d7; font-size: 14px; gap: 8px; padding: 4px; }
+  .plugin-center__featured-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 9px; }
+  .plugin-center__featured-heading h3 { color: #e6e6e6; font-size: 16px; font-weight: 640; letter-spacing: 0; margin: 0; }
+  .plugin-center__featured-refresh { background: transparent; color: #d7d7d7; font-size: 10px; gap: 5px; padding: 3px; }
   .plugin-center__featured-refresh:hover { color: #fff; }
 
   .plugin-center__market-grid {
-    background: #303030;
+    background: #303133;
     border: 0;
-    border-radius: 11px;
-    column-gap: 34px;
+    border-radius: 8px;
+    column-gap: 23px;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     overflow: hidden;
@@ -804,29 +804,29 @@ const pluginCenterStyles = `
     background: #242424;
     border-bottom: 1px solid #3b3b3b;
     display: grid;
-    gap: 14px;
-    grid-template-columns: 64px minmax(0, 1fr) auto;
-    min-height: 104px;
-    padding: 14px 17px;
+    gap: 9px;
+    grid-template-columns: 43px minmax(0, 1fr) auto;
+    min-height: 70px;
+    padding: 9px 11px;
   }
 
   .plugin-center__market-item:nth-child(odd) { border-right: 0; }
   .plugin-center__market-item:nth-last-child(-n + 2) { border-bottom: 0; }
-  .plugin-center__market-item:nth-child(1) { border-radius: 11px 0 0 0; }
-  .plugin-center__market-item:nth-child(2) { border-radius: 0 11px 0 0; }
-  .plugin-center__market-item:nth-last-child(2) { border-radius: 0 0 0 11px; }
-  .plugin-center__market-item:last-child { border-radius: 0 0 11px 0; }
+  .plugin-center__market-item:nth-child(1) { border-radius: 8px 0 0 0; }
+  .plugin-center__market-item:nth-child(2) { border-radius: 0 8px 0 0; }
+  .plugin-center__market-item:nth-last-child(2) { border-radius: 0 0 0 8px; }
+  .plugin-center__market-item:last-child { border-radius: 0 0 8px 0; }
   .plugin-center__market-item.is-disabled .plugin-center__market-icon { filter: saturate(.38); opacity: .68; }
   .plugin-center__market-item.is-disabled .plugin-center__market-copy small { color: #bba77c; }
   .plugin-center__market-item.is-platform-unsupported .plugin-center__market-icon { filter: saturate(.52); opacity: .76; }
   .plugin-center__market-item.is-platform-unsupported .plugin-center__market-copy small { color: #d0ae79; }
 
-  .plugin-center__leaderboard { margin-top: 27px; }
-  .plugin-center__leaderboard h3 { color: #f1f1f1; font-size: 22px; font-weight: 640; letter-spacing: -.055em; margin: 0 0 13px; }
-  .plugin-center__leaderboard-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .plugin-center__leaderboard-card { align-items: center; background: #242424; border: 0; border-radius: 10px; color: #f0f0f0; cursor: pointer; display: flex; font: inherit; font-size: 17px; font-weight: 570; gap: 16px; min-height: 72px; padding: 0 24px; text-align: left; }
-  .plugin-center__leaderboard-card:hover { background: #303030; }
-  .plugin-center__leaderboard-icon { align-items: center; border-radius: 50%; color: #363636; display: inline-flex; height: 42px; justify-content: center; width: 42px; }
+  .plugin-center__leaderboard { margin-top: 18px; }
+  .plugin-center__leaderboard h3 { color: #e6e6e6; font-size: 16px; font-weight: 640; letter-spacing: 0; margin: 0 0 9px; }
+  .plugin-center__leaderboard-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plugin-center__leaderboard-card { align-items: center; background: #242424; border: 0; border-radius: 7px; color: #e6e6e6; cursor: pointer; display: flex; font: inherit; font-size: 12px; font-weight: 570; gap: 11px; min-height: 48px; padding: 0 16px; text-align: left; }
+  .plugin-center__leaderboard-card:hover { background: #303133; }
+  .plugin-center__leaderboard-icon { align-items: center; border-radius: 50%; color: #363636; display: inline-flex; height: 28px; justify-content: center; width: 28px; }
   .plugin-center__leaderboard-icon.is-warm { background: #f5ddc3; }
   .plugin-center__leaderboard-icon.is-yellow { background: #fff1ba; }
   .plugin-center__leaderboard-icon.is-blue { background: #c5e9fb; }
@@ -834,10 +834,10 @@ const pluginCenterStyles = `
 
   .plugin-center__market-icon {
     background: #4b555c;
-    border-radius: 9px;
+    border-radius: 6px;
     color: #f3f3f3;
-    height: 64px;
-    width: 64px;
+    height: 43px;
+    width: 43px;
   }
 
   .plugin-center__market-icon--json { background: #514f59; }
@@ -856,22 +856,22 @@ const pluginCenterStyles = `
   .plugin-center__market-icon--window { background: #526371; }
 
   .plugin-center__market-copy { min-width: 0; }
-  .plugin-center__market-copy strong { color: #f0f0f0; display: block; font-size: 17px; font-weight: 620; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .plugin-center__market-copy p { color: #b1b1b1; display: -webkit-box; font-size: 13px; line-height: 1.4; margin: 5px 0 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
-  .plugin-center__market-copy small { color: #86c8b9; display: block; font-family: inherit; font-size: 10px; margin-top: 5px; }
+  .plugin-center__market-copy strong { color: #e6e6e6; display: block; font-size: 12px; font-weight: 620; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plugin-center__market-copy p { color: #b1b1b1; display: -webkit-box; font-size: 9px; line-height: 1.4; margin: 3px 0 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
+  .plugin-center__market-copy small { color: #86c8b9; display: block; font-family: inherit; font-size: 8px; margin-top: 3px; }
 
   .plugin-center__market-action {
     background: transparent;
     border: 0;
-    border-radius: 6px;
+    border-radius: 4px;
     color: #8dcaff;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 9px;
     font-weight: 700;
-    gap: 3px;
+    gap: 2px;
     justify-content: center;
-    min-height: 32px;
-    padding: 0 7px;
+    min-height: 22px;
+    padding: 0 5px;
     white-space: nowrap;
   }
 
@@ -893,17 +893,17 @@ const pluginCenterStyles = `
     align-items: center;
     background: rgba(169, 188, 195, .06);
     border: 1px solid rgba(169, 188, 195, .13);
-    border-radius: 6px;
+    border-radius: 4px;
     color: #b4c5c9;
     cursor: pointer;
     display: inline-flex;
     font: inherit;
-    font-size: 9px;
+    font-size: 8px;
     font-weight: 760;
-    gap: 4px;
+    gap: 3px;
     justify-content: center;
-    min-height: 29px;
-    padding: 0 7px;
+    min-height: 20px;
+    padding: 0 5px;
     white-space: nowrap;
   }
 
@@ -928,16 +928,16 @@ const pluginCenterStyles = `
     align-items: center;
     background: rgba(111, 232, 211, .075);
     border: 1px solid rgba(111, 232, 211, .15);
-    border-radius: 6px;
+    border-radius: 4px;
     color: #9aeade;
     cursor: pointer;
     display: inline-flex;
-    font-size: 9px;
+    font-size: 8px;
     font-weight: 800;
-    gap: 4px;
+    gap: 3px;
     justify-content: center;
-    min-height: 29px;
-    padding: 0 7px;
+    min-height: 20px;
+    padding: 0 5px;
     white-space: nowrap;
   }
 
@@ -963,53 +963,53 @@ const pluginCenterStyles = `
 
   .plugin-center__empty {
     border: 1px dashed rgba(211, 229, 234, .14);
-    border-radius: 11px;
+    border-radius: 8px;
     color: #839198;
-    font-size: 11px;
+    font-size: 8px;
     line-height: 1.6;
-    padding: 42px 24px;
+    padding: 28px 16px;
     text-align: center;
   }
 
-  .plugin-center__empty strong { color: #d8e3e5; display: block; font-size: 13px; margin-bottom: 5px; }
+  .plugin-center__empty strong { color: #d8e3e5; display: block; font-size: 9px; margin-bottom: 3px; }
 
   /* Explicit launcher-context mode: one calm decision surface, not a catalog
      disguised as a permission picker. */
   .plugin-center__sidebar.is-context { justify-content: space-between; }
-  .plugin-center__context-sidebar-copy { display: grid; gap: 13px; padding: 6px 10px; }
-  .plugin-center__context-kicker { color: #76d8c9; font-family: "DM Mono", monospace; font-size: 9px; letter-spacing: .1em; margin: 0; text-transform: uppercase; }
-  .plugin-center__context-sidebar-copy h3 { color: #f0f3f3; font-size: 19px; font-weight: 580; letter-spacing: -.045em; line-height: 1.1; margin: 0; }
-  .plugin-center__context-sidebar-copy p:not(.plugin-center__context-kicker) { color: #a3b0b3; font-size: 11px; line-height: 1.6; margin: 0; }
-  .plugin-center__context-sidebar-note { border-top: 1px solid rgba(183, 224, 219, .12); color: #77868a; font-size: 10px; line-height: 1.55; margin: 15px 10px 0; padding-top: 14px; }
+  .plugin-center__context-sidebar-copy { display: grid; gap: 9px; padding: 4px 7px; }
+  .plugin-center__context-kicker { color: #76d8c9; font-family: "DM Mono", monospace; font-size: 8px; letter-spacing: .1em; margin: 0; text-transform: uppercase; }
+  .plugin-center__context-sidebar-copy h3 { color: #e6e6e6; font-size: 13px; font-weight: 580; letter-spacing: 0; line-height: 1.1; margin: 0; }
+  .plugin-center__context-sidebar-copy p:not(.plugin-center__context-kicker) { color: #a3b0b3; font-size: 8px; line-height: 1.6; margin: 0; }
+  .plugin-center__context-sidebar-note { border-top: 1px solid rgba(183, 224, 219, .12); color: #77868a; font-size: 8px; line-height: 1.55; margin: 10px 7px 0; padding-top: 9px; }
   .plugin-center__context-cancel {
-    background: transparent; border: 1px solid rgba(211, 229, 234, .16); border-radius: 8px; color: #d8e3e5; cursor: pointer;
-    font: inherit; font-size: 11px; margin: 0 10px 5px; min-height: 38px; padding: 0 12px; text-align: left;
+    background: transparent; border: 1px solid rgba(211, 229, 234, .16); border-radius: 5px; color: #d8e3e5; cursor: pointer;
+    font: inherit; font-size: 8px; margin: 0 7px 3px; min-height: 26px; padding: 0 8px; text-align: left;
   }
   .plugin-center__context-cancel:hover { background: rgba(255, 255, 255, .06); color: #fff; }
-  .plugin-center__context-main { max-width: 770px; padding-top: 34px; }
-  .plugin-center__context-heading { border-bottom: 1px solid rgba(211, 229, 234, .1); margin-bottom: 23px; padding: 0 0 19px; }
-  .plugin-center__context-heading-top { align-items: flex-start; display: flex; gap: 13px; }
-  .plugin-center__context-shield { align-items: center; background: rgba(111, 232, 211, .12); border: 1px solid rgba(111, 232, 211, .25); border-radius: 10px; color: #95f0e1; display: inline-flex; height: 39px; justify-content: center; width: 39px; }
-  .plugin-center__context-heading h2 { color: #f1f5f4; font-size: 23px; font-weight: 590; letter-spacing: -.055em; line-height: 1.05; margin: 2px 0 0; }
-  .plugin-center__context-heading p { color: #a9b7b9; font-size: 12px; line-height: 1.55; margin: 7px 0 0; }
-  .plugin-center__context-scope { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; margin: 15px 0 0 52px; }
-  .plugin-center__context-scope span { background: rgba(111, 232, 211, .09); border: 1px solid rgba(111, 232, 211, .18); border-radius: 999px; color: #a8eee2; font-family: "DM Mono", monospace; font-size: 9px; padding: 5px 8px; }
-  .plugin-center__context-scope small { color: #758489; font-size: 10px; }
-  .plugin-center__context-list { display: grid; gap: 9px; }
+  .plugin-center__context-main { max-width: 513px; padding-top: 23px; }
+  .plugin-center__context-heading { border-bottom: 1px solid rgba(211, 229, 234, .1); margin-bottom: 15px; padding: 0 0 13px; }
+  .plugin-center__context-heading-top { align-items: flex-start; display: flex; gap: 9px; }
+  .plugin-center__context-shield { align-items: center; background: rgba(111, 232, 211, .12); border: 1px solid rgba(111, 232, 211, .25); border-radius: 7px; color: #95f0e1; display: inline-flex; height: 26px; justify-content: center; width: 26px; }
+  .plugin-center__context-heading h2 { color: #e6e6e6; font-size: 16px; font-weight: 590; letter-spacing: 0; line-height: 1.05; margin: 1px 0 0; }
+  .plugin-center__context-heading p { color: #a9b7b9; font-size: 9px; line-height: 1.55; margin: 5px 0 0; }
+  .plugin-center__context-scope { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0 35px; }
+  .plugin-center__context-scope span { background: rgba(111, 232, 211, .09); border: 1px solid rgba(111, 232, 211, .18); border-radius: 999px; color: #a8eee2; font-family: "DM Mono", monospace; font-size: 8px; padding: 3px 5px; }
+  .plugin-center__context-scope small { color: #758489; font-size: 8px; }
+  .plugin-center__context-list { display: grid; gap: 6px; }
   .plugin-center__context-command {
-    align-items: center; background: rgba(255, 255, 255, .025); border: 1px solid rgba(211, 229, 234, .12); border-radius: 10px;
-    display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto; min-height: 78px; padding: 13px 14px 13px 15px;
+    align-items: center; background: rgba(255, 255, 255, .025); border: 1px solid rgba(211, 229, 234, .12); border-radius: 7px;
+    display: grid; gap: 9px; grid-template-columns: minmax(0, 1fr) auto; min-height: 52px; padding: 9px 9px 9px 10px;
   }
   .plugin-center__context-command:hover { background: rgba(111, 232, 211, .05); border-color: rgba(111, 232, 211, .28); }
   .plugin-center__context-command-copy { min-width: 0; }
-  .plugin-center__context-command-copy strong { color: #edf4f3; display: block; font-size: 13px; font-weight: 650; letter-spacing: -.015em; }
-  .plugin-center__context-command-copy strong span { color: #8ce0d3; font-family: "DM Mono", monospace; font-size: 9px; font-weight: 500; margin-left: 7px; }
-  .plugin-center__context-command-copy p { color: #9ba9ac; font-size: 11px; line-height: 1.45; margin: 5px 0 0; }
-  .plugin-center__context-command-copy small { color: #728287; display: block; font-family: "DM Mono", monospace; font-size: 9px; margin-top: 5px; }
+  .plugin-center__context-command-copy strong { color: #e6e6e6; display: block; font-size: 9px; font-weight: 650; letter-spacing: 0; }
+  .plugin-center__context-command-copy strong span { color: #8ce0d3; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 500; margin-left: 5px; }
+  .plugin-center__context-command-copy p { color: #9ba9ac; font-size: 8px; line-height: 1.45; margin: 3px 0 0; }
+  .plugin-center__context-command-copy small { color: #728287; display: block; font-family: "DM Mono", monospace; font-size: 8px; margin-top: 3px; }
   .plugin-center__context-command-select,
   .plugin-center__context-confirm-approve,
   .plugin-center__context-confirm-cancel {
-    border-radius: 7px; cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; min-height: 34px; padding: 0 11px;
+    border-radius: 5px; cursor: pointer; font: inherit; font-size: 8px; font-weight: 700; min-height: 23px; padding: 0 7px;
   }
   .plugin-center__context-command-select,
   .plugin-center__context-confirm-approve { background: #83e8d9; border: 1px solid #9af2e5; color: #102222; }
@@ -1019,38 +1019,38 @@ const pluginCenterStyles = `
   .plugin-center__context-confirm-approve:focus-visible,
   .plugin-center__context-confirm-cancel:focus-visible,
   .plugin-center__context-cancel:focus-visible { outline: 2px solid #a8f1e5; outline-offset: 2px; }
-  .plugin-center__context-empty { border: 1px dashed rgba(211, 229, 234, .18); border-radius: 10px; color: #9aa8ac; font-size: 12px; line-height: 1.65; padding: 30px 20px; }
-  .plugin-center__context-empty strong { color: #e3ecec; display: block; font-size: 13px; margin-bottom: 5px; }
-  .plugin-center__context-confirm { align-items: center; background: rgba(11, 15, 17, .72); display: flex; inset: 0; justify-content: center; padding: 22px; position: absolute; z-index: 7; }
-  .plugin-center__context-confirm-card { background: #22292b; border: 1px solid rgba(154, 242, 229, .26); border-radius: 13px; box-shadow: 0 25px 70px rgba(0, 0, 0, .5); max-width: 470px; padding: 23px; width: min(100%, 470px); }
+  .plugin-center__context-empty { border: 1px dashed rgba(211, 229, 234, .18); border-radius: 7px; color: #9aa8ac; font-size: 9px; line-height: 1.65; padding: 20px 13px; }
+  .plugin-center__context-empty strong { color: #e3ecec; display: block; font-size: 9px; margin-bottom: 3px; }
+  .plugin-center__context-confirm { align-items: center; background: rgba(11, 15, 17, .72); display: flex; inset: 0; justify-content: center; padding: 15px; position: absolute; z-index: 7; }
+  .plugin-center__context-confirm-card { background: #22292b; border: 1px solid rgba(154, 242, 229, .26); border-radius: 9px; box-shadow: 0 17px 47px rgba(0, 0, 0, .5); max-width: 313px; padding: 15px; width: min(100%, 313px); }
   .plugin-center__context-confirm-eyebrow { color: #88dfd2; font-family: "DM Mono", monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
-  .plugin-center__context-confirm-card h2 { color: #f3f6f5; font-size: 20px; letter-spacing: -.045em; line-height: 1.13; margin: 8px 0 0; }
-  .plugin-center__context-confirm-card > p { color: #adbbbd; font-size: 12px; line-height: 1.55; margin: 8px 0 0; }
-  .plugin-center__context-confirm-scope { background: rgba(111, 232, 211, .07); border: 1px solid rgba(111, 232, 211, .16); border-radius: 9px; margin-top: 16px; padding: 11px 12px; }
-  .plugin-center__context-confirm-scope strong { color: #e1f0ed; display: block; font-size: 11px; }
-  .plugin-center__context-confirm-scope p { color: #95a8a9; font-size: 10px; line-height: 1.55; margin: 5px 0 0; }
-  .plugin-center__context-confirm-warning { color: #7f9295; font-size: 10px; line-height: 1.55; margin: 13px 0 0; }
-  .plugin-center__context-confirm-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 19px; }
+  .plugin-center__context-confirm-card h2 { color: #e6e6e6; font-size: 14px; letter-spacing: 0; line-height: 1.13; margin: 5px 0 0; }
+  .plugin-center__context-confirm-card > p { color: #adbbbd; font-size: 9px; line-height: 1.55; margin: 5px 0 0; }
+  .plugin-center__context-confirm-scope { background: rgba(111, 232, 211, .07); border: 1px solid rgba(111, 232, 211, .16); border-radius: 6px; margin-top: 11px; padding: 7px 8px; }
+  .plugin-center__context-confirm-scope strong { color: #e1f0ed; display: block; font-size: 8px; }
+  .plugin-center__context-confirm-scope p { color: #95a8a9; font-size: 8px; line-height: 1.55; margin: 3px 0 0; }
+  .plugin-center__context-confirm-warning { color: #7f9295; font-size: 8px; line-height: 1.55; margin: 9px 0 0; }
+  .plugin-center__context-confirm-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 13px; }
   .plugin-center__context-confirm-cancel { background: transparent; border: 1px solid rgba(211, 229, 234, .16); color: #d6e0e1; }
   .plugin-center__context-confirm-cancel:hover { background: rgba(255, 255, 255, .07); }
   .plugin-center__context-confirm-approve:disabled,
   .plugin-center__context-confirm-cancel:disabled { cursor: progress; opacity: .68; }
 
   @media (max-width: 760px) {
-    .plugin-center { border-radius: 10px; bottom: 8px; left: 8px; max-height: calc(100dvh - 16px); right: 8px; top: 8px; }
-    .plugin-center__topbar { gap: 8px; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 57px; padding: 0 9px; }
+    .plugin-center { border-radius: 7px; bottom: 5px; left: 5px; max-height: calc(100dvh - 10px); right: 5px; top: 5px; }
+    .plugin-center__topbar { gap: 5px; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 38px; padding: 0 6px; }
     .plugin-center__crumbs > span:not(.plugin-center__crumb-mark) { display: none; }
-    .plugin-center__action-menu-trigger { min-width: 32px; padding: 0; }
+    .plugin-center__action-menu-trigger { min-width: 22px; padding: 0; }
     .plugin-center__body { grid-template-columns: 1fr; }
     .plugin-center__sidebar:not(.is-context) { display: none; }
     .plugin-center__installed, .plugin-center__side-footer { display: none; }
-    .plugin-center__main { padding: 17px 13px 24px; }
-    .plugin-center__catalog-filters { margin-bottom: 13px; }
-    .plugin-center__sidebar.is-context { display: flex; min-height: 155px; overflow: hidden; padding: 12px 8px; }
-    .plugin-center__sidebar.is-context .plugin-center__context-sidebar-copy { gap: 7px; padding: 2px 8px; }
+    .plugin-center__main { padding: 11px 9px 16px; }
+    .plugin-center__catalog-filters { margin-bottom: 9px; }
+    .plugin-center__sidebar.is-context { display: flex; min-height: 103px; overflow: hidden; padding: 8px 5px; }
+    .plugin-center__sidebar.is-context .plugin-center__context-sidebar-copy { gap: 5px; padding: 1px 5px; }
     .plugin-center__sidebar.is-context .plugin-center__context-sidebar-note { display: none; }
-    .plugin-center__sidebar.is-context .plugin-center__context-cancel { align-self: flex-end; margin: 7px 8px 0; }
-    .plugin-center__context-main { padding-top: 20px; }
+    .plugin-center__sidebar.is-context .plugin-center__context-cancel { align-self: flex-end; margin: 5px 5px 0; }
+    .plugin-center__context-main { padding-top: 13px; }
     .plugin-center__context-command { align-items: stretch; grid-template-columns: 1fr; }
     .plugin-center__context-command-select { width: 100%; }
     .plugin-center__context-scope { margin-left: 0; }
@@ -2287,16 +2287,16 @@ export function PluginCenter({
                   title="长按后拖动窗口"
                 />
                 <div className="plugin-center__crumbs">
-                <span className="plugin-center__crumb-mark"><Puzzle size={16} /></span>
+                <span className="plugin-center__crumb-mark"><Puzzle size={11} /></span>
                 <span className="plugin-center__crumb-title">管理中心</span>
                 <span className="plugin-center__crumb-separator">/</span>
                 <span className="plugin-center__crumb-title plugin-center__crumb-current">{launcherContext ? "插件上下文" : "插件应用市场"}</span>
                 <button aria-label="关闭插件中心" className="plugin-center__crumb-close" onClick={onClose} type="button">
-                  <X size={16} />
+                  <X size={11} />
                 </button>
               </div>
               <label className="plugin-center__search">
-                <Search aria-hidden="true" size={15} />
+                <Search aria-hidden="true" size={10} />
                 <input
                   aria-label={launcherContext ? "筛选可接收上下文的插件命令" : "搜索插件中心"}
                   autoFocus
@@ -2321,7 +2321,7 @@ export function PluginCenter({
                     title="插件中心操作"
                     type="button"
                   >
-                    <EllipsisVertical aria-hidden="true" size={20} />
+                    <EllipsisVertical aria-hidden="true" size={13} />
                   </button>
                   <AnimatePresence initial={false}>
                     {isActionMenuOpen ? (
@@ -2358,7 +2358,7 @@ export function PluginCenter({
                           role="menuitem"
                           type="button"
                         >
-                          <Download aria-hidden="true" size={16} />
+                          <Download aria-hidden="true" size={11} />
                           <span>从 GitHub 导入插件</span>
                         </button>
                         <div className="plugin-center__action-menu-separator" role="separator" />
@@ -2368,7 +2368,7 @@ export function PluginCenter({
                           role="menuitem"
                           type="button"
                         >
-                          <Code2 aria-hidden="true" size={16} />
+                          <Code2 aria-hidden="true" size={11} />
                           <span>创建插件项目</span>
                         </button>
                         <button
@@ -2377,7 +2377,7 @@ export function PluginCenter({
                           role="menuitem"
                           type="button"
                         >
-                          <Settings2 aria-hidden="true" size={16} />
+                          <Settings2 aria-hidden="true" size={11} />
                           <span>偏好设置</span>
                         </button>
                       </motion.div>
@@ -2417,7 +2417,7 @@ export function PluginCenter({
                             disabled={installingSource !== null || !importSourceAnalysis.isPlausible}
                             type="submit"
                           >
-                            {installingSource ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}
+                            {installingSource ? <LoaderCircle className="spin" size={9} /> : <Download size={9} />}
                           </button>
                         </div>
                         <p
@@ -2438,7 +2438,7 @@ export function PluginCenter({
                   title="个人中心"
                   type="button"
                 >
-                  <Puzzle size={26} />
+                  <Puzzle size={17} />
                 </button>
               </div>
             </header>
@@ -2483,7 +2483,7 @@ export function PluginCenter({
                           }}
                           type="button"
                         >
-                          <span className={`plugin-center__installed-icon plugin-center__installed-icon--${item.entry.icon}`}><Icon size={15} /></span>
+                          <span className={`plugin-center__installed-icon plugin-center__installed-icon--${item.entry.icon}`}><Icon size={10} /></span>
                           <span className="plugin-center__installed-copy">
                             <strong>{item.installed?.name ?? item.entry.name}</strong>
                             <small title={[item.installed ? lifecycleTitle(item.installed) : undefined, sourceLockTitle(item.installed)].filter(Boolean).join("\n\n") || undefined}>
@@ -2516,7 +2516,7 @@ export function PluginCenter({
                   >
                     <img alt="" src="/ihub-avatar.svg" />
                     <span>个人中心</span>
-                    <ChevronRight size={15} />
+                    <ChevronRight size={10} />
                   </button>
                   <button
                     aria-label="创建插件项目"
@@ -2525,7 +2525,7 @@ export function PluginCenter({
                     title="创建插件项目"
                     type="button"
                   >
-                    <Code2 size={16} />
+                    <Code2 size={11} />
                   </button>
                   {onOpenSettings ? (
                     <button
@@ -2535,7 +2535,7 @@ export function PluginCenter({
                       title="偏好设置"
                       type="button"
                     >
-                      <Settings2 size={16} />
+                      <Settings2 size={11} />
                     </button>
                   ) : null}
                 </div>
@@ -2548,7 +2548,7 @@ export function PluginCenter({
                   <section aria-label="选择可接收本次上下文的插件命令" className="plugin-center__context-panel">
                     <header className="plugin-center__context-heading">
                       <div className="plugin-center__context-heading-top">
-                        <span className="plugin-center__context-shield"><ShieldCheck aria-hidden="true" size={20} /></span>
+                        <span className="plugin-center__context-shield"><ShieldCheck aria-hidden="true" size={13} /></span>
                         <div>
                           <p className="plugin-center__context-kicker">USER-CONFIRMED PLUGIN ACTION</p>
                           <h2>选择处理“{launcherContext.suggestedUse}”的插件命令</h2>
@@ -2688,7 +2688,7 @@ export function PluginCenter({
                                     : workspaceAvailable
                                       ? "链接源码"
                                       : presentation.action}
-                              {!platformNotice ? <ChevronRight size={13} /> : null}
+                              {!platformNotice ? <ChevronRight size={9} /> : null}
                             </button>
                           </article>
                         );
@@ -2697,7 +2697,7 @@ export function PluginCenter({
                     <div className="plugin-center__featured-heading">
                       <h3>精选</h3>
                       <button className="plugin-center__featured-refresh" onClick={() => setFeatureOffset((value) => value + 1)} type="button">
-                        <Sparkles size={13} /> 换一批
+                        <Sparkles size={9} /> 换一批
                       </button>
                     </div>
                   </section>
@@ -2795,7 +2795,7 @@ export function PluginCenter({
                       }
                       return (
                         <article className={"plugin-center__market-item" + (plugin?.enabled === false ? " is-disabled" : "") + (platformNotice ? " is-platform-unsupported" : "")} key={item.entry.id}>
-                          <span className={`plugin-center__market-icon plugin-center__market-icon--${item.entry.icon}`}><Icon size={18} /></span>
+                          <span className={`plugin-center__market-icon plugin-center__market-icon--${item.entry.icon}`}><Icon size={12} /></span>
                           <div className="plugin-center__market-copy">
                             <strong>{item.entry.name}</strong>
                             <p>{item.entry.description}</p>
@@ -2821,11 +2821,11 @@ export function PluginCenter({
                                 type="button"
                               >
                                 {isCheckingUpdate || isApplyingUpdate ? (
-                                  <LoaderCircle className="spin" size={13} />
+                                  <LoaderCircle className="spin" size={9} />
                                 ) : update?.status === "available" ? (
-                                  <Download size={13} />
+                                  <Download size={9} />
                                 ) : (
-                                  <RefreshCw size={13} />
+                                  <RefreshCw size={9} />
                                 )}
                                 {updateActionLabel(update, isCheckingUpdate, isApplyingUpdate)}
                               </button>
@@ -2839,7 +2839,7 @@ export function PluginCenter({
                                 title="保留当前受管 Git 快照作为回退，并优先读取这个可信 iHub checkout 中的构建产物。"
                                 type="button"
                               >
-                                {isLinkingWorkspace ? <LoaderCircle className="spin" size={13} /> : <FolderSearch size={13} />}
+                                {isLinkingWorkspace ? <LoaderCircle className="spin" size={9} /> : <FolderSearch size={9} />}
                                 {isLinkingWorkspace ? "链接中" : "切到源码"}
                               </button>
                             ) : null}
@@ -2857,9 +2857,9 @@ export function PluginCenter({
                                 type="button"
                               >
                                 {isLifecycleBusy && (lifecycleAction?.kind === "enable" || lifecycleAction?.kind === "disable") ? (
-                                  <LoaderCircle className="spin" size={13} />
+                                  <LoaderCircle className="spin" size={9} />
                                 ) : (
-                                  <Power size={13} />
+                                  <Power size={9} />
                                 )}
                                 {plugin.enabled === false ? "启用" : "停用"}
                               </button>
@@ -2873,7 +2873,7 @@ export function PluginCenter({
                                 title="仅移除 iHub 的本地链接记录；不会删除开发项目目录。"
                                 type="button"
                               >
-                                {isLifecycleBusy && lifecycleAction?.kind === "unlink" ? <LoaderCircle className="spin" size={13} /> : <X size={13} />}
+                                {isLifecycleBusy && lifecycleAction?.kind === "unlink" ? <LoaderCircle className="spin" size={9} /> : <X size={9} />}
                                 解除链接
                               </button>
                             ) : plugin && isGitPlugin ? (
@@ -2885,7 +2885,7 @@ export function PluginCenter({
                                 title="只删除 iHub 受管的 Git 快照；本地开发目录不会成为删除目标。"
                                 type="button"
                               >
-                                {isLifecycleBusy && lifecycleAction?.kind === "uninstall" ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}
+                                {isLifecycleBusy && lifecycleAction?.kind === "uninstall" ? <LoaderCircle className="spin" size={9} /> : <Trash2 size={9} />}
                                 卸载
                               </button>
                             ) : null}
@@ -2897,15 +2897,15 @@ export function PluginCenter({
                               type="button"
                             >
                               {isInstalling || isLinkingWorkspace || workspaceChecking
-                                ? <LoaderCircle className="spin" size={13} />
+                                ? <LoaderCircle className="spin" size={9} />
                                 : installed
                                   ? plugin?.localLinkStatus === "stale" && !plugin.usesManagedSnapshotFallback
-                                    ? <X size={13} />
-                                    : <Check size={13} />
+                                    ? <X size={9} />
+                                    : <Check size={9} />
                                   : workspaceAvailable
-                                    ? <FolderSearch size={13} />
+                                    ? <FolderSearch size={9} />
                                     : item.entry.distribution === "installable" && !platformNotice
-                                      ? <Download size={13} />
+                                      ? <Download size={9} />
                                       : null}
                               {actionLabel}
                             </button>
@@ -2933,7 +2933,7 @@ export function PluginCenter({
                             onClick={() => { setFilter(section.category); setQuery(""); setSelectedInstalledId(null); }}
                             type="button"
                           >
-                            <span className={`plugin-center__leaderboard-icon is-${section.tone}`}><Icon size={21} /></span>
+                            <span className={`plugin-center__leaderboard-icon is-${section.tone}`}><Icon size={14} /></span>
                             {section.label}
                           </button>
                         );
@@ -2987,7 +2987,7 @@ export function PluginCenter({
                         onClick={() => void confirmLauncherContextTarget()}
                         type="button"
                       >
-                        {requestingLauncherContext ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
+                        {requestingLauncherContext ? <LoaderCircle className="spin" size={9} /> : <Check size={9} />}
                         {requestingLauncherContext ? "正在准备…" : "确认并运行"}
                       </button>
                     </div>

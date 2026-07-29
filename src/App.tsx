@@ -17,6 +17,7 @@ import {
   History,
   Keyboard,
   LoaderCircle,
+  LogOut,
   Power,
   Puzzle,
   RefreshCw,
@@ -65,7 +66,16 @@ import {
   normalizeLauncherHotkey,
   type LauncherHotkeyRejectionReason,
 } from "./lib/launcher-hotkey";
-import { describeLauncherHotkey } from "./lib/launcher-hotkey-status";
+import {
+  describeLauncherHotkey,
+  launcherHotkeyResetAction,
+} from "./lib/launcher-hotkey-status";
+import {
+  safeNativeIconSrc,
+  sanitizeSystemIconMap,
+  systemIconRequestChunks,
+  type SystemIconMap,
+} from "./lib/native-icons";
 import { launcherCalculationResults } from "./lib/launcher-calculation";
 import { mergeLauncherSearchResults } from "./lib/launcher-ranking";
 import { launcherSystemCommandResults } from "./lib/launcher-system-commands";
@@ -287,6 +297,22 @@ function persistLauncherValue(key: string, value: unknown) {
   }
 }
 
+async function requestSystemIconMap(
+  searchResultIds: readonly string[],
+  launcherShortcutIds: readonly string[],
+): Promise<SystemIconMap> {
+  const allowedIds = new Set([...searchResultIds, ...launcherShortcutIds]);
+  const merged: SystemIconMap = {};
+  for (const request of systemIconRequestChunks(searchResultIds, launcherShortcutIds)) {
+    const response = await command<unknown>("get_system_icons", {
+      searchResultIds: request.searchResultIds,
+      launcherShortcutIds: request.launcherShortcutIds,
+    });
+    Object.assign(merged, sanitizeSystemIconMap(response, allowedIds));
+  }
+  return merged;
+}
+
 function filterPreviewResults(query: string) {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) {
@@ -302,7 +328,10 @@ function filterPreviewResults(query: string) {
   );
 }
 
-function spotlightItemForSearchResult(result: SearchResult): SpotlightLauncherItem {
+function spotlightItemForSearchResult(
+  result: SearchResult,
+  nativeIconSrc?: string,
+): SpotlightLauncherItem {
   const isCalculatorResult = typeof result.calculatorExpression === "string";
   const isTimeResult = result.commandId === "ihub.tool.time";
   const isSettingsResult = result.commandId === "ihub.open-settings";
@@ -358,6 +387,7 @@ function spotlightItemForSearchResult(result: SearchResult): SpotlightLauncherIt
     detail: result.metadata ?? result.path ?? undefined,
     badge,
     icon,
+    iconSrc: safeNativeIconSrc(nativeIconSrc),
     tone,
     canPinFromSearch: result.pinEligible === true,
     pinnedShortcutId: result.pinnedShortcutId,
@@ -404,7 +434,10 @@ function shortcutIdFromLauncherItemId(itemId: string): string | null {
     : null;
 }
 
-function spotlightItemForLauncherShortcut(shortcut: LauncherShortcutView): SpotlightLauncherItem {
+function spotlightItemForLauncherShortcut(
+  shortcut: LauncherShortcutView,
+  nativeIconSrc?: string,
+): SpotlightLauncherItem {
   const unavailable = shortcut.status !== "ready";
   const item = spotlightItemForSearchResult({
     id: launcherShortcutItemId(shortcut.id),
@@ -414,7 +447,7 @@ function spotlightItemForLauncherShortcut(shortcut: LauncherShortcutView): Spotl
     metadata: !unavailable
       ? shortcut.metadata
       : [shortcut.metadata, "目标当前不可用"].filter(Boolean).join(" · "),
-  });
+  }, nativeIconSrc);
   return {
     ...item,
     badge: unavailable ? "不可用" : item.badge,
@@ -875,6 +908,7 @@ export function App() {
   );
   const approvedNativePlugins = useRef(new Set<string>());
   const searchRequestRef = useRef(0);
+  const homeIconRequestRef = useRef(0);
   const toolboxContextRequestRef = useRef(0);
   const launcherContextDispatchKeyRef = useRef<string | null>(null);
   const launcherContextGenerationRef = useRef(0);
@@ -892,6 +926,7 @@ export function App() {
   const [pastedFileResults, setPastedFileResults] = useState<SearchResult[]>([]);
   const [pastedImage, setPastedImage] = useState<LauncherPastedImage | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>(mockResults);
+  const [searchIconSrcById, setSearchIconSrcById] = useState<SystemIconMap>({});
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
@@ -923,6 +958,7 @@ export function App() {
   const [launcherShortcuts, setLauncherShortcuts] = useState<LauncherShortcutView[]>([]);
   const [recentItemIds, setRecentItemIds] = useState<string[]>(() => readStoredStringArray(launcherRecentStorageKey));
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
+  const [homeIconSrcById, setHomeIconSrcById] = useState<SystemIconMap>({});
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
   const [spaceActivates, setSpaceActivates] = useState(() => readStoredBoolean(launcherSpaceActivatesStorageKey, true));
   const [autoInstallSignedUpdates, setAutoInstallSignedUpdates] = useState(() =>
@@ -1087,14 +1123,14 @@ export function App() {
       return;
     }
     const window = getCurrentWindow();
-    const height = surface === "plugin-center" ? 903 : 756;
+    const height = surface === "plugin-center" ? 602 : 504;
     // Reopening is centered by the native resident shell. While the surface
     // remains visible, resizing a secondary panel must preserve a user's
     // deliberate drag position instead of snapping it back to the monitor.
     let disposed = false;
     void (async () => {
       try {
-        await window.setSize(new LogicalSize(1200, height));
+        await window.setSize(new LogicalSize(800, height));
         // Native setSize keeps the top-left fixed on common platforms. When a
         // person has not dragged this visible session, recenter after the
         // resize so opening the taller center feels like a single Spotlight
@@ -1133,11 +1169,14 @@ export function App() {
     );
   }, [contentResults, pluginSearchResults, plugins, query, searchResults]);
   const spotlightSearchResults = useMemo<SpotlightLauncherItem[]>(
-    () => results.map(spotlightItemForSearchResult),
-    [results],
+    () => results.map((result) => spotlightItemForSearchResult(
+      result,
+      searchIconSrcById[result.id] ?? homeIconSrcById[result.id],
+    )),
+    [homeIconSrcById, results, searchIconSrcById],
   );
   const pastedFileItems = useMemo<SpotlightLauncherItem[]>(
-    () => pastedFileResults.map(spotlightItemForSearchResult),
+    () => pastedFileResults.map((result) => spotlightItemForSearchResult(result)),
     [pastedFileResults],
   );
   const launcherContextActions = useMemo(
@@ -1173,12 +1212,14 @@ export function App() {
     [pluginCenterLauncherContext],
   );
   const launcherShortcutItems = useMemo<SpotlightLauncherItem[]>(
-    () => launcherShortcuts.map(spotlightItemForLauncherShortcut),
-    [launcherShortcuts],
+    () => launcherShortcuts.map((shortcut) =>
+      spotlightItemForLauncherShortcut(shortcut, homeIconSrcById[shortcut.id])),
+    [homeIconSrcById, launcherShortcuts],
   );
   const recentApplicationItems = useMemo(
-    () => recentApplications.map(spotlightItemForSearchResult),
-    [recentApplications],
+    () => recentApplications.map((result) =>
+      spotlightItemForSearchResult(result, homeIconSrcById[result.id])),
+    [homeIconSrcById, recentApplications],
   );
   const pluginCommandItems = useMemo(() => plugins.flatMap((plugin) => {
       if (plugin.enabled === false || !Array.isArray(plugin.commands)) {
@@ -1837,9 +1878,31 @@ export function App() {
 
     setQuickNotes(nextQuickNotes);
     if (searchResponse.status === "fulfilled") {
-      setSearchResults(searchResponse.value);
+      const nativeResults = searchResponse.value;
+      setSearchResults(nativeResults);
+      setSearchIconSrcById({});
+      const searchResultIds = nativeResults
+        .filter((result) => (
+          result.kind === "application"
+          || result.kind === "file"
+          || result.kind === "folder"
+        ))
+        .map((result) => result.id)
+        .slice(0, 12);
+      if (searchResultIds.length > 0) {
+        void requestSystemIconMap(searchResultIds, [])
+          .then((icons) => {
+            if (requestId === searchRequestRef.current) {
+              setSearchIconSrcById(icons);
+            }
+          })
+          .catch(() => {
+            // Shell icon extraction is optional; Lucide fallbacks remain usable.
+          });
+      }
     } else {
       setSearchResults([]);
+      setSearchIconSrcById({});
       showToast(
         searchResponse.reason instanceof Error
           ? searchResponse.reason.message
@@ -1864,6 +1927,7 @@ export function App() {
     }
     if (surface !== "launcher" || !normalizedQuery) {
       setSearchResults([]);
+      setSearchIconSrcById({});
       setPluginSearchResults([]);
       setRequestedSearchRuntimePluginIds((current) => (current.length === 0 ? current : []));
       if (!isDesktop()) {
@@ -1902,6 +1966,37 @@ export function App() {
   useEffect(() => {
     persistLauncherValue(launcherRecentApplicationsStorageKey, recentApplications);
   }, [recentApplications]);
+
+  useEffect(() => {
+    const generation = homeIconRequestRef.current + 1;
+    homeIconRequestRef.current = generation;
+    if (!isDesktop()) {
+      setHomeIconSrcById({});
+      return;
+    }
+    const searchResultIds = recentApplications
+      .filter((result) => result.kind === "application")
+      .map((result) => result.id);
+    const launcherShortcutIds = launcherShortcuts
+      .filter((shortcut) => shortcut.status === "ready")
+      .map((shortcut) => shortcut.id);
+    if (searchResultIds.length === 0 && launcherShortcutIds.length === 0) {
+      setHomeIconSrcById({});
+      return;
+    }
+
+    void requestSystemIconMap(searchResultIds, launcherShortcutIds)
+      .then((icons) => {
+        if (generation === homeIconRequestRef.current) {
+          setHomeIconSrcById(icons);
+        }
+      })
+      .catch(() => {
+        if (generation === homeIconRequestRef.current) {
+          setHomeIconSrcById({});
+        }
+      });
+  }, [launcherShortcuts, recentApplications]);
 
   useEffect(() => {
     persistLauncherValue(launcherShowRecentStorageKey, showRecent);
@@ -2217,7 +2312,7 @@ export function App() {
         ? { ...current, launcherHotkey: result }
         : current);
       setLauncherHotkeyDraft(null);
-      showToast("启动快捷键已恢复为 Alt / Option + Space。");
+      showToast(launcherHotkeyResetAction(result).successMessage);
       if (!health) {
         await refreshStatus();
       }
@@ -2227,6 +2322,19 @@ export function App() {
       showToast(message);
     } finally {
       setIsUpdatingLauncherHotkey(false);
+    }
+  };
+
+  const quitApplication = async () => {
+    if (!isDesktop()) {
+      showToast("浏览器预览不会退出桌面进程。");
+      return;
+    }
+    try {
+      await command<void>("quit_app");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法退出 iHub。";
+      showToast(message);
     }
   };
 
@@ -2259,10 +2367,7 @@ export function App() {
   const launcherHotkeyDraftLabel = launcherHotkeyDraft
     ? formatLauncherHotkey(launcherHotkeyDraft, launcherHotkeyPlatform)
     : null;
-  const canResetLauncherHotkey = Boolean(
-    health?.launcherHotkey?.registration === "configured"
-    || health?.launcherHotkey?.preferredAccelerator,
-  );
+  const hotkeyResetAction = launcherHotkeyResetAction(health?.launcherHotkey);
 
   const returnToLauncher = () => {
     invalidateLauncherContextHandoff();
@@ -3052,7 +3157,7 @@ export function App() {
                         应用
                       </button>
                     ) : null}
-                    {canResetLauncherHotkey ? (
+                    {hotkeyResetAction.visible ? (
                       <button
                         className="settings-hotkey-reset"
                         disabled={isUpdatingLauncherHotkey}
@@ -3060,7 +3165,7 @@ export function App() {
                         type="button"
                       >
                         <RefreshCw size={12} />
-                        恢复默认
+                        {hotkeyResetAction.label}
                       </button>
                     ) : null}
                   </div>
@@ -3111,6 +3216,25 @@ export function App() {
                 >
                   <span />
                 </button>
+              </section>
+
+              <section className="settings-section" aria-labelledby="quit-title">
+                <div className="settings-section__icon">
+                  <LogOut size={16} />
+                </div>
+                <div className="settings-section__copy">
+                  <h3 id="quit-title">退出 iHub</h3>
+                  <p>结束驻留进程并释放全局快捷键。标题栏关闭、Esc 和失焦仍只隐藏启动器。</p>
+                  <button
+                    className="settings-action is-danger"
+                    disabled={!isDesktop()}
+                    onClick={() => void quitApplication()}
+                    type="button"
+                  >
+                    <LogOut size={14} />
+                    退出 iHub
+                  </button>
+                </div>
               </section>
 
               <p className="settings-panel__meta">
