@@ -3112,73 +3112,111 @@ kbd {
 }
 
 .plugin-frame-overlay {
-  background: #10151a;
-  border: 1px solid rgba(198, 222, 228, 0.15);
-  border-radius: 15px;
-  bottom: 18px;
-  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.5);
+  background: #303133;
+  border: 1px solid #3a3b3d;
+  border-radius: 8px;
+  box-shadow: 0 15px 45px rgba(0, 0, 0, 0.46);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  left: max(18px, calc((100vw - 1120px) / 2));
+  grid-template-rows: 60px minmax(0, 1fr);
+  inset: 0;
   overflow: hidden;
   position: fixed;
-  right: max(18px, calc((100vw - 1120px) / 2));
-  top: 18px;
   z-index: 14;
 }
 
-.plugin-frame__header,
-.plugin-frame__footer {
+.plugin-frame__header {
   align-items: center;
+  background: #303133;
+  border-bottom: 1px solid #454545;
   display: flex;
   justify-content: space-between;
-  padding: 13px 16px;
-}
-
-.plugin-frame__header {
-  border-bottom: 1px solid rgba(198, 222, 228, 0.1);
+  min-width: 0;
+  padding: 0 12px;
 }
 
 .plugin-frame__identity,
-.plugin-frame__actions,
-.plugin-frame__bridge,
-.plugin-frame__footer span {
+.plugin-frame__back,
+.plugin-frame__tag,
+.plugin-frame__tag-icon,
+.plugin-frame__security {
   align-items: center;
   display: inline-flex;
 }
 
 .plugin-frame__identity {
-  gap: 9px;
+  gap: 8px;
+  min-width: 0;
 }
 
-.plugin-frame__identity .plugin-row__glyph {
+.plugin-frame__back {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #c9c9c7;
+  cursor: pointer;
   flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  gap: 2px;
+  min-height: 30px;
+  padding: 0 7px 0 4px;
 }
 
-.plugin-frame__identity small {
-  color: #6f7d87;
-  display: block;
-  font-family: "DM Mono", monospace;
-  font-size: 8px;
-  letter-spacing: 0.09em;
+.plugin-frame__back:hover {
+  background: #484848;
+  color: #fff;
 }
 
-.plugin-frame__identity strong {
-  color: #ecf2f4;
-  display: block;
-  font-size: 12px;
-  margin-top: 2px;
+.plugin-frame__back:focus-visible {
+  outline: 2px solid rgba(125, 228, 211, 0.82);
+  outline-offset: 1px;
 }
 
-.plugin-frame__actions {
-  gap: 11px;
+.plugin-frame__tag {
+  background: #424242;
+  border: 1px solid #535353;
+  border-radius: 7px;
+  color: #eeeeed;
+  gap: 7px;
+  min-height: 34px;
+  min-width: 0;
+  padding: 3px 10px 3px 4px;
 }
 
-.plugin-frame__bridge {
-  color: #77dfcd;
-  font-family: "DM Mono", monospace;
-  font-size: 9px;
+.plugin-frame__tag-icon {
+  background: #65559a;
+  border-radius: 5px;
+  color: #f2eeff;
+  flex: 0 0 auto;
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+
+.plugin-frame__tag h1 {
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 1;
+  margin: 0;
+  max-width: min(360px, 48vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-frame__security {
+  color: #a9b0b1;
+  flex: 0 0 auto;
+  font-size: 10px;
   gap: 5px;
+  margin-left: 12px;
+  min-height: 28px;
+  padding: 0 5px;
+}
+
+.plugin-frame__security svg {
+  color: #80cfc1;
 }
 
 .plugin-frame__content {
@@ -3319,18 +3357,6 @@ kbd {
   max-width: 500px;
 }
 
-.plugin-frame__footer {
-  border-top: 1px solid rgba(198, 222, 228, 0.1);
-  color: #778590;
-  font-family: "DM Mono", monospace;
-  font-size: 9px;
-  gap: 10px;
-}
-
-.plugin-frame__footer span {
-  gap: 5px;
-}
-
 .toast {
   background: #e9f5f2;
   border-radius: 9px;
@@ -3430,10 +3456,7 @@ kbd {
   }
 
   .plugin-frame-overlay {
-    bottom: 9px;
-    left: 9px;
-    right: 9px;
-    top: 9px;
+    border-radius: 7px;
   }
 
   .toolbox-drawer {
@@ -3441,8 +3464,7 @@ kbd {
     width: min(620px, 96vw);
   }
 
-  .plugin-frame__bridge,
-  .plugin-frame__footer span:first-child {
+  .plugin-frame__security span {
     display: none;
   }
 }

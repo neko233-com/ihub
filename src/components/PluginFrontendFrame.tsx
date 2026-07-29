@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AnimatePresence, motion } from "motion/react";
-import { ExternalLink, LoaderCircle, Puzzle, ShieldCheck, X } from "lucide-react";
+import { ChevronLeft, LoaderCircle, Puzzle, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { command, isDesktop } from "../lib/desktop";
 import type { PluginFrontendEvent, PluginFrontendLease, PluginInfo } from "../lib/types";
@@ -675,32 +675,40 @@ export function PluginFrontendFrame({
     <AnimatePresence>
       {plugin ? (
         <motion.section
-          aria-label={plugin.name + " plugin view"}
+          aria-label={`${plugin.name} 插件界面`}
           className="plugin-frame-overlay"
-          initial={{ opacity: 0, y: 18 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 18 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
           transition={{ type: "spring", stiffness: 420, damping: 36 }}
         >
           <header className="plugin-frame__header">
             <div className="plugin-frame__identity">
-              <span className="plugin-row__glyph">
-                <Puzzle size={16} />
-              </span>
-              <div>
-                <small>PLUGIN FRONTEND</small>
-                <strong>{plugin.name}</strong>
-              </div>
-            </div>
-            <div className="plugin-frame__actions">
-              <span className="plugin-frame__bridge">
-                <ShieldCheck size={14} />
-                iHub Bridge · 独立来源
-              </span>
-              <button aria-label="Close plugin view" className="icon-button" onClick={onClose}>
-                <X size={18} />
+              <button
+                aria-label="返回 iHub 启动器"
+                className="plugin-frame__back"
+                onClick={onClose}
+                title="返回 iHub"
+                type="button"
+              >
+                <ChevronLeft aria-hidden="true" size={16} strokeWidth={2.1} />
+                <span>返回</span>
               </button>
+              <span className="plugin-frame__tag">
+                <span aria-hidden="true" className="plugin-frame__tag-icon">
+                  <Puzzle size={15} strokeWidth={1.9} />
+                </span>
+                <h1>{plugin.name}</h1>
+              </span>
             </div>
+            <span
+              aria-label="安全状态：插件界面已隔离加载"
+              className="plugin-frame__security"
+              title="插件界面在独立来源中运行，只能通过受限桥接访问宿主能力。"
+            >
+              <ShieldCheck aria-hidden="true" size={14} strokeWidth={1.9} />
+              <span>隔离加载</span>
+            </span>
           </header>
 
           <div className="plugin-frame__content">
@@ -767,16 +775,6 @@ export function PluginFrontendFrame({
               />
             ) : null}
           </div>
-
-          <footer className="plugin-frame__footer">
-            <span>
-              独立本机来源 + Bridge；二进制仍应只来自可信发布者。
-            </span>
-            <span>
-              <ExternalLink size={13} />
-              {plugin.frontendEntry ?? "frontend entry"}
-            </span>
-          </footer>
         </motion.section>
       ) : null}
     </AnimatePresence>
