@@ -17,7 +17,7 @@
         "label": "main",
         "title": "iHub",
         "width": 800,
-        "height": 504,
+        "height": 380,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
@@ -30,7 +30,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "shadow": true,
-        "theme": "Dark",
+        "theme": "Light",
         "acceptFirstMouse": true
       }
     ],

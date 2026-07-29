@@ -1,8 +1,8 @@
 export const LAUNCHER_RECENT_CAPACITY = 48;
 
 export const LAUNCHER_HOME_PREVIEW_CAPACITY = {
-  recent: 9,
-  pinned: 18,
+  recent: 18,
+  pinned: 9,
   marketplace: 9,
 } as const;
 

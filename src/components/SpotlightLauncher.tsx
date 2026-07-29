@@ -269,7 +269,7 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
 /* First launch has no truthful history yet. Keep the opening rhythm useful by
    showing real, host-owned built-ins in the same compact row; the title makes
    clear that these are suggestions, never fabricated recent applications. */
-const firstRunQuickItems = builtinPinnedItems.slice(0, 9);
+const firstRunQuickItems = builtinPinnedItems.slice(0, 18);
 
 export const defaultMarketplaceItems: readonly SpotlightLauncherItem[] = [
   {
@@ -888,7 +888,7 @@ const spotlightLauncherStyles = `
     scrollbar-color: rgba(255, 255, 255, .22) transparent;
   }
 
-  .ihub-spotlight__group + .ihub-spotlight__group { margin-top: 9px; }
+  .ihub-spotlight__group + .ihub-spotlight__group { margin-top: 3px; }
 
   .ihub-spotlight__group-header { margin-bottom: 4px; }
 
@@ -960,15 +960,16 @@ const spotlightLauncherStyles = `
 
   /* Keep the home layout's three zones stable without inventing app entries.
      Installed plugins naturally fill this reserved second row. */
-  .ihub-spotlight__group--pinned .ihub-spotlight__grid {
+  .ihub-spotlight__group--recent .ihub-spotlight__grid {
     align-content: start;
     min-height: 172px;
   }
 
-  /* A filtered history keeps its row height, while first launch fills this
-     same rhythm with explicitly labelled, real built-ins. */
-  .ihub-spotlight__group--recent .ihub-spotlight__grid,
-  .ihub-spotlight__group--recent .ihub-spotlight__empty { min-height: 86px; }
+  /* The current uTools home gives recent activity two rows and pinned items
+     one. First launch fills that history rhythm with explicitly labelled,
+     real built-ins instead of fabricating application usage. */
+  .ihub-spotlight__group--pinned .ihub-spotlight__grid,
+  .ihub-spotlight__group--pinned .ihub-spotlight__empty { min-height: 86px; }
 
   .ihub-spotlight__group--marketplace .ihub-spotlight__tile { min-height: 72px; }
 
@@ -1159,6 +1160,129 @@ const spotlightLauncherStyles = `
   @media (prefers-reduced-motion: reduce) {
     .ihub-spotlight__tile { transition: none; transform: none; }
   }
+
+  /* uTools' current launcher is a light neutral surface even though its
+     application icons remain saturated.  These values are taken from the
+     reference launcher pixels: #f4f4f4 for the panel and #d7d7d7 for the
+     active tile.  Keep the palette component-scoped so plugin frontends and
+     older built-in workspaces do not inherit host chrome styling. */
+  .ihub-spotlight {
+    --ihub-utools-active: #d7d7d7;
+    --ihub-utools-border: #d2d2d2;
+    --ihub-utools-muted: #777;
+    --ihub-utools-surface: #f4f4f4;
+    --ihub-utools-text: #292929;
+    background: var(--ihub-utools-surface);
+    border-color: var(--ihub-utools-border);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .24), 0 1px 0 rgba(255, 255, 255, .92) inset;
+    color: var(--ihub-utools-text);
+    color-scheme: light;
+  }
+
+  .ihub-spotlight__search-field input {
+    color: #262626;
+  }
+
+  .ihub-spotlight__search-field input::placeholder {
+    color: #858585;
+  }
+
+  .ihub-spotlight__content {
+    scrollbar-color: rgba(57, 57, 57, .28) transparent;
+  }
+
+  .ihub-spotlight__group-title,
+  .ihub-spotlight__tile-label,
+  .ihub-spotlight__result-label {
+    color: #292929;
+  }
+
+  .ihub-spotlight__group-count,
+  .ihub-spotlight__tile-detail,
+  .ihub-spotlight__result-detail,
+  .ihub-spotlight__empty,
+  .ihub-spotlight__empty svg {
+    color: var(--ihub-utools-muted);
+  }
+
+  .ihub-spotlight__group-action,
+  .ihub-spotlight__group-back {
+    color: #666;
+  }
+
+  .ihub-spotlight__group-action:hover,
+  .ihub-spotlight__group-action:focus-visible,
+  .ihub-spotlight__group-back:hover,
+  .ihub-spotlight__group-back:focus-visible {
+    background: rgba(0, 0, 0, .065);
+    color: #202020;
+  }
+
+  .ihub-spotlight__group--context {
+    border-bottom-color: rgba(0, 0, 0, .09);
+  }
+
+  .ihub-spotlight__group--context .ihub-spotlight__tile {
+    background: rgba(255, 255, 255, .52);
+    border-color: rgba(0, 0, 0, .075);
+  }
+
+  .ihub-spotlight__group--context .ihub-spotlight__tile:hover,
+  .ihub-spotlight__group--context .ihub-spotlight__tile:focus-visible,
+  .ihub-spotlight__group--context .ihub-spotlight__tile.is-keyboard-selected,
+  .ihub-spotlight__tile:hover,
+  .ihub-spotlight__tile:focus-visible,
+  .ihub-spotlight__tile.is-keyboard-selected,
+  .ihub-spotlight__result-row:hover,
+  .ihub-spotlight__result-row:focus-visible,
+  .ihub-spotlight__result-row.is-keyboard-selected {
+    background: var(--ihub-utools-active);
+    border-color: transparent;
+    box-shadow: none;
+  }
+
+  .ihub-spotlight__result-row {
+    color: var(--ihub-utools-text);
+  }
+
+  .ihub-spotlight__result-badge,
+  .ihub-spotlight__tile-badge {
+    color: #476a91;
+  }
+
+  .ihub-spotlight__result-icon {
+    background: #d9ece9;
+    color: #276d64;
+  }
+
+  .ihub-spotlight__tile-icon {
+    color: #fff;
+  }
+
+  .ihub-spotlight__tile-icon--mint {
+    background: linear-gradient(145deg, #25776d, #2b9587);
+    color: #fff;
+  }
+
+  .ihub-spotlight__tile-icon--violet {
+    background: linear-gradient(145deg, #6550a8, #8069cc);
+    color: #fff;
+  }
+
+  .ihub-spotlight__tile-icon--amber {
+    background: linear-gradient(145deg, #9b6827, #c5872e);
+    color: #fff;
+  }
+
+  .ihub-spotlight__tile-icon--blue {
+    background: linear-gradient(145deg, #2d6f9f, #438fc4);
+    color: #fff;
+  }
+
+  .ihub-spotlight__tile-icon--slate {
+    background: linear-gradient(145deg, #65737a, #859197);
+    color: #fff;
+  }
 `;
 
 export function SpotlightLauncher({
@@ -1283,13 +1407,13 @@ export function SpotlightLauncher({
         items: launcherHomePreview("pinned", filteredPinnedItems, expandedGroupId === "pinned"),
         totalCount: filteredPinnedItems.length,
       },
-      {
+      ...(trimmedQuery ? [{
         id: "marketplace" as const,
         label: "市场精选",
         emptyLabel: "没有可显示的市场入口。",
         items: launcherHomePreview("marketplace", filteredMarketplaceItems),
         totalCount: filteredMarketplaceItems.length,
-      },
+      }] : []),
     ];
   }, [
     contextActions,

@@ -59,7 +59,7 @@ const LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(160);
 /// same proportions on mixed-DPI Windows and macOS displays. It is an upper
 /// bound, not a minimum: a compact work area must always win.
 const LAUNCHER_DESIGN_WIDTH_LOGICAL: f64 = 800.0;
-const LAUNCHER_DESIGN_HEIGHT_LOGICAL: f64 = 504.0;
+const LAUNCHER_DESIGN_HEIGHT_LOGICAL: f64 = 380.0;
 const MAX_SYSTEM_ICON_TARGETS: usize = 12;
 const MAX_SYSTEM_ICON_SEARCH_ID_BYTES: usize = 8 * 1024;
 const MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES: usize = 128;
@@ -4606,8 +4606,8 @@ mod tests {
         .reveal_layout(1.0)
         .expect("a non-empty work area should have a launcher layout");
 
-        assert_eq!(layout.size, PhysicalSize::new(800, 504));
-        assert_eq!(layout.position, PhysicalPosition::new(560, 268));
+        assert_eq!(layout.size, PhysicalSize::new(800, 380));
+        assert_eq!(layout.position, PhysicalPosition::new(560, 330));
     }
 
     #[test]
@@ -4646,7 +4646,7 @@ mod tests {
 
         assert_ne!(first_reveal.position, dragged_visible_position);
         assert_eq!(reopened, first_reveal);
-        assert_eq!(reopened.position, PhysicalPosition::new(-1_040, 300));
+        assert_eq!(reopened.position, PhysicalPosition::new(-1_040, 362));
     }
 
     #[test]
@@ -4658,8 +4658,8 @@ mod tests {
         .reveal_layout(1.5)
         .expect("a non-empty work area should have a launcher layout");
 
-        assert_eq!(layout.size, PhysicalSize::new(1_200, 756));
-        assert_eq!(layout.position, PhysicalPosition::new(1_320, 662));
+        assert_eq!(layout.size, PhysicalSize::new(1_200, 570));
+        assert_eq!(layout.position, PhysicalPosition::new(1_320, 755));
     }
 
     #[test]

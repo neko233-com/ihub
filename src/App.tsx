@@ -1140,7 +1140,11 @@ export function App() {
       return;
     }
     const window = getCurrentWindow();
-    const height = surface === "plugin-center" ? 602 : 504;
+    const height = surface === "plugin-center"
+      ? 602
+      : surface === "launcher" || surface === "hidden"
+        ? 380
+        : 504;
     // Reopening is centered by the native resident shell. While the surface
     // remains visible, resizing a secondary panel must preserve a user's
     // deliberate drag position instead of snapping it back to the monitor.
@@ -3198,7 +3202,7 @@ export function App() {
                 <div className="settings-section__copy">
                   <h3 id="recent-title">搜索面板显示最近使用</h3>
                   <p>
-                    可在主搜索框按 <kbd>Alt</kbd> + <kbd>H</kbd> 或双击搜索框快速切换。
+                    可在主搜索框按 <kbd>Alt</kbd> + <kbd>H</kbd> 快速切换；双击仍保留系统选词行为。
                   </p>
                 </div>
                 <button

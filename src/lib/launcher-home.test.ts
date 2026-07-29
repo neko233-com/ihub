@@ -17,8 +17,8 @@ describe("launcher home data bounds", () => {
   it("uses exact home quotas while focused groups receive all data", () => {
     const items = Array.from({ length: 30 }, (_, index) => index);
 
-    expect(launcherHomePreview("recent", items)).toHaveLength(9);
-    expect(launcherHomePreview("pinned", items)).toHaveLength(18);
+    expect(launcherHomePreview("recent", items)).toHaveLength(18);
+    expect(launcherHomePreview("pinned", items)).toHaveLength(9);
     expect(launcherHomePreview("marketplace", items)).toHaveLength(9);
     expect(launcherHomePreview("recent", items, true)).toBe(items);
     expect(launcherHomePreview("pinned", items, true)).toBe(items);
