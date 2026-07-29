@@ -28,6 +28,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { launcherHomePreview } from "../lib/launcher-home";
 import { launcherInputUsesHorizontalGridNavigation } from "../lib/launcher-input-navigation";
+import {
+  createLongPressWindowDragController,
+  type LongPressWindowDragController,
+  supportsLongPressWindowDrag,
+  WINDOW_DRAG_LONG_PRESS_MS,
+} from "../lib/window-drag-long-press";
 import { BlurText } from "./BlurText";
 
 /**
@@ -434,34 +440,26 @@ const spotlightLauncherStyles = `
     padding: 0 15px 0 21px;
   }
 
+  /* A deliberate long press belongs only to the genuinely empty top strip.
+     Keeping this handle narrow prevents caret placement or text selection in
+     the search field from becoming a window gesture. */
   .ihub-spotlight__drag-zone {
     align-items: center;
     cursor: grab;
     display: flex;
-    height: 46px;
+    height: 10px;
     justify-content: center;
     left: 50%;
     position: absolute;
-    top: 16px;
+    top: 0;
     transform: translateX(-50%);
     touch-action: none;
     user-select: none;
-    width: min(280px, 28vw);
+    width: min(160px, 24vw);
     z-index: 3;
   }
 
-  .ihub-spotlight__drag-zone::before {
-    background: rgba(255, 255, 255, .15);
-    border-radius: 999px;
-    content: "";
-    height: 3px;
-    transition: background-color 140ms ease, transform 140ms ease, width 140ms ease;
-    width: 26px;
-  }
-
-  .ihub-spotlight__drag-zone:hover::before { background: rgba(255, 255, 255, .34); width: 34px; }
   .ihub-spotlight__drag-zone.is-armed { cursor: grabbing; }
-  .ihub-spotlight__drag-zone.is-armed::before { background: #bdeee6; transform: scaleX(1.12); width: 38px; }
 
   .ihub-spotlight__brand {
     align-items: center;
@@ -840,17 +838,6 @@ const spotlightLauncherStyles = `
     padding: 0 10px 0 13px;
   }
 
-  /* Keep the long-press grab affordance in the genuinely empty top strip.
-     A broader overlay used to sit above the centre of the text field, so a
-     click intended to place the caret could begin a window drag instead. */
-  .ihub-spotlight__drag-zone {
-    height: 10px;
-    top: 0;
-    width: min(160px, 24vw);
-  }
-
-  .ihub-spotlight__drag-zone::before { display: none; }
-
   .ihub-spotlight__brand,
   .ihub-spotlight__search-field > svg,
   .ihub-spotlight__top-button[aria-label="关闭启动器"],
@@ -1170,8 +1157,7 @@ const spotlightLauncherStyles = `
   }
 
   @media (prefers-reduced-motion: reduce) {
-  .ihub-spotlight__tile { transition: none; transform: none; }
-    .ihub-spotlight__drag-zone::before { transition: none; }
+    .ihub-spotlight__tile { transition: none; transform: none; }
   }
 `;
 
@@ -1207,8 +1193,8 @@ export function SpotlightLauncher({
   const selectedItemRef = useRef<HTMLButtonElement>(null);
   const expandedGroupBackRef = useRef<HTMLButtonElement>(null);
   const groupActionRefs = useRef<Partial<Record<LauncherExpandableGroupId, HTMLButtonElement | null>>>({});
-  const dragTimerRef = useRef<number | null>(null);
-  const dragStartPointRef = useRef<{ x: number; y: number } | null>(null);
+  const onStartWindowDragRef = useRef(onStartWindowDrag);
+  onStartWindowDragRef.current = onStartWindowDrag;
   const prefersReducedMotion = useReducedMotion();
   const [uncontrolledQuery, setUncontrolledQuery] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -1218,6 +1204,24 @@ export function SpotlightLauncher({
   // becomes an action after the person has explicitly navigated the grid.
   const [spaceActivationArmed, setSpaceActivationArmed] = useState(false);
   const [dragPending, setDragPending] = useState(false);
+  const windowDragControllerRef = useRef<LongPressWindowDragController | null>(null);
+  const getWindowDragController = () => {
+    windowDragControllerRef.current ??= createLongPressWindowDragController({
+      onPendingChange: setDragPending,
+      onTrigger: () => {
+        const startWindowDrag = onStartWindowDragRef.current;
+        if (startWindowDrag) {
+          try {
+            void Promise.resolve(startWindowDrag()).catch(() => undefined);
+          } catch {
+            // A host drag is an optional native affordance; a platform that
+            // declines it must leave the launcher usable and error-free.
+          }
+        }
+      },
+    });
+    return windowDragControllerRef.current;
+  };
   const activeQuery = query ?? uncontrolledQuery;
   const trimmedQuery = activeQuery.trim();
   const pinnedItemIdSet = useMemo(() => new Set(pinnedItemIds), [pinnedItemIds]);
@@ -1354,18 +1358,15 @@ export function SpotlightLauncher({
   }, [expandedGroup, expandedGroupId, open]);
 
   useEffect(() => () => {
-    if (dragTimerRef.current !== null) {
-      window.clearTimeout(dragTimerRef.current);
-    }
+    windowDragControllerRef.current?.dispose();
+    windowDragControllerRef.current = null;
   }, []);
 
   useEffect(() => {
-    if (!open && dragTimerRef.current !== null) {
-      window.clearTimeout(dragTimerRef.current);
-      dragTimerRef.current = null;
-      setDragPending(false);
+    if (!open || !onStartWindowDrag) {
+      windowDragControllerRef.current?.cancel();
     }
-  }, [open]);
+  }, [onStartWindowDrag, open]);
 
   useEffect(() => {
     if (!open) {
@@ -1451,43 +1452,32 @@ export function SpotlightLauncher({
     }
   };
 
-  const clearWindowDragTimer = () => {
-    if (dragTimerRef.current !== null) {
-      window.clearTimeout(dragTimerRef.current);
-      dragTimerRef.current = null;
-    }
-    dragStartPointRef.current = null;
-    setDragPending(false);
-  };
-
   const handleWindowDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!onStartWindowDrag || (event.pointerType === "mouse" && event.button !== 0)) {
+    if (!onStartWindowDrag || !supportsLongPressWindowDrag(event)) {
       return;
     }
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    clearWindowDragTimer();
-    dragStartPointRef.current = { x: event.clientX, y: event.clientY };
-    setDragPending(true);
-    dragTimerRef.current = window.setTimeout(() => {
-      dragTimerRef.current = null;
-      dragStartPointRef.current = null;
-      setDragPending(false);
-      void Promise.resolve(onStartWindowDrag()).catch(() => undefined);
-    }, 280);
+    const windowDragController = getWindowDragController();
+    if (!windowDragController.begin({
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    })) {
+      return;
+    }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      windowDragController.cancel(event.pointerId);
+    }
   };
 
   const handleWindowDragPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    const start = dragStartPointRef.current;
-    if (!start) {
-      return;
-    }
-    // A deliberate long press is useful on touch screens; a short ordinary
-    // pointer drift in the compact top strip should not unexpectedly drag the
-    // whole resident window.
-    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) {
-      clearWindowDragTimer();
-    }
+    windowDragControllerRef.current?.move({
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    });
   };
 
   const activate = (item: SpotlightLauncherItem) => {
@@ -1788,14 +1778,16 @@ export function SpotlightLauncher({
               transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             >
               <div
-                aria-label="长按后拖动窗口"
+                aria-label={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
                 className={`ihub-spotlight__drag-zone${dragPending ? " is-armed" : ""}`}
-                onLostPointerCapture={clearWindowDragTimer}
-                onPointerCancel={clearWindowDragTimer}
+                data-drag-long-press-ms={WINDOW_DRAG_LONG_PRESS_MS}
+                data-window-drag-handle=""
+                onLostPointerCapture={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
+                onPointerCancel={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
                 onPointerDown={handleWindowDragPointerDown}
                 onPointerMove={handleWindowDragPointerMove}
-                onPointerUp={clearWindowDragTimer}
-                title="长按后拖动窗口"
+                onPointerUp={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
+                title={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
               />
               <header className="ihub-spotlight__search-row">
                 <span aria-hidden="true" className="ihub-spotlight__brand"><Command size={18} strokeWidth={2.35} /></span>
