@@ -16,7 +16,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::indexer::{LauncherShortcutSource, SearchIndex};
+use crate::indexer::{LauncherShortcutSource, ResolvedSystemIconSource, SearchIndex};
 
 const SHORTCUTS_FILE_NAME: &str = "launcher-shortcuts-v1.json";
 const SHORTCUTS_SCHEMA_VERSION: u32 = 1;
@@ -99,6 +99,44 @@ impl LauncherShortcutStore {
             .shortcuts
             .iter()
             .map(|shortcut| shortcut_view(shortcut, index))
+            .collect()
+    }
+
+    /// Resolves renderer-visible shortcut UUIDs back to live, authorized
+    /// sources for native icon rendering. Stored source IDs and paths never
+    /// cross the IPC boundary.
+    pub(crate) fn resolve_system_icon_sources(
+        &self,
+        shortcut_ids: &[String],
+        index: &SearchIndex,
+    ) -> Vec<ResolvedSystemIconSource> {
+        if shortcut_ids.len() > 12
+            || shortcut_ids
+                .iter()
+                .any(|shortcut_id| shortcut_id.is_empty() || shortcut_id.len() > 128)
+        {
+            return Vec::new();
+        }
+        let requested = shortcut_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        self.lock_state()
+            .shortcuts
+            .iter()
+            .filter(|shortcut| requested.contains(shortcut.id.as_str()))
+            .filter_map(|shortcut| {
+                let source = index.resolve_launcher_shortcut_source(&shortcut.source_id)?;
+                if source.kind != shortcut.kind {
+                    return None;
+                }
+                let path = validate_live_source(&source, index).ok()?;
+                Some(ResolvedSystemIconSource {
+                    response_id: shortcut.id.clone(),
+                    path,
+                    kind: shortcut.kind.clone(),
+                })
+            })
             .collect()
     }
 
@@ -270,17 +308,12 @@ fn shortcut_view(
     shortcut: &PersistedLauncherShortcut,
     index: &SearchIndex,
 ) -> LauncherShortcutView {
-    let status = if index
+    let available = index
         .resolve_launcher_shortcut_source(&shortcut.source_id)
         .filter(|source| source.kind == shortcut.kind)
         .and_then(|source| validate_live_source(&source, index).ok())
-        .is_some()
-    {
-        "ready"
-    } else {
-        "unavailable"
-    }
-    .to_owned();
+        .is_some();
+    let status = if available { "ready" } else { "unavailable" }.to_owned();
     LauncherShortcutView {
         id: shortcut.id.clone(),
         name: shortcut.name.clone(),

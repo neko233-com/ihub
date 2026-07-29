@@ -175,6 +175,15 @@ pub(crate) struct LauncherShortcutSource {
     pub(crate) metadata: String,
 }
 
+/// A renderer-selected result resolved back through the current native index.
+/// The path remains host-private and is used only by the Shell icon worker.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSystemIconSource {
+    pub(crate) response_id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) kind: String,
+}
+
 #[derive(Debug, Clone)]
 struct IndexedContent {
     /// Whitespace-compacted original UTF-8 text for a small result preview.
@@ -1979,6 +1988,39 @@ impl SearchIndex {
             kind: entry.kind.clone(),
             metadata: entry.metadata.clone(),
         })
+    }
+
+    /// Resolves only current result IDs. The renderer cannot use this method
+    /// to make the Shell worker inspect an arbitrary filesystem path.
+    pub(crate) fn resolve_system_icon_sources(
+        &self,
+        source_ids: &[String],
+    ) -> Vec<ResolvedSystemIconSource> {
+        if source_ids.len() > 12
+            || source_ids
+                .iter()
+                .any(|source_id| source_id.is_empty() || source_id.len() > 8 * 1024)
+        {
+            return Vec::new();
+        }
+        let requested = source_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let entries = self
+            .inner
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries
+            .iter()
+            .filter(|entry| requested.contains(entry.id.as_str()) && entry.is_valid())
+            .map(|entry| ResolvedSystemIconSource {
+                response_id: entry.id.clone(),
+                path: PathBuf::from(&entry.path),
+                kind: entry.kind.clone(),
+            })
+            .collect()
     }
 
     /// Content roots are an explicit user authorization boundary. A live
@@ -5508,6 +5550,32 @@ mod tests {
             folded,
             memory_bytes,
         }
+    }
+
+    #[test]
+    fn system_icon_sources_resolve_only_current_bounded_result_ids() {
+        let index = SearchIndex::new();
+        let source_path = "C:/Program Files/iHub/iHub.exe";
+        let mut application = entry("iHub", source_path);
+        application.kind = "application".to_owned();
+        publish_entries_with_search_signatures(&index, vec![application]);
+
+        let sources = index.resolve_system_icon_sources(&[
+            source_path.to_owned(),
+            "C:/not-indexed.exe".to_owned(),
+        ]);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].response_id, source_path);
+        assert_eq!(sources[0].path, PathBuf::from(source_path));
+        assert_eq!(sources[0].kind, "application");
+
+        assert!(index
+            .resolve_system_icon_sources(
+                &(0..13)
+                    .map(|ordinal| format!("result-{ordinal}"))
+                    .collect::<Vec<_>>(),
+            )
+            .is_empty());
     }
 
     fn zero_change_checkpoint() -> ntfs_usn::UsnCheckpoint {

@@ -40,6 +40,7 @@ use crate::{
         PluginSearchResponse, PluginSearchResult, PluginUninstallResult, PluginUpdateCheck,
         PluginUpdateResult, SearchResult,
     },
+    native_icons::NativeIconService,
     plugin_asset_server::{PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose},
     plugin_settings::PluginSettingsStore,
     plugins::PluginManager,
@@ -57,8 +58,12 @@ const LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(160);
 /// The visual design target is expressed in logical pixels so it keeps the
 /// same proportions on mixed-DPI Windows and macOS displays. It is an upper
 /// bound, not a minimum: a compact work area must always win.
-const LAUNCHER_DESIGN_WIDTH_LOGICAL: f64 = 1200.0;
-const LAUNCHER_DESIGN_HEIGHT_LOGICAL: f64 = 756.0;
+const LAUNCHER_DESIGN_WIDTH_LOGICAL: f64 = 800.0;
+const LAUNCHER_DESIGN_HEIGHT_LOGICAL: f64 = 504.0;
+const MAX_SYSTEM_ICON_TARGETS: usize = 12;
+const MAX_SYSTEM_ICON_SEARCH_ID_BYTES: usize = 8 * 1024;
+const MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES: usize = 128;
+const MAX_SYSTEM_ICON_REQUEST_BYTES: usize = 32 * 1024;
 
 /// A small, platform-neutral work-area snapshot used to calculate the next
 /// launcher reveal. Keeping this calculation free of window APIs makes it
@@ -858,6 +863,91 @@ pub fn search_entries(
     results
 }
 
+fn validate_system_icon_request(
+    search_result_ids: &[String],
+    launcher_shortcut_ids: &[String],
+) -> Result<(), String> {
+    let target_count = search_result_ids.len() + launcher_shortcut_ids.len();
+    if target_count > MAX_SYSTEM_ICON_TARGETS {
+        return Err(format!(
+            "一次最多读取 {MAX_SYSTEM_ICON_TARGETS} 个系统图标。"
+        ));
+    }
+    let total_bytes = search_result_ids
+        .iter()
+        .chain(launcher_shortcut_ids)
+        .map(String::len)
+        .sum::<usize>();
+    if total_bytes > MAX_SYSTEM_ICON_REQUEST_BYTES {
+        return Err("系统图标请求标识过长。".to_owned());
+    }
+
+    let mut seen = HashSet::with_capacity(target_count);
+    for source_id in search_result_ids {
+        if source_id.is_empty() || source_id.len() > MAX_SYSTEM_ICON_SEARCH_ID_BYTES {
+            return Err("系统图标搜索结果标识无效。".to_owned());
+        }
+        if !seen.insert(source_id.as_str()) {
+            return Err("系统图标请求包含重复标识。".to_owned());
+        }
+    }
+    for shortcut_id in launcher_shortcut_ids {
+        if shortcut_id.is_empty() || shortcut_id.len() > MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES {
+            return Err("系统图标固定项标识无效。".to_owned());
+        }
+        if !seen.insert(shortcut_id.as_str()) {
+            return Err("系统图标请求包含重复标识。".to_owned());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_system_icons(
+    search_result_ids: Vec<String>,
+    launcher_shortcut_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    validate_system_icon_request(&search_result_ids, &launcher_shortcut_ids)?;
+    let index = state.index.clone();
+    let shortcuts = state.launcher_shortcuts.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sources = index.resolve_system_icon_sources(&search_result_ids);
+        sources.extend(shortcuts.resolve_system_icon_sources(&launcher_shortcut_ids, &index));
+        if sources.is_empty() {
+            return HashMap::new();
+        }
+        let service = NativeIconService::shared();
+        // Submit the whole bounded batch before waiting so one healthy STA
+        // worker can process cold icons continuously instead of alternating
+        // renderer round-trips with Shell calls.
+        let pending = sources
+            .into_iter()
+            .filter_map(|source| {
+                service
+                    .try_request(&source.path, &source.kind)
+                    .map(|request| (source.response_id, request))
+            })
+            .collect::<Vec<_>>();
+        let deadline = Instant::now() + Duration::from_millis(2_500);
+        let mut icons = HashMap::with_capacity(pending.len());
+        for (response_id, request) in pending {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if let Some(icon_src) = request.wait_timeout(remaining.min(Duration::from_millis(650)))
+            {
+                icons.insert(response_id, icon_src);
+            }
+        }
+        icons
+    })
+    .await
+    .map_err(|error| format!("系统图标后台任务未完成：{error}"))
+}
+
 #[tauri::command]
 pub fn index_default_roots(state: State<'_, AppState>) -> IndexStatus {
     state.index.rebuild_default_roots()
@@ -1636,6 +1726,11 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<AutostartStatus, S
             .map_err(|error| format!("Could not disable autostart: {error}"))?;
     }
     get_autostart_status(app)
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -3731,6 +3826,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_index_status,
             search_entries,
+            get_system_icons,
             index_default_roots,
             set_index_roots,
             get_default_roots,
@@ -3790,6 +3886,7 @@ pub fn run() {
             run_plugin_command,
             get_autostart_status,
             set_autostart,
+            quit_app,
             set_launcher_hotkey,
             reset_launcher_hotkey,
             get_app_health,
@@ -3906,9 +4003,9 @@ fn register_launcher_hotkey(
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show iHub", true, None::<&str>)?;
-    let reindex = MenuItem::with_id(app, "reindex", "Refresh file index", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "显示 iHub", true, None::<&str>)?;
+    let reindex = MenuItem::with_id(app, "reindex", "刷新文件索引", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 iHub", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &reindex, &quit])?;
     let _tray = TrayIconBuilder::with_id("ihub-tray")
         .tooltip("iHub")
@@ -3918,7 +4015,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "reindex" => {
                 app.state::<AppState>().index.rebuild_default_roots();
             }
-            "quit" => app.exit(0),
+            "quit" => quit_app(app.clone()),
             _ => {}
         })
         .build(app)?;
@@ -4204,8 +4301,8 @@ mod tests {
         optional_u32, optional_u8, plugin_clipboard_history_snapshot,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
-        take_plugin_launcher_context_transfer, CaptureFocusLease, CursorColorApproval,
-        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
+        take_plugin_launcher_context_transfer, validate_system_icon_request, CaptureFocusLease,
+        CursorColorApproval, LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
         LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
         PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
         PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
@@ -4214,6 +4311,30 @@ mod tests {
         MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
         MAX_PLUGIN_SEARCH_PAYLOAD_BYTES,
     };
+
+    #[test]
+    fn system_icon_requests_are_bounded_unique_ids_not_renderer_paths() {
+        let search_ids = (0..10)
+            .map(|ordinal| format!("native-result-{ordinal}"))
+            .collect::<Vec<_>>();
+        let shortcut_ids = vec!["shortcut-a".to_owned(), "shortcut-b".to_owned()];
+        assert!(validate_system_icon_request(&search_ids, &shortcut_ids).is_ok());
+
+        let too_many = (0..13)
+            .map(|ordinal| format!("native-result-{ordinal}"))
+            .collect::<Vec<_>>();
+        assert!(validate_system_icon_request(&too_many, &[]).is_err());
+        assert!(
+            validate_system_icon_request(&["same-id".to_owned()], &["same-id".to_owned()],)
+                .is_err()
+        );
+        assert!(validate_system_icon_request(&["".to_owned()], &[]).is_err());
+        assert!(validate_system_icon_request(
+            &["x".repeat(super::MAX_SYSTEM_ICON_SEARCH_ID_BYTES + 1)],
+            &[],
+        )
+        .is_err());
+    }
 
     #[test]
     fn normalizes_known_host_targets_for_the_official_catalog() {
@@ -4424,8 +4545,8 @@ mod tests {
         .reveal_layout(1.0)
         .expect("a non-empty work area should have a launcher layout");
 
-        assert_eq!(layout.size, PhysicalSize::new(1_200, 756));
-        assert_eq!(layout.position, PhysicalPosition::new(360, 142));
+        assert_eq!(layout.size, PhysicalSize::new(800, 504));
+        assert_eq!(layout.position, PhysicalPosition::new(560, 268));
     }
 
     #[test]
@@ -4464,7 +4585,20 @@ mod tests {
 
         assert_ne!(first_reveal.position, dragged_visible_position);
         assert_eq!(reopened, first_reveal);
-        assert_eq!(reopened.position, PhysicalPosition::new(-1_240, 174));
+        assert_eq!(reopened.position, PhysicalPosition::new(-1_040, 300));
+    }
+
+    #[test]
+    fn launcher_reveal_layout_matches_reference_pixels_at_windows_150_percent_dpi() {
+        let layout = LauncherWorkArea {
+            position: PhysicalPosition::new(0, 0),
+            size: PhysicalSize::new(3_840, 2_080),
+        }
+        .reveal_layout(1.5)
+        .expect("a non-empty work area should have a launcher layout");
+
+        assert_eq!(layout.size, PhysicalSize::new(1_200, 756));
+        assert_eq!(layout.position, PhysicalPosition::new(1_320, 662));
     }
 
     #[test]

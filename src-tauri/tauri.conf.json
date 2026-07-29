@@ -16,8 +16,8 @@
       {
         "label": "main",
         "title": "iHub",
-        "width": 1200,
-        "height": 756,
+        "width": 800,
+        "height": 504,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
