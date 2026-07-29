@@ -70,6 +70,12 @@ import {
   launcherHotkeyResetAction,
 } from "./lib/launcher-hotkey-status";
 import {
+  buildLauncherItemIndex,
+  isLauncherRecentDestination,
+  LAUNCHER_RECENT_CAPACITY,
+  retainLauncherRecent,
+} from "./lib/launcher-home";
+import {
   mergeNativeIconCache,
   nativeIconForLauncherShortcut,
   nativeIconForResult,
@@ -198,14 +204,14 @@ const PluginFrontendFrame = lazy(async () => {
   return { default: module.PluginFrontendFrame };
 });
 
-function readStoredStringArray(key: string): string[] {
+function readStoredStringArray(key: string, limit = 12): string[] {
   if (typeof window === "undefined") {
     return [];
   }
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(key) ?? "[]");
     return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string").slice(0, 12)
+      ? value.filter((item): item is string => typeof item === "string").slice(0, limit)
       : [];
   } catch {
     return [];
@@ -261,7 +267,7 @@ function readStoredRecentApplications(): SearchResult[] {
     if (!Array.isArray(value)) {
       return [];
     }
-    return value.flatMap((candidate) => {
+    const recentApplications = value.flatMap((candidate) => {
       if (!candidate || typeof candidate !== "object") {
         return [];
       }
@@ -285,7 +291,8 @@ function readStoredRecentApplications(): SearchResult[] {
         score: 0,
         metadata: typeof item.metadata === "string" ? item.metadata : undefined,
       }];
-    }).slice(0, 6);
+    });
+    return retainLauncherRecent(recentApplications);
   } catch {
     return [];
   }
@@ -960,7 +967,8 @@ export function App() {
   // opaque display views and can never turn localStorage into an open-path
   // authorization channel.
   const [launcherShortcuts, setLauncherShortcuts] = useState<LauncherShortcutView[]>([]);
-  const [recentItemIds, setRecentItemIds] = useState<string[]>(() => readStoredStringArray(launcherRecentStorageKey));
+  const [recentItemIds, setRecentItemIds] = useState<string[]>(() =>
+    readStoredStringArray(launcherRecentStorageKey, LAUNCHER_RECENT_CAPACITY));
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
   const [homeIconCache, setHomeIconCache] = useState<SystemIconMap>({});
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
@@ -1260,13 +1268,7 @@ export function App() {
   );
 
   const launcherItemById = useMemo(() => {
-    return new Map(
-      [
-        ...launcherBaseItems,
-        ...spotlightSearchResults,
-      ]
-        .map((item) => [item.id, item] as const),
-    );
+    return buildLauncherItemIndex(launcherBaseItems, spotlightSearchResults);
   }, [launcherBaseItems, spotlightSearchResults]);
   const pinnedItems = useMemo(
     () => [
@@ -2479,22 +2481,17 @@ export function App() {
   };
 
   const recordRecent = (item: SpotlightLauncherItem) => {
-    if (!launcherItemById.has(item.id)) {
+    if (!launcherItemById.has(item.id) || !isLauncherRecentDestination(item.id)) {
       return;
     }
-    setRecentItemIds((current) => [item.id, ...current.filter((id) => id !== item.id)].slice(0, 6));
+    setRecentItemIds((current) =>
+      retainLauncherRecent([item.id, ...current.filter((id) => id !== item.id)]));
   };
 
-  // The avatar is an explicit shortcut to the same center command shown in
-  // the marketplace row. Keeping the two entry points on one semantic action
-  // means a person gets the same recent-history behavior whichever route they
-  // use, rather than treating the header control as a special-case page jump.
+  // The avatar is navigation chrome, so entering the center must not displace
+  // a real application or tool from the recent-work history.
   const openPluginCenterFromLauncher = () => {
     openPluginCenter();
-    const pluginCenterItem = launcherItemById.get("ihub.open-plugin-center");
-    if (pluginCenterItem) {
-      recordRecent(pluginCenterItem);
-    }
   };
 
   const requestPluginLauncherContextHandoff = (
@@ -2712,10 +2709,10 @@ export function App() {
         recordRecent(candidate);
       }
       if (result.kind === "application" && result.path) {
-        setRecentApplications((current) => [
+        setRecentApplications((current) => retainLauncherRecent([
           result,
           ...current.filter((item) => item.id !== result.id),
-        ].slice(0, 6));
+        ]));
       }
     };
 
@@ -2726,7 +2723,6 @@ export function App() {
 
     if (result.commandId === "ihub.open-settings") {
       openSettings();
-      recordSuccessfulAction();
       return;
     }
 
@@ -2887,12 +2883,10 @@ export function App() {
     }
     if (item.id === "ihub.open-plugin-center") {
       openPluginCenter();
-      recordRecent(item);
       return;
     }
     if (item.id === "ihub.open-settings") {
       openSettings();
-      recordRecent(item);
       return;
     }
 

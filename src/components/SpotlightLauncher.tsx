@@ -26,6 +26,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { launcherHomePreview } from "../lib/launcher-home";
 import { launcherInputUsesHorizontalGridNavigation } from "../lib/launcher-input-navigation";
 import { BlurText } from "./BlurText";
 
@@ -123,6 +124,8 @@ interface LauncherGroup {
   label: string;
   /** Optional factual affordance shown at the far edge of the group title. */
   countLabel?: string;
+  /** Full filtered count, independent of the bounded home preview. */
+  totalCount?: number;
   /** Only the uTools-style recent/pinned affordances may open a focused group
    * view. Other counts remain factual, non-navigational labels. */
   expandable?: boolean;
@@ -1245,6 +1248,8 @@ export function SpotlightLauncher({
     const filter = (items: readonly SpotlightLauncherItem[]) =>
       trimmedQuery ? items.filter((item) => matchesQuery(item, trimmedQuery)) : items;
     const filteredRecentItems = filter(recentItems);
+    const filteredPinnedItems = filter(pinnedItems);
+    const filteredMarketplaceItems = filter(marketplaceItems);
     const isFirstLaunch = !trimmedQuery && recentItems.length === 0;
 
     return [
@@ -1262,24 +1267,39 @@ export function SpotlightLauncher({
         countLabel: isFirstLaunch ? "内置工具" : `展开 (${filteredRecentItems.length})`,
         expandable: !isFirstLaunch && filteredRecentItems.length > 0,
         emptyLabel: trimmedQuery ? "最近使用中没有匹配的项目。" : "还没有最近使用项目。",
-        items: isFirstLaunch ? firstRunQuickItems : filteredRecentItems,
+        items: isFirstLaunch
+          ? firstRunQuickItems
+          : launcherHomePreview("recent", filteredRecentItems, expandedGroupId === "recent"),
+        totalCount: isFirstLaunch ? firstRunQuickItems.length : filteredRecentItems.length,
       }] : []),
       {
         id: "pinned" as const,
         label: "已固定",
         countLabel: "全部 >",
-        expandable: filter(pinnedItems).length > 0,
+        expandable: filteredPinnedItems.length > 0,
         emptyLabel: "还没有固定项目。",
-        items: filter(pinnedItems),
+        items: launcherHomePreview("pinned", filteredPinnedItems, expandedGroupId === "pinned"),
+        totalCount: filteredPinnedItems.length,
       },
       {
         id: "marketplace" as const,
         label: "市场精选",
         emptyLabel: "没有可显示的市场入口。",
-        items: filter(marketplaceItems),
+        items: launcherHomePreview("marketplace", filteredMarketplaceItems),
+        totalCount: filteredMarketplaceItems.length,
       },
     ];
-  }, [contextActions, marketplaceItems, pastedItems, pinnedItems, recentItems, searchResults, showRecent, trimmedQuery]);
+  }, [
+    contextActions,
+    expandedGroupId,
+    marketplaceItems,
+    pastedItems,
+    pinnedItems,
+    recentItems,
+    searchResults,
+    showRecent,
+    trimmedQuery,
+  ]);
 
   const expandedGroup = useMemo(
     () => expandedGroupId ? groups.find((group) => group.id === expandedGroupId) ?? null : null,
@@ -1849,7 +1869,7 @@ export function SpotlightLauncher({
                           <button
                             aria-controls={`ihub-spotlight-${group.id}-items`}
                             aria-expanded={false}
-                            aria-label={`展开${group.label}，共 ${group.items.length} 项`}
+                            aria-label={`展开${group.label}，共 ${group.totalCount ?? group.items.length} 项`}
                             className="ihub-spotlight__group-action"
                             onClick={() => openExpandedGroup(group.id)}
                             ref={(node) => {
@@ -1861,7 +1881,9 @@ export function SpotlightLauncher({
                           </button>
                         ) : (
                           <span className="ihub-spotlight__group-count">
-                            {expandedGroupId === group.id ? `全部 (${group.items.length})` : group.countLabel}
+                            {expandedGroupId === group.id
+                              ? `全部 (${group.totalCount ?? group.items.length})`
+                              : group.countLabel}
                           </span>
                         )
                       ) : null}
