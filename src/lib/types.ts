@@ -77,6 +77,8 @@ export interface PluginInfo {
   name: string;
   version: string;
   description?: string;
+  /** Host-validated PNG data URL; plugin package paths never reach browser code. */
+  iconSrc?: string;
   source?: string;
   /** Legacy-compatible resolved Git revision also returned by the native host. */
   commit?: string;
@@ -146,6 +148,8 @@ export interface PluginSnapshotIntegrity {
   algorithm: "sha256" | string;
   manifestSha256: string;
   frontendAssets: PluginArtifactDigest[];
+  /** Absent only on source locks created before standalone artwork was covered. */
+  artworkAssets?: PluginArtifactDigest[];
   nativeBinaries: PluginArtifactDigest[];
 }
 
@@ -210,6 +214,8 @@ export interface PluginCommandInfo {
   id: string;
   name: string;
   description?: string;
+  /** Host-validated PNG data URL; never the manifest's local artwork path. */
+  iconSrc?: string;
   /** Whether activation opens the plugin iframe or starts a declared worker. */
   execution: "frontend" | "native";
 }

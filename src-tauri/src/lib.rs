@@ -12,6 +12,7 @@ mod native_color_picker;
 mod native_icons;
 mod native_screenshot;
 mod ntfs_usn;
+mod plugin_artwork;
 mod plugin_asset_server;
 mod plugin_settings;
 mod plugins;

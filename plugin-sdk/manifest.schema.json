@@ -7,6 +7,10 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "id", "name", "version", "engines", "entry", "permissions"],
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor-only pointer to this manifest schema."
+    },
     "schemaVersion": { "const": 1 },
     "id": {
       "type": "string",
@@ -19,6 +23,14 @@
       "pattern": "^v?(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
     },
     "description": { "type": "string", "maxLength": 500 },
+    "icon": {
+      "$ref": "#/$defs/artworkPath",
+      "description": "Preferred package-relative plugin identity image. Invalid top-level artwork prevents the package from loading. The host accepts bounded PNG, JPEG, or WebP content and exposes only a normalized PNG data URL."
+    },
+    "logo": {
+      "$ref": "#/$defs/artworkPath",
+      "description": "Compatibility alias for icon. Do not declare both icon and logo."
+    },
     "author": { "type": "string", "maxLength": 200 },
     "license": { "type": "string", "maxLength": 100 },
     "homepage": { "type": "string", "format": "uri" },
@@ -82,6 +94,7 @@
       "properties": {
         "commands": {
           "type": "array",
+          "maxItems": 64,
           "items": { "$ref": "#/$defs/command" }
         },
         "searchProviders": {
@@ -196,11 +209,31 @@
       }
     }
   },
+  "allOf": [
+    {
+      "not": {
+        "properties": {
+          "icon": true,
+          "logo": true
+        },
+        "required": ["icon", "logo"]
+      }
+    }
+  ],
   "$defs": {
     "relativePath": {
       "type": "string",
       "minLength": 1,
       "pattern": "^(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "artworkPath": {
+      "allOf": [
+        { "$ref": "#/$defs/relativePath" },
+        {
+          "type": "string",
+          "pattern": "^(?!.*[\\u0000-\\u001F\\u007F-\\u009F])(?!.*:)(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2})(?!.*[\\\\/]$)(?!.*[. ](?:[\\\\/]|$))(?!.*(?:^|[\\\\/])(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^\\\\/]*)?(?:[\\\\/]|$)).+$"
+        }
+      ]
     },
     "pathScopeList": {
       "type": "array",
@@ -229,12 +262,18 @@
           }
         },
         "keywords": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "icon": { "$ref": "#/$defs/relativePath" },
+        "icon": {
+          "$ref": "#/$defs/artworkPath",
+          "description": "Static, package-relative PNG, JPEG, or WebP artwork. New packages should use a valid raster file. For compatibility, the host may ignore an unavailable legacy command icon and use its safe fallback; it never exposes this path to the WebView."
+        },
         "shortcut": { "type": "string" }
       },
       "allOf": [
         {
           "if": {
+            "properties": {
+              "run": true
+            },
             "required": ["run"]
           },
           "then": {

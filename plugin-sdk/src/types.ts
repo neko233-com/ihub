@@ -9,11 +9,20 @@ export type PluginTarget =
   | "darwin-aarch64";
 
 export interface PluginManifest {
+  /** Optional editor-only path or URL for manifest JSON Schema validation. */
+  $schema?: string;
   schemaVersion: 1;
   id: string;
   name: string;
   version: string;
   description?: string;
+  /**
+   * Preferred package-relative PNG, JPEG, or WebP identity artwork.
+   * Invalid top-level artwork prevents the package from loading.
+   */
+  icon?: string;
+  /** Compatibility alias for `icon`; manifests must not declare both. */
+  logo?: string;
   author?: string;
   license?: string;
   homepage?: string;
@@ -112,6 +121,12 @@ export interface CommandDefinition {
   title: string;
   subtitle?: string;
   keywords?: string[];
+  /**
+   * Static manifest artwork only. The host accepts a safe package-relative
+   * PNG, JPEG, or WebP path and normalizes usable content. An unavailable
+   * legacy command icon falls back safely instead of invalidating the plugin.
+   * Runtime command registration cannot introduce or replace artwork.
+   */
   icon?: string;
   shortcut?: string;
   /**
@@ -132,6 +147,15 @@ export interface NativeCommandRunPolicy {
   /** Host-enforced native-worker deadline in milliseconds (1,000–1,800,000). */
   timeoutMs: number;
 }
+
+/**
+ * A command registered by a running frontend. Artwork is intentionally absent:
+ * dynamic registration cannot send a package path or image payload to the host.
+ * Declare command artwork statically in plugin.json instead.
+ */
+export type RuntimeCommandDefinition = Omit<CommandDefinition, "icon"> & {
+  readonly icon?: never;
+};
 
 export interface SearchProviderDefinition {
   id: string;
@@ -290,7 +314,7 @@ export interface NotificationOptions {
 }
 
 export interface PluginCommands {
-  register(definition: CommandDefinition, handler: CommandHandler): Promise<Disposable>;
+  register(definition: RuntimeCommandDefinition, handler: CommandHandler): Promise<Disposable>;
   execute(commandId: string, input?: Json): Promise<void>;
 }
 

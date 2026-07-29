@@ -107,6 +107,10 @@ pub struct PluginCommandInfo {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    /// Host-decoded, bounded PNG artwork. A manifest path is never exposed to
+    /// the renderer, and unsupported or unsafe artwork rejects the plugin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_src: Option<String>,
     /// The host chooses the activation surface from this manifest-declared
     /// target. Frontend commands open the constrained iframe; native commands
     /// may start the plugin's declared worker after user confirmation.
@@ -163,7 +167,8 @@ pub struct PluginArtifactDigest {
 
 /// Runtime-code integrity captured alongside a Git source lock. A frontend
 /// bundle is represented by every file that its dedicated asset directory can
-/// serve; native binaries are represented by the manifest-declared files.
+/// serve; artwork and native binaries are represented by manifest-declared
+/// files.
 /// Keeping this host-owned data out of `plugin.json` prevents a fetched
 /// snapshot from declaring its own expected hashes after the user approved a
 /// commit.
@@ -174,6 +179,11 @@ pub struct PluginSnapshotIntegrity {
     pub manifest_sha256: String,
     #[serde(default)]
     pub frontend_assets: Vec<PluginArtifactDigest>,
+    /// `None` identifies a lock created before standalone manifest artwork was
+    /// integrity-covered. New locks always store `Some`, including an empty
+    /// list, so artwork bytes cannot change without failing verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artwork_assets: Option<Vec<PluginArtifactDigest>>,
     #[serde(default)]
     pub native_binaries: Vec<PluginArtifactDigest>,
 }
@@ -214,6 +224,10 @@ pub struct PluginInfo {
     pub name: String,
     pub version: String,
     pub description: Option<String>,
+    /// Host-decoded, normalized plugin logo. No package path or source bytes
+    /// cross the IPC boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_src: Option<String>,
     pub source: Option<String>,
     pub commit: Option<String>,
     pub installed_at: Option<String>,

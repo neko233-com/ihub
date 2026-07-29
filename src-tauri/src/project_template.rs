@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
 };
 
@@ -140,6 +140,7 @@ fn write_project_template(root: &Path, plugin_id: &str) -> Result<(), String> {
         "name": display_name,
         "version": "0.1.0",
         "description": format!("{} for iHub.", display_name),
+        "icon": "public/icon.png",
         "license": "MIT",
         "engines": {
             "ihub": ">=0.1.0",
@@ -154,7 +155,8 @@ fn write_project_template(root: &Path, plugin_id: &str) -> Result<(), String> {
                 "id": "open",
                 "title": format!("Open {}", display_name),
                 "subtitle": "Open this TypeScript + Vite plugin starter",
-                "keywords": ["typescript", "vite", "plugin", "starter"]
+                "keywords": ["typescript", "vite", "plugin", "starter"],
+                "icon": "public/icon.png"
             }]
         },
         "permissions": {}
@@ -189,7 +191,8 @@ fn write_project_template(root: &Path, plugin_id: &str) -> Result<(), String> {
     write_new_file(root, "src/main.ts", &main_source(&display_name))?;
     write_new_file(root, "src/ihub-bridge.ts", IHUB_BRIDGE_SOURCE)?;
     write_new_file(root, "src/style.css", STYLE_SOURCE)?;
-    write_new_file(root, "public/icon.svg", ICON_SVG)?;
+    let placeholder_icon = plugin_placeholder_png()?;
+    write_new_binary_file(root, "public/icon.png", &placeholder_icon)?;
     write_new_file(root, "worker/Cargo.toml", WORKER_CARGO_TOML)?;
     write_new_file(root, "worker/src/main.rs", WORKER_MAIN_SOURCE)?;
     write_new_file(root, "scripts/build-worker.ps1", BUILD_WORKER_PS1)?;
@@ -215,6 +218,66 @@ fn write_new_file(root: &Path, relative_path: &str, contents: &str) -> Result<()
         .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
     file.write_all(contents.as_bytes())
         .map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+fn write_new_binary_file(root: &Path, relative_path: &str, contents: &[u8]) -> Result<(), String> {
+    let path = root.join(relative_path);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    file.write_all(contents)
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+fn plugin_placeholder_png() -> Result<Vec<u8>, String> {
+    const SIZE: u32 = 128;
+    let mut image = image::RgbaImage::new(SIZE, SIZE);
+
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let corner_x = if x < 32 {
+            32_i32 - x as i32
+        } else if x >= 96 {
+            x as i32 - 95
+        } else {
+            0
+        };
+        let corner_y = if y < 32 {
+            32_i32 - y as i32
+        } else if y >= 96 {
+            y as i32 - 95
+        } else {
+            0
+        };
+        let in_rounded_tile = (10..118).contains(&x)
+            && (10..118).contains(&y)
+            && corner_x * corner_x + corner_y * corner_y <= 22 * 22;
+
+        *pixel = if !in_rounded_tile {
+            image::Rgba([0, 0, 0, 0])
+        } else if (33..61).contains(&x) && (33..61).contains(&y) {
+            image::Rgba([218, 226, 236, 255])
+        } else if (67..95).contains(&x) && (33..61).contains(&y) {
+            image::Rgba([166, 181, 199, 255])
+        } else if (33..61).contains(&x) && (67..95).contains(&y) {
+            image::Rgba([139, 157, 178, 255])
+        } else if ((76..86).contains(&x) && (67..95).contains(&y))
+            || ((67..95).contains(&x) && (76..86).contains(&y))
+        {
+            image::Rgba([241, 245, 249, 255])
+        } else {
+            image::Rgba([75, 85, 99, 255])
+        };
+    }
+
+    let mut output = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, image::ImageFormat::Png)
+        .map_err(|error| {
+            format!("Could not encode the generic plugin placeholder icon: {error}")
+        })?;
+    Ok(output.into_inner())
 }
 
 fn display_name_for(plugin_id: &str) -> String {
@@ -368,7 +431,9 @@ Build the frontend for iHub:
 pnpm build
 ```
 
-`pnpm build` ends with `scripts/verify-plugin.mjs`. That check reads only this project's `plugin.json`, built frontend entry, and any binary paths you explicitly declared. It does **not** install packages, launch the preview server, execute plugin code, or run a native worker. You can run the same read-only check on its own with `pnpm verify`.
+`pnpm build` ends with `scripts/verify-plugin.mjs`. That check reads only this project's `plugin.json`, built frontend entry, declared artwork, and any binary paths you explicitly declared. It does **not** install packages, launch the preview server, execute plugin code, or run a native worker. You can run the same read-only check on its own with `pnpm verify`.
+
+`public/icon.png` is deliberately a neutral plugin placeholder, not the iHub application logo and not a publishable brand identity. Replace it with your own PNG, JPEG, or WebP artwork before publishing. Keep artwork package-relative, at most 2 MiB, no larger than 1024×1024 or 1,048,576 pixels, and never use SVG or a symbolic link. Static command icons belong in `plugin.json`; runtime `registerCommand` calls cannot send icon paths or image payloads. The host may ignore an unusable command icon from a legacy package and show its safe fallback, while an invalid top-level `icon`/`logo` still prevents that package from loading.
 
 The supplied `.gitignore` intentionally leaves `dist/` visible to Git. iHub's GitHub importer reads the files committed at the chosen ref and never runs your package manager or build scripts, so a publishable plugin must include its built frontend output.
 
@@ -458,6 +523,7 @@ The TypeScript bridge exposes only host calls accepted by iHub. The Rust worker 
 ## Next steps
 
 - Replace `src/main.ts` and `src/style.css` with your product UI.
+- Replace the generic `public/icon.png` placeholder with your own plugin artwork before publishing.
 - Extend `src/ihub-bridge.ts` or migrate to the published SDK for more host APIs.
 - Add static commands, search providers, settings, and only the permissions you need in `plugin.json`.
 - Enable and replace the optional starter worker with OCR, FFmpeg, system automation, or another native capability only after building the target artifact.
@@ -472,6 +538,12 @@ const IHUB_BRIDGE_SOURCE: &str = r###"export interface CommandDefinition {
   subtitle?: string;
   keywords?: string[];
   execution?: "frontend" | "native";
+  /**
+   * Runtime registrations intentionally have no icon field. Declare artwork
+   * on the static command in plugin.json; the bridge never forwards image
+   * paths or payloads supplied by running frontend code.
+   */
+  readonly icon?: never;
 }
 
 export interface CommandInvocation {
@@ -780,7 +852,10 @@ export function createIHubBridge(pluginId: string): IHubBridge {
       }
       commandHandlers.set(definition.id, handler);
       try {
-        await call("commands.register", { definition });
+        const { icon: _ignoredIcon, ...hostDefinition } = definition as CommandDefinition & {
+          icon?: unknown;
+        };
+        await call("commands.register", { definition: hostDefinition });
       } catch (error) {
         commandHandlers.delete(definition.id);
         throw error;
@@ -960,13 +1035,21 @@ mod tests {
 }
 "###;
 
-const VERIFY_PLUGIN_MJS: &str = r###"import { existsSync, readFileSync, statSync } from "node:fs";
+const VERIFY_PLUGIN_MJS: &str = r###"import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(scriptDirectory, "..");
 const PLUGIN_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
+const ARTWORK_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const MAX_COMMANDS = 64;
+const MAX_ARTWORK_CANDIDATES = 32;
+const MAX_ARTWORK_BYTES = 2 * 1024 * 1024;
+const MAX_ARTWORK_EDGE = 1024;
+const MAX_ARTWORK_PIXELS = 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SUPPORTED_TARGETS = new Set([
   "windows-x86_64",
   "windows-aarch64",
@@ -1006,7 +1089,280 @@ function projectFile(label, declaredPath) {
   return resolved;
 }
 
+function safeArtworkComponents(label, declaredPath) {
+  if (typeof declaredPath !== "string" || !declaredPath) {
+    fail(label + " must be a non-empty package-relative artwork path.");
+  }
+  if (
+    isAbsolute(declaredPath) ||
+    declaredPath.startsWith("/") ||
+    declaredPath.startsWith("\\") ||
+    declaredPath.includes(":") ||
+    ARTWORK_CONTROL_CHARACTERS.test(declaredPath)
+  ) {
+    fail(label + " must be a safe package-relative artwork path.");
+  }
+
+  const components = declaredPath.split(/[\\/]/);
+  const unsafeComponent = components.find(
+    (component) =>
+      !component ||
+      component === "." ||
+      component === ".." ||
+      component.endsWith(".") ||
+      component.endsWith(" ") ||
+      WINDOWS_DEVICE_NAME.test(component),
+  );
+  if (unsafeComponent !== undefined) {
+    fail(
+      label +
+        " contains an empty/dot component, Windows device name, or trailing dot/space.",
+    );
+  }
+  return components;
+}
+
+function readArtwork(label, declaredPath, artworkCandidates) {
+  const components = safeArtworkComponents(label, declaredPath);
+  const candidate = components.join("/");
+  artworkCandidates.add(candidate);
+  if (artworkCandidates.size > MAX_ARTWORK_CANDIDATES) {
+    fail(
+      "plugin.json may reference at most " +
+        MAX_ARTWORK_CANDIDATES +
+        " distinct artwork files.",
+    );
+  }
+
+  const resolved = resolve(projectRoot, ...components);
+  const pathFromRoot = relative(projectRoot, resolved);
+  if (
+    !pathFromRoot ||
+    pathFromRoot === ".." ||
+    pathFromRoot.startsWith(".." + sep) ||
+    isAbsolute(pathFromRoot)
+  ) {
+    fail(label + " must stay inside the plugin project.");
+  }
+
+  let current = projectRoot;
+  for (const [index, component] of components.entries()) {
+    current = resolve(current, component);
+    let metadata;
+    try {
+      metadata = lstatSync(current);
+    } catch {
+      fail(label + " is missing: " + declaredPath);
+    }
+    if (metadata.isSymbolicLink()) {
+      fail(label + " must not use a symbolic link: " + declaredPath);
+    }
+    if (index < components.length - 1 && !metadata.isDirectory()) {
+      fail(label + " has a non-directory path component: " + declaredPath);
+    }
+    if (index === components.length - 1 && !metadata.isFile()) {
+      fail(label + " must reference a regular file: " + declaredPath);
+    }
+  }
+
+  const bytes = readFileSync(resolved);
+  if (bytes.length > MAX_ARTWORK_BYTES) {
+    fail(label + " must not exceed 2 MiB.");
+  }
+  const dimensions = decodeArtworkDimensions(label, bytes);
+  const [width, height] = dimensions;
+  if (
+    width < 1 ||
+    height < 1 ||
+    width > MAX_ARTWORK_EDGE ||
+    height > MAX_ARTWORK_EDGE ||
+    width * height > MAX_ARTWORK_PIXELS
+  ) {
+    fail(
+      label +
+        " dimensions must be at most 1024×1024 and 1,048,576 total pixels.",
+    );
+  }
+  return resolved;
+}
+
+function decodeArtworkDimensions(label, bytes) {
+  if (bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+    return decodePngDimensions(label, bytes);
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    return decodeJpegDimensions(label, bytes);
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return decodeWebpDimensions(label, bytes);
+  }
+  fail(label + " must contain PNG, JPEG, or WebP bytes; SVG is not accepted.");
+}
+
+function decodePngDimensions(label, bytes) {
+  let offset = 8;
+  let dimensions;
+  let sawImageData = false;
+  let sawEnd = false;
+
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + length;
+    if (chunkEnd > bytes.length) {
+      fail(label + " contains a truncated PNG chunk.");
+    }
+    const chunkType = bytes.toString("ascii", offset + 4, offset + 8);
+    if (offset === 8 && (chunkType !== "IHDR" || length !== 13)) {
+      fail(label + " has an invalid PNG header.");
+    }
+    if (chunkType === "IHDR") {
+      if (dimensions || length !== 13) {
+        fail(label + " has an invalid PNG header.");
+      }
+      dimensions = [
+        bytes.readUInt32BE(offset + 8),
+        bytes.readUInt32BE(offset + 12),
+      ];
+    } else if (chunkType === "IDAT") {
+      sawImageData = true;
+    } else if (chunkType === "IEND") {
+      if (length !== 0 || chunkEnd !== bytes.length) {
+        fail(label + " has an invalid PNG end chunk.");
+      }
+      sawEnd = true;
+      break;
+    }
+    offset = chunkEnd;
+  }
+
+  if (!dimensions || !sawImageData || !sawEnd) {
+    fail(label + " is a malformed or incomplete PNG.");
+  }
+  return dimensions;
+}
+
+function decodeJpegDimensions(label, bytes) {
+  if (bytes.length < 12 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) {
+    fail(label + " is a malformed or incomplete JPEG.");
+  }
+
+  let offset = 2;
+  while (offset + 1 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      fail(label + " contains an invalid JPEG marker.");
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) {
+      offset += 1;
+    }
+    const marker = bytes[offset++];
+    if (marker === 0xd9) {
+      break;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      continue;
+    }
+    if (offset + 2 > bytes.length) {
+      fail(label + " contains a truncated JPEG segment.");
+    }
+    const segmentLength = bytes.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) {
+      fail(label + " contains an invalid JPEG segment.");
+    }
+    const isStartOfFrame =
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf);
+    if (isStartOfFrame) {
+      if (segmentLength < 8) {
+        fail(label + " contains an invalid JPEG frame header.");
+      }
+      return [bytes.readUInt16BE(offset + 5), bytes.readUInt16BE(offset + 3)];
+    }
+    if (marker === 0xda) {
+      fail(label + " has JPEG image data before a valid frame header.");
+    }
+    offset += segmentLength;
+  }
+  fail(label + " does not contain a supported JPEG frame.");
+}
+
+function decodeWebpDimensions(label, bytes) {
+  const riffLength = bytes.readUInt32LE(4) + 8;
+  if (riffLength !== bytes.length) {
+    fail(label + " contains an invalid or truncated WebP RIFF container.");
+  }
+
+  let offset = 12;
+  let canvasDimensions;
+  while (offset + 8 <= bytes.length) {
+    const chunkType = bytes.toString("ascii", offset, offset + 4);
+    const chunkLength = bytes.readUInt32LE(offset + 4);
+    const payload = offset + 8;
+    const chunkEnd = payload + chunkLength;
+    if (chunkEnd > bytes.length) {
+      fail(label + " contains a truncated WebP chunk.");
+    }
+
+    if (chunkType === "VP8X") {
+      if (chunkLength !== 10) {
+        fail(label + " contains an invalid WebP extended header.");
+      }
+      canvasDimensions = [
+        1 + bytes.readUIntLE(payload + 4, 3),
+        1 + bytes.readUIntLE(payload + 7, 3),
+      ];
+    } else if (chunkType === "VP8 ") {
+      if (
+        chunkLength < 10 ||
+        bytes[payload + 3] !== 0x9d ||
+        bytes[payload + 4] !== 0x01 ||
+        bytes[payload + 5] !== 0x2a
+      ) {
+        fail(label + " contains an invalid WebP VP8 frame.");
+      }
+      const dimensions = [
+        bytes.readUInt16LE(payload + 6) & 0x3fff,
+        bytes.readUInt16LE(payload + 8) & 0x3fff,
+      ];
+      if (
+        canvasDimensions &&
+        (canvasDimensions[0] !== dimensions[0] || canvasDimensions[1] !== dimensions[1])
+      ) {
+        fail(label + " has inconsistent WebP dimensions.");
+      }
+      return canvasDimensions || dimensions;
+    } else if (chunkType === "VP8L") {
+      if (chunkLength < 5 || bytes[payload] !== 0x2f) {
+        fail(label + " contains an invalid WebP lossless frame.");
+      }
+      const dimensions = [
+        1 + bytes[payload + 1] + ((bytes[payload + 2] & 0x3f) << 8),
+        1 +
+          (bytes[payload + 2] >> 6) +
+          (bytes[payload + 3] << 2) +
+          ((bytes[payload + 4] & 0x0f) << 10),
+      ];
+      if (
+        canvasDimensions &&
+        (canvasDimensions[0] !== dimensions[0] || canvasDimensions[1] !== dimensions[1])
+      ) {
+        fail(label + " has inconsistent WebP dimensions.");
+      }
+      return canvasDimensions || dimensions;
+    }
+
+    offset = chunkEnd + (chunkLength & 1);
+  }
+  fail(label + " does not contain a supported WebP image frame.");
+}
+
 try {
+  const artworkCandidates = new Set();
   const manifestPath = projectFile("plugin.json", "plugin.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (!isRecord(manifest)) {
@@ -1021,6 +1377,15 @@ try {
   if (!isRecord(manifest.permissions)) {
     fail("plugin.json permissions must be an object, even when it is empty.");
   }
+  if (manifest.icon !== undefined && manifest.logo !== undefined) {
+    fail("plugin.json must declare only one of icon or logo.");
+  }
+  if (manifest.icon !== undefined) {
+    readArtwork("icon", manifest.icon, artworkCandidates);
+  }
+  if (manifest.logo !== undefined) {
+    readArtwork("logo", manifest.logo, artworkCandidates);
+  }
 
   const frontend = manifest.entry && manifest.entry.frontend;
   const frontendFile = projectFile("entry.frontend", frontend);
@@ -1032,10 +1397,20 @@ try {
   if (commands !== undefined && !Array.isArray(commands)) {
     fail("contributes.commands must be an array when present.");
   }
+  if ((commands || []).length > MAX_COMMANDS) {
+    fail("contributes.commands must contain at most " + MAX_COMMANDS + " entries.");
+  }
   let nativeCommands = 0;
   for (const [index, command] of (commands || []).entries()) {
     if (!isRecord(command) || typeof command.id !== "string" || !command.id.trim()) {
       fail("contributes.commands[" + index + "] needs an id.");
+    }
+    if (command.icon !== undefined) {
+      readArtwork(
+        "contributes.commands[" + index + "].icon",
+        command.icon,
+        artworkCandidates,
+      );
     }
     if (command.execution !== undefined && command.execution !== "frontend" && command.execution !== "native") {
       fail("contributes.commands[" + index + "].execution must be frontend or native.");
@@ -1437,23 +1812,15 @@ button {
 }
 "##;
 
-const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="iHub plugin">
-  <defs>
-    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
-      <stop stop-color="#aebaff" />
-      <stop offset="1" stop-color="#6de8cb" />
-    </linearGradient>
-  </defs>
-  <rect width="128" height="128" rx="30" fill="#10182e" />
-  <path d="M36 42h56v13H72v18h20v13H72v18H56V55H36z" fill="url(#g)" />
-</svg>
-"##;
-
 const GITIGNORE: &str = "node_modules/\nworker/target/\n.DS_Store\n.env\n.env.*\n!.env.example\n";
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Output},
+    };
 
     use super::{create_plugin_project, validate_plugin_id};
 
@@ -1464,6 +1831,57 @@ mod tests {
         ));
         fs::create_dir(&parent).expect("temporary parent should be created");
         parent
+    }
+
+    fn verifier_project(label: &str) -> (PathBuf, PathBuf) {
+        let parent = temporary_parent(label);
+        let parent_text = parent.to_string_lossy().into_owned();
+        create_plugin_project(&parent_text, "ihub-plugin-demo").expect("template");
+        let project = parent.join("ihub-plugin-demo");
+        fs::create_dir(project.join("dist")).expect("dist directory");
+        fs::write(project.join("dist/index.html"), "<!doctype html>")
+            .expect("built frontend placeholder");
+        (parent, project)
+    }
+
+    fn run_verifier(project: &Path) -> Output {
+        Command::new("node")
+            .arg("scripts/verify-plugin.mjs")
+            .current_dir(project)
+            .output()
+            .expect("Node.js must be available to exercise the generated verifier")
+    }
+
+    fn verifier_output(output: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    fn manifest(project: &Path) -> serde_json::Value {
+        let contents =
+            fs::read_to_string(project.join("plugin.json")).expect("generated manifest contents");
+        serde_json::from_str(&contents).expect("generated manifest JSON")
+    }
+
+    fn write_manifest(project: &Path, manifest: &serde_json::Value) {
+        let contents = serde_json::to_string_pretty(manifest).expect("manifest serialization");
+        fs::write(project.join("plugin.json"), format!("{contents}\n")).expect("updated manifest");
+    }
+
+    fn assert_verifier_fails(project: &Path, expected: &str) {
+        let output = run_verifier(project);
+        let combined = verifier_output(&output);
+        assert!(
+            !output.status.success(),
+            "verifier unexpectedly succeeded:\n{combined}"
+        );
+        assert!(
+            combined.contains(expected),
+            "expected verifier output to contain {expected:?}, got:\n{combined}"
+        );
     }
 
     #[test]
@@ -1485,7 +1903,22 @@ mod tests {
         assert!(project.join("plugin.json").is_file());
         assert!(project.join("src/main.ts").is_file());
         assert!(project.join("src/ihub-bridge.ts").is_file());
-        assert!(project.join("public/icon.svg").is_file());
+        assert!(project.join("public/icon.png").is_file());
+        assert!(
+            fs::read(project.join("public/icon.png"))
+                .expect("generated icon")
+                .starts_with(b"\x89PNG\r\n\x1a\n"),
+            "the generated manifest artwork must be a real raster PNG"
+        );
+        let generated_icon = fs::read(project.join("public/icon.png")).expect("generated icon");
+        assert_ne!(
+            generated_icon.as_slice(),
+            include_bytes!("../icons/128x128.png"),
+            "the plugin starter must not reuse the branded iHub app logo"
+        );
+        let decoded_icon =
+            image::load_from_memory(&generated_icon).expect("generated placeholder should decode");
+        assert_eq!((decoded_icon.width(), decoded_icon.height()), (128, 128));
         assert!(project.join("worker/Cargo.toml").is_file());
         assert!(project.join("worker/src/main.rs").is_file());
         assert!(project.join("scripts/build-worker.ps1").is_file());
@@ -1507,7 +1940,12 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(&manifest).expect("generated manifest should be JSON");
         assert!(manifest.get("backend").is_none());
+        assert_eq!(manifest["icon"], "public/icon.png");
         assert_eq!(manifest["contributes"]["commands"][0]["id"], "open");
+        assert_eq!(
+            manifest["contributes"]["commands"][0]["icon"],
+            "public/icon.png"
+        );
         assert_eq!(manifest["activationEvents"][0], "onCommand:open");
 
         let bridge = fs::read_to_string(project.join("src/ihub-bridge.ts"))
@@ -1525,6 +1963,8 @@ mod tests {
         assert!(bridge.contains("native.runCommand"));
         assert!(bridge.contains("NATIVE_COMMAND_CALL_TIMEOUT_MS"));
         assert!(bridge.contains("require the iHub desktop host"));
+        assert!(bridge.contains("Runtime registrations intentionally have no icon field"));
+        assert!(bridge.contains("definition: hostDefinition"));
 
         let readme = fs::read_to_string(project.join("README.md")).expect("generated README");
         assert!(readme.contains("screenCapture"));
@@ -1539,6 +1979,9 @@ mod tests {
         assert!(readme.contains("Open project folder"));
         assert!(readme.contains("GitHub importer reads a committed Git snapshot only"));
         assert!(readme.contains("dist/` visible to Git"));
+        assert!(readme.contains("neutral plugin placeholder"));
+        assert!(readme.contains("Replace it with your own PNG, JPEG, or WebP artwork"));
+        assert!(readme.contains("legacy package"));
 
         let gitignore =
             fs::read_to_string(project.join(".gitignore")).expect("generated gitignore");
@@ -1553,6 +1996,11 @@ mod tests {
         assert!(verifier.contains("SUPPORTED_TARGETS"));
         assert!(verifier.contains("schemaVersion must be 1"));
         assert!(verifier.contains("execution: native"));
+        assert!(verifier.contains("MAX_COMMANDS = 64"));
+        assert!(verifier.contains("MAX_ARTWORK_CANDIDATES = 32"));
+        assert!(verifier.contains("lstatSync"));
+        assert!(verifier.contains("isSymbolicLink"));
+        assert!(verifier.contains("decodeWebpDimensions"));
         assert!(!verifier.contains("spawn("));
         assert!(!verifier.contains("exec("));
 
@@ -1581,6 +2029,197 @@ mod tests {
             .next_steps
             .iter()
             .any(|step| step.contains("GitHub import")));
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn generated_verifier_accepts_bounded_png_jpeg_and_webp_artwork() {
+        let (parent, project) = verifier_project("artwork-positive");
+
+        let initial = run_verifier(&project);
+        assert!(
+            initial.status.success(),
+            "generated PNG placeholder should verify:\n{}",
+            verifier_output(&initial)
+        );
+
+        let pixels = [
+            90, 110, 130, 90, 110, 130, 90, 110, 130, 90, 110, 130, 90, 110, 130, 90, 110, 130,
+        ];
+        for (file_name, format) in [
+            ("positive.jpg", image::ImageFormat::Jpeg),
+            ("positive.webp", image::ImageFormat::WebP),
+        ] {
+            let path = project.join("public").join(file_name);
+            image::save_buffer_with_format(&path, &pixels, 2, 3, image::ColorType::Rgb8, format)
+                .expect("test raster encoding");
+
+            let mut manifest = manifest(&project);
+            let declared_path = format!("public/{file_name}");
+            manifest["icon"] = serde_json::json!(declared_path);
+            manifest["contributes"]["commands"][0]["icon"] = serde_json::json!(declared_path);
+            write_manifest(&project, &manifest);
+
+            let output = run_verifier(&project);
+            assert!(
+                output.status.success(),
+                "{file_name} should verify:\n{}",
+                verifier_output(&output)
+            );
+        }
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn generated_verifier_rejects_unsafe_artwork_paths() {
+        let (parent, project) = verifier_project("artwork-paths");
+        let original = manifest(&project);
+        let unsafe_paths = [
+            ("/absolute.png", "safe package-relative artwork path"),
+            ("public/../icon.png", "empty/dot component"),
+            ("public/./icon.png", "empty/dot component"),
+            ("public//icon.png", "empty/dot component"),
+            ("public/CON.png", "Windows device name"),
+            ("public/com1.any", "Windows device name"),
+            ("public/icon.", "trailing dot/space"),
+            ("public/icon ", "trailing dot/space"),
+            (
+                "public/name:stream.png",
+                "safe package-relative artwork path",
+            ),
+            (
+                "public/\u{0000}icon.png",
+                "safe package-relative artwork path",
+            ),
+            (
+                "public/\u{0085}icon.png",
+                "safe package-relative artwork path",
+            ),
+        ];
+
+        for (declared_path, expected) in unsafe_paths {
+            let mut changed = original.clone();
+            changed["icon"] = serde_json::json!(declared_path);
+            write_manifest(&project, &changed);
+            assert_verifier_fails(&project, expected);
+        }
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn generated_verifier_rejects_svg_malformed_oversized_and_huge_rasters() {
+        let (parent, project) = verifier_project("artwork-content");
+        let original = manifest(&project);
+
+        fs::write(
+            project.join("public/vector.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#,
+        )
+        .expect("SVG fixture");
+        let mut changed = original.clone();
+        changed["icon"] = serde_json::json!("public/vector.svg");
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "SVG is not accepted");
+
+        fs::write(
+            project.join("public/malformed.png"),
+            b"\x89PNG\r\n\x1a\nnot-a-png",
+        )
+        .expect("malformed PNG fixture");
+        changed["icon"] = serde_json::json!("public/malformed.png");
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "malformed or incomplete PNG");
+
+        let mut oversized = vec![0_u8; 2 * 1024 * 1024 + 1];
+        oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        fs::write(project.join("public/oversized.png"), oversized).expect("oversized PNG fixture");
+        changed["icon"] = serde_json::json!("public/oversized.png");
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "must not exceed 2 MiB");
+
+        let huge_pixels = vec![128_u8; 1025 * 4];
+        image::save_buffer_with_format(
+            project.join("public/too-wide.png"),
+            &huge_pixels,
+            1025,
+            1,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .expect("wide PNG fixture");
+        changed["icon"] = serde_json::json!("public/too-wide.png");
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "dimensions must be at most 1024×1024");
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn generated_verifier_enforces_command_and_artwork_candidate_limits() {
+        let (parent, project) = verifier_project("artwork-limits");
+        let mut changed = manifest(&project);
+        changed["contributes"]["commands"] = serde_json::Value::Array(
+            (0..65)
+                .map(|index| {
+                    serde_json::json!({
+                        "id": format!("command-{index}"),
+                        "title": format!("Command {index}")
+                    })
+                })
+                .collect(),
+        );
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "must contain at most 64 entries");
+
+        changed
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("icon");
+        let placeholder = fs::read(project.join("public/icon.png")).expect("placeholder");
+        changed["contributes"]["commands"] = serde_json::Value::Array(
+            (0..33)
+                .map(|index| {
+                    let file_name = format!("candidate-{index}.png");
+                    fs::write(project.join("public").join(&file_name), &placeholder)
+                        .expect("candidate artwork");
+                    serde_json::json!({
+                        "id": format!("command-{index}"),
+                        "title": format!("Command {index}"),
+                        "icon": format!("public/{file_name}")
+                    })
+                })
+                .collect(),
+        );
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "at most 32 distinct artwork files");
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn generated_verifier_rejects_symbolic_link_artwork_when_supported() {
+        let (parent, project) = verifier_project("artwork-symlink");
+        let link = project.join("public/icon-link.png");
+        let target = project.join("public/icon.png");
+
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&target, &link);
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_file(&target, &link);
+
+        if let Err(error) = link_result {
+            eprintln!("symbolic-link test skipped because this host denied link creation: {error}");
+            let _ = fs::remove_dir_all(parent);
+            return;
+        }
+
+        let mut changed = manifest(&project);
+        changed["icon"] = serde_json::json!("public/icon-link.png");
+        write_manifest(&project, &changed);
+        assert_verifier_fails(&project, "must not use a symbolic link");
 
         let _ = fs::remove_dir_all(parent);
     }

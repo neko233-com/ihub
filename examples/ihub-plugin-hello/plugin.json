@@ -21,8 +21,7 @@
         "id": "hello",
         "title": "Say hello",
         "subtitle": "Show a greeting from the Hello plugin",
-        "keywords": ["hello", "hi", "example"],
-        "icon": "public/icon.svg"
+        "keywords": ["hello", "hi", "example"]
       }
     ],
     "searchProviders": [

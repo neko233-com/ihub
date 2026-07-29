@@ -1,6 +1,6 @@
 import type {
   BootstrapOptions,
-  CommandDefinition,
+  RuntimeCommandDefinition,
   CommandHandler,
   CommandInvocation,
   CommandResult,
@@ -372,7 +372,7 @@ class Runtime implements Disposable {
     await this.bridge.call({ pluginId: this.pluginId, method: "lifecycle.dispose" }).catch(this.onError);
   }
 
-  private async registerCommand(definition: CommandDefinition, handler: CommandHandler): Promise<Disposable> {
+  private async registerCommand(definition: RuntimeCommandDefinition, handler: CommandHandler): Promise<Disposable> {
     this.assertActive();
     if (this.commandHandlers.has(definition.id)) {
       throw new Error(`Command \"${definition.id}\" is already registered by ${this.pluginId}.`);
@@ -380,7 +380,13 @@ class Runtime implements Disposable {
 
     await this.ensureCommandListener();
     this.commandHandlers.set(definition.id, handler);
-    await this.call("commands.register", { definition: json(definition) });
+    // Runtime registrations must never turn an iframe-provided string into a
+    // package artwork path. Keep this defensive strip even though the public
+    // RuntimeCommandDefinition type rejects `icon` at compile time.
+    const { icon: _ignoredIcon, ...hostDefinition } = definition as RuntimeCommandDefinition & {
+      icon?: unknown;
+    };
+    await this.call("commands.register", { definition: json(hostDefinition) });
     return this.registrationDisposable(
       "commands.unregister",
       definition.id,

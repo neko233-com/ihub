@@ -23,6 +23,7 @@ use crate::models::{
     PluginSnapshotIntegrity, PluginSourceLock, PluginUninstallResult, PluginUpdateCheck,
     PluginUpdateResult,
 };
+use crate::plugin_artwork::{load_plugin_artwork, validate_artwork_relative_path, PluginArtwork};
 
 const MANIFEST_NAMES: [&str; 2] = ["ihub.plugin.json", "plugin.json"];
 /// The immutable provenance captured for every newly imported Git snapshot.
@@ -75,6 +76,18 @@ const MAX_SEARCH_PROVIDERS_PER_PLUGIN: usize = 32;
 /// session-only secret setting map unbounded.
 const MAX_SETTINGS_PER_PLUGIN: usize = 128;
 const MAX_DEVELOPMENT_LAUNCHER_MARKER_BYTES: u64 = 64 * 1024;
+/// Commands are projected into one Tauri IPC response. Keeping this bounded
+/// prevents a manifest from multiplying even one reused artwork data URL into
+/// an unbounded renderer payload.
+const MAX_COMMANDS_PER_PLUGIN: usize = 64;
+/// A plugin may reuse one image for every command, but distinct decoded
+/// artwork remains bounded so listing plugins cannot create an oversized IPC
+/// response or unbounded decode workload.
+const MAX_ARTWORK_FILES_PER_PLUGIN: usize = 32;
+/// Command artwork is optional identity metadata. Once the serialized image
+/// budget is exhausted, later commands safely inherit the plugin icon or the
+/// renderer's neutral fallback instead of expanding the IPC response.
+const MAX_PROJECTED_ARTWORK_DATA_URL_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct OfficialWorkspacePluginSpec {
@@ -218,6 +231,11 @@ struct PluginManifest {
     #[serde(default = "default_version")]
     version: String,
     description: Option<String>,
+    /// Preferred v1 package artwork declaration.
+    icon: Option<String>,
+    /// Backward-compatible naming alias. Validation rejects declaring both so
+    /// the displayed identity is never order-dependent.
+    logo: Option<String>,
     /// Legacy frontend declaration. v1 manifests use `entry.frontend` instead.
     frontend: Option<FrontendDeclaration>,
     entry: Option<EntryDeclaration>,
@@ -434,6 +452,9 @@ struct PluginCommandDeclaration {
     title: Option<String>,
     description: Option<String>,
     subtitle: Option<String>,
+    /// Package-relative artwork. Rust decodes and normalizes it before any
+    /// value crosses into the WebView.
+    icon: Option<String>,
     /// Commands in a plugin that also bundles a native worker can still be
     /// entry points into its UI. Omitted values preserve the v1 behavior:
     /// commands are native when the plugin has a native worker, frontend
@@ -589,16 +610,33 @@ impl PluginManager {
             eprintln!("iHub could not read plugin lifecycle state: {error}");
             PluginLifecycleStore::default()
         });
+        let storage_root = self.root.as_ref().canonicalize().ok();
         let mut plugins = fs::read_dir(self.root.as_ref())
             .ok()
             .into_iter()
             .flat_map(|entries| entries.flatten())
             .filter_map(|entry| {
-                let path = entry.path();
-                if !path.is_dir() || is_internal_dir(&path) {
+                let entry_path = entry.path();
+                if !entry_path.is_dir() || is_internal_dir(&entry_path) {
                     return None;
                 }
-                self.read_plugin_info_with_lifecycle(&path, &lifecycle).ok()
+                let path = entry_path.canonicalize().ok()?;
+                let storage_root = storage_root.as_ref()?;
+                if !path.is_dir() || ensure_path_within(&path, storage_root, "Plugin root").is_err()
+                {
+                    return None;
+                }
+                // Management metadata remains visible when a managed snapshot
+                // is damaged, but unverified bytes must never become its
+                // launcher identity. A matching (or absent legacy) lock may
+                // project artwork; a failed lock gets the same safe fallback
+                // glyphs as a plugin without artwork.
+                if self.verify_managed_snapshot_integrity(&path).is_ok() {
+                    self.read_plugin_info_with_lifecycle(&path, &lifecycle).ok()
+                } else {
+                    self.read_plugin_info_without_artwork_with_lifecycle(&path, &lifecycle)
+                        .ok()
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1181,6 +1219,10 @@ impl PluginManager {
             )
         })?;
         ensure_path_within(package_root, &local_root, "Plugin package")?;
+        // Validate every declared image before persisting the development
+        // link. A broken or hostile artwork declaration must not leave behind
+        // a link record that only fails on the next list refresh.
+        load_manifest_artwork(package_root, &manifest)?;
 
         let mut links = self.read_local_links()?;
         if let Some((other_id, _)) = links.links.iter().find(|(linked_id, link)| {
@@ -2103,7 +2145,9 @@ impl PluginManager {
         let package_root = manifest_path
             .parent()
             .ok_or_else(|| format!("Plugin '{plugin_id}' has an invalid manifest path."))?;
-        ensure_path_within(package_root, plugin_root, "Plugin package")
+        ensure_path_within(package_root, plugin_root, "Plugin package")?;
+        load_manifest_artwork(package_root, &manifest)?;
+        Ok(())
     }
 
     fn read_plugin_info_for_id_with_lifecycle(
@@ -2314,6 +2358,7 @@ impl PluginManager {
                 description: link.description.clone().or_else(|| {
                     Some("本地开发链接已失效；解除链接后可重新安装此插件。".to_owned())
                 }),
+                icon_src: None,
                 source: Some(format!("local:{}", link.canonical_path)),
                 commit: None,
                 installed_at: Some(link.linked_at.clone()),
@@ -2348,21 +2393,66 @@ impl PluginManager {
         directory: &Path,
         lifecycle: &PluginLifecycleStore,
     ) -> Result<PluginInfo, String> {
+        self.read_plugin_info_projection(directory, lifecycle, true)
+    }
+
+    fn read_plugin_info_without_artwork_with_lifecycle(
+        &self,
+        directory: &Path,
+        lifecycle: &PluginLifecycleStore,
+    ) -> Result<PluginInfo, String> {
+        self.read_plugin_info_projection(directory, lifecycle, false)
+    }
+
+    fn read_plugin_info_projection(
+        &self,
+        directory: &Path,
+        lifecycle: &PluginLifecycleStore,
+        include_artwork: bool,
+    ) -> Result<PluginInfo, String> {
         let manifest_path = find_manifest(directory)
             .ok_or_else(|| format!("{} has no plugin manifest", directory.display()))?;
         let manifest = read_manifest(&manifest_path)?;
         validate_manifest(&manifest)?;
+        let package_root = manifest_path
+            .parent()
+            .ok_or_else(|| "Plugin manifest has no package directory.".to_owned())?;
+        let artwork = if include_artwork {
+            load_manifest_artwork(package_root, &manifest)?
+        } else {
+            BTreeMap::new()
+        };
+        let icon_src = manifest_artwork_path(&manifest)
+            .and_then(|path| artwork.get(path))
+            .map(|artwork| artwork.data_url.clone());
+        let mut projected_artwork_bytes = icon_src.as_ref().map_or(0, String::len);
         let source = read_source_metadata(directory).ok();
         let commands = declared_commands(&manifest)
             .iter()
-            .map(|command| PluginCommandInfo {
-                id: command.id.clone(),
-                name: command_display_name(command),
-                description: command
-                    .description
-                    .clone()
-                    .or_else(|| command.subtitle.clone()),
-                execution: command_execution(&manifest, command).as_str().to_owned(),
+            .map(|command| {
+                let icon_src = command
+                    .icon
+                    .as_deref()
+                    .and_then(|path| artwork.get(path))
+                    .and_then(|artwork| {
+                        let next_bytes =
+                            projected_artwork_bytes.saturating_add(artwork.data_url.len());
+                        if next_bytes > MAX_PROJECTED_ARTWORK_DATA_URL_BYTES {
+                            return None;
+                        }
+                        projected_artwork_bytes = next_bytes;
+                        Some(artwork.data_url.clone())
+                    });
+                PluginCommandInfo {
+                    id: command.id.clone(),
+                    name: command_display_name(command),
+                    description: command
+                        .description
+                        .clone()
+                        .or_else(|| command.subtitle.clone()),
+                    icon_src,
+                    execution: command_execution(&manifest, command).as_str().to_owned(),
+                }
             })
             .collect::<Vec<_>>();
         let has_native_worker = manifest_has_native_worker(&manifest);
@@ -2391,6 +2481,7 @@ impl PluginManager {
             name: manifest.name,
             version: manifest.version,
             description: manifest.description,
+            icon_src,
             source: source.as_ref().map(|record| record.source.clone()),
             commit: source
                 .as_ref()
@@ -3259,7 +3350,11 @@ const SNAPSHOT_HASH_ALGORITHM: &str = "sha256";
 /// Git snapshot was imported. It deliberately covers the complete dedicated
 /// frontend asset directory (not only index.html) because plugin JavaScript
 /// can lazily import any sibling bundle file served by the loopback server.
-/// Native workers are limited to paths declared in the validated manifest.
+/// Native workers and standalone artwork are limited to paths declared in the
+/// validated manifest. New top-level artwork is decoded here as well as
+/// hashed, so an unsupported or malformed identity image fails while a remote
+/// snapshot is still in staging. Legacy command artwork remains optional and
+/// safely falls back when it is not a supported raster.
 fn snapshot_integrity(
     plugin_root: &Path,
     manifest_path: &Path,
@@ -3278,11 +3373,13 @@ fn snapshot_integrity(
     ensure_path_within(package_root, &plugin_root, "Plugin package")?;
 
     let frontend_assets = snapshot_frontend_assets(package_root, manifest)?;
+    let artwork_assets = snapshot_artwork_assets(package_root, manifest)?;
     let native_binaries = snapshot_native_binaries(package_root, manifest)?;
     Ok(PluginSnapshotIntegrity {
         algorithm: SNAPSHOT_HASH_ALGORITHM.to_owned(),
         manifest_sha256: sha256_file(&manifest_path)?,
         frontend_assets,
+        artwork_assets: Some(artwork_assets),
         native_binaries,
     })
 }
@@ -3342,6 +3439,27 @@ fn snapshot_native_binaries(
             Ok(PluginArtifactDigest {
                 path,
                 sha256: sha256_file(&binary)?,
+            })
+        })
+        .collect()
+}
+
+fn snapshot_artwork_assets(
+    package_root: &Path,
+    manifest: &PluginManifest,
+) -> Result<Vec<PluginArtifactDigest>, String> {
+    let artwork = load_manifest_artwork(package_root, manifest)?;
+    let mut paths = BTreeMap::<String, PathBuf>::new();
+    for image in artwork.values() {
+        let relative = normalized_package_relative_path(package_root, &image.canonical_path)?;
+        paths.insert(relative, image.canonical_path.clone());
+    }
+    paths
+        .into_iter()
+        .map(|(path, source)| {
+            Ok(PluginArtifactDigest {
+                path,
+                sha256: sha256_file(&source)?,
             })
         })
         .collect()
@@ -3498,7 +3616,19 @@ fn verify_snapshot_integrity(
     let manifest = read_manifest(&manifest_path)?;
     validate_manifest(&manifest)?;
     let actual = snapshot_integrity(plugin_root, &manifest_path, &manifest)?;
-    if actual == *expected {
+    // Locks written before artwork integrity existed intentionally omit the
+    // field. They retain their previous verification guarantees after an app
+    // upgrade; every new import writes `Some`, even when the list is empty.
+    let artwork_matches = match expected.artwork_assets.as_ref() {
+        Some(artwork) => actual.artwork_assets.as_ref() == Some(artwork),
+        None => true,
+    };
+    if expected.algorithm == actual.algorithm
+        && expected.manifest_sha256 == actual.manifest_sha256
+        && expected.frontend_assets == actual.frontend_assets
+        && artwork_matches
+        && expected.native_binaries == actual.native_binaries
+    {
         return Ok(());
     }
 
@@ -3506,6 +3636,8 @@ fn verify_snapshot_integrity(
         "manifest"
     } else if expected.frontend_assets != actual.frontend_assets {
         "frontend bundle"
+    } else if !artwork_matches {
+        "plugin artwork"
     } else {
         "native worker"
     };
@@ -3526,6 +3658,9 @@ fn validate_snapshot_integrity(integrity: &PluginSnapshotIntegrity) -> Result<()
         return Err("Plugin snapshot integrity has an invalid manifest SHA-256.".to_owned());
     }
     validate_artifact_digests(&integrity.frontend_assets, "frontend")?;
+    if let Some(artwork) = integrity.artwork_assets.as_ref() {
+        validate_artifact_digests(artwork, "artwork")?;
+    }
     validate_artifact_digests(&integrity.native_binaries, "native")?;
     Ok(())
 }
@@ -3636,6 +3771,59 @@ fn read_source_metadata(directory: &Path) -> Result<SourceMetadata, String> {
     })
 }
 
+fn manifest_artwork_path(manifest: &PluginManifest) -> Option<&str> {
+    manifest.icon.as_deref().or(manifest.logo.as_deref())
+}
+
+/// Strictly decodes the top-level identity and best-effort decodes a bounded
+/// set of distinct command images once for one plugin projection. Returned
+/// values contain only canonical host paths (for integrity hashing) and
+/// normalized PNG data URLs (for IPC); original bytes and manifest paths are
+/// never serialized to the renderer.
+fn load_manifest_artwork(
+    package_root: &Path,
+    manifest: &PluginManifest,
+) -> Result<BTreeMap<String, PluginArtwork>, String> {
+    let mut loaded = BTreeMap::new();
+    let mut attempted_paths = BTreeSet::new();
+
+    // Top-level artwork is a new identity declaration and therefore strict:
+    // a package that explicitly opts into it must provide a valid raster.
+    if let Some(path) = manifest_artwork_path(manifest) {
+        attempted_paths.insert(path);
+        loaded.insert(
+            path.to_owned(),
+            load_plugin_artwork(package_root, path, "plugin icon")?,
+        );
+    }
+
+    // commands[].icon existed before the native artwork pipeline and older
+    // packages commonly point it at SVG. Those packages must keep working
+    // after an iHub upgrade. Treat command artwork as best-effort metadata:
+    // unsafe, missing, unsupported, or over-budget candidates are never read
+    // into the WebView and simply use the plugin/fallback glyph.
+    for command in declared_commands(manifest) {
+        let Some(path) = command.icon.as_deref() else {
+            continue;
+        };
+        if attempted_paths.contains(path) {
+            continue;
+        }
+        if attempted_paths.len() >= MAX_ARTWORK_FILES_PER_PLUGIN {
+            break;
+        }
+        attempted_paths.insert(path);
+        if let Ok(artwork) = load_plugin_artwork(
+            package_root,
+            path,
+            &format!("icon for plugin command '{}'", command.id),
+        ) {
+            loaded.insert(path.to_owned(), artwork);
+        }
+    }
+    Ok(loaded)
+}
+
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if !is_valid_identifier(&manifest.id) {
         return Err(
@@ -3645,6 +3833,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if manifest.name.trim().is_empty() {
         return Err("Plugin manifest name cannot be empty.".to_owned());
     }
+    if manifest.icon.is_some() && manifest.logo.is_some() {
+        return Err("Plugin manifest must declare only one of 'icon' or 'logo'.".to_owned());
+    }
+    if let Some(path) = manifest_artwork_path(manifest) {
+        validate_artwork_relative_path(path)?;
+    }
     if let Some(channel) = manifest.update.channel.as_deref() {
         if !matches!(channel, "stable" | "beta") {
             return Err(format!(
@@ -3652,8 +3846,14 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
             ));
         }
     }
+    let commands = declared_commands(manifest);
+    if commands.len() > MAX_COMMANDS_PER_PLUGIN {
+        return Err(format!(
+            "Plugin declares more than {MAX_COMMANDS_PER_PLUGIN} commands."
+        ));
+    }
     let mut command_ids = std::collections::HashSet::new();
-    for command in declared_commands(manifest) {
+    for command in commands {
         if !is_valid_identifier(&command.id) {
             return Err(format!("Plugin command ID '{}' is invalid.", command.id));
         }
@@ -4394,13 +4594,20 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+
+    use crate::models::PluginSourceLock;
+
     use super::{
         automatic_update_skip_reason, command_execution, command_timeout,
         configure_git_command_environment, ensure_update_security_declaration_matches,
-        is_trusted_official_auto_update_source, parse_git_source, parse_jsonl_rpc_response,
-        resolve_official_workspace_plugin_at, validate_manifest, wait_for_child_with_timeout,
+        is_trusted_official_auto_update_source, load_manifest_artwork, parse_git_source,
+        parse_jsonl_rpc_response, resolve_official_workspace_plugin_at, snapshot_integrity,
+        validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
         ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
         PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
+        MAX_COMMANDS_PER_PLUGIN, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
         OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
     };
 
@@ -4437,6 +4644,34 @@ mod tests {
             ),
         )
         .expect("manifest should be written");
+    }
+
+    fn write_test_png(path: &Path, color: [u8; 4]) {
+        let mut rgba = Vec::with_capacity(8 * 8 * 4);
+        for _ in 0..(8 * 8) {
+            rgba.extend_from_slice(&color);
+        }
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, 8, 8, ColorType::Rgba8.into())
+            .expect("test PNG encoding");
+        fs::write(path, png).expect("test PNG should be written");
+    }
+
+    fn write_test_noise_png(path: &Path) {
+        let mut rgba = Vec::with_capacity(128 * 128 * 4);
+        let mut state = 0x91e1_0da5_u32;
+        for _ in 0..(128 * 128) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            rgba.extend_from_slice(&[state as u8, (state >> 8) as u8, (state >> 16) as u8, 255]);
+        }
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, 128, 128, ColorType::Rgba8.into())
+            .expect("noisy test PNG encoding");
+        fs::write(path, png).expect("noisy test PNG should be written");
     }
 
     fn git_success(directory: &Path, arguments: &[&str]) -> String {
@@ -5494,6 +5729,359 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_ambiguous_identity_but_legacy_command_artwork_degrades() {
+        let ambiguous = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-artwork-manifest",
+  "name": "Artwork manifest",
+  "icon": "assets/icon.png",
+  "logo": "assets/logo.png",
+  "entry": { "frontend": "dist/index.html" }
+}"#,
+        )
+        .expect("ambiguous artwork manifest should deserialize");
+        let error = validate_manifest(&ambiguous)
+            .expect_err("icon and logo cannot make plugin identity order-dependent");
+        assert!(error.contains("only one"), "{error}");
+
+        let traversal = serde_json::from_str::<PluginManifest>(
+            r#"{
+  "id": "ihub-plugin-artwork-traversal",
+  "name": "Artwork traversal",
+  "entry": { "frontend": "dist/index.html" },
+  "contributes": {
+    "commands": [{ "id": "open", "title": "Open", "icon": "../escape.png" }]
+  }
+}"#,
+        )
+        .expect("traversal artwork manifest should deserialize");
+        validate_manifest(&traversal)
+            .expect("legacy command artwork declarations remain compatible");
+        let package = temporary_directory("legacy-command-artwork-path");
+        let artwork = load_manifest_artwork(&package, &traversal)
+            .expect("unsafe legacy command artwork must degrade without reading it");
+        assert!(artwork.is_empty());
+        fs::remove_dir_all(package).expect("remove legacy command artwork fixture");
+    }
+
+    #[test]
+    fn manifest_bounds_commands_before_artwork_projection() {
+        let commands = (0..=MAX_COMMANDS_PER_PLUGIN)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("command-{index}"),
+                    "title": format!("Command {index}"),
+                    "icon": "assets/shared.png"
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = serde_json::from_value::<PluginManifest>(serde_json::json!({
+            "id": "ihub-plugin-command-limit",
+            "name": "Command limit",
+            "entry": { "frontend": "dist/index.html" },
+            "contributes": { "commands": commands }
+        }))
+        .expect("command-limit manifest should deserialize");
+
+        let error = validate_manifest(&manifest)
+            .expect_err("a manifest cannot create an unbounded command projection");
+        assert!(
+            error.contains(&MAX_COMMANDS_PER_PLUGIN.to_string()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn legacy_svg_command_artwork_keeps_the_plugin_available() {
+        let storage = temporary_directory("legacy-svg-command-artwork");
+        let plugin_id = "ihub-plugin-legacy-svg-artwork";
+        let package = storage.join(plugin_id);
+        fs::create_dir_all(package.join("dist")).expect("frontend directory");
+        fs::create_dir_all(package.join("public")).expect("public directory");
+        fs::write(package.join("dist/index.html"), "<main>legacy SVG</main>")
+            .expect("frontend fixture");
+        fs::write(
+            package.join("public/icon.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16"/></svg>"#,
+        )
+        .expect("legacy SVG fixture");
+        fs::write(
+            package.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{plugin_id}",
+  "name": "Legacy SVG artwork",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "contributes": {{
+    "commands": [{{
+      "id": "open",
+      "title": "Open",
+      "icon": "public/icon.svg"
+    }}]
+  }}
+}}"#
+            ),
+        )
+        .expect("legacy SVG manifest");
+
+        let listed = manager_at(storage.clone()).list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, plugin_id);
+        assert!(listed[0].commands[0].icon_src.is_none());
+
+        fs::remove_dir_all(storage).expect("remove legacy SVG fixture");
+    }
+
+    #[test]
+    fn command_artwork_projection_has_a_total_serialized_budget() {
+        let storage = temporary_directory("artwork-projection-budget");
+        let plugin_id = "ihub-plugin-artwork-budget";
+        let package = storage.join(plugin_id);
+        fs::create_dir_all(package.join("dist")).expect("frontend directory");
+        fs::create_dir_all(package.join("assets")).expect("artwork directory");
+        fs::write(package.join("dist/index.html"), "<main>budget</main>")
+            .expect("frontend fixture");
+        write_test_noise_png(&package.join("assets/noise.png"));
+        let commands = (0..MAX_COMMANDS_PER_PLUGIN)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("command-{index}"),
+                    "title": format!("Command {index}"),
+                    "icon": "assets/noise.png"
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            package.join("plugin.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": plugin_id,
+                "name": "Artwork budget",
+                "entry": { "frontend": "dist/index.html" },
+                "contributes": { "commands": commands }
+            }))
+            .expect("serialize artwork-budget manifest"),
+        )
+        .expect("artwork-budget manifest");
+
+        let plugin = manager_at(storage.clone())
+            .read_plugin_info(&package)
+            .expect("bounded artwork projection");
+        let projected_bytes = plugin
+            .commands
+            .iter()
+            .filter_map(|command| command.icon_src.as_ref())
+            .map(String::len)
+            .sum::<usize>();
+        assert!(projected_bytes <= MAX_PROJECTED_ARTWORK_DATA_URL_BYTES);
+        assert!(
+            plugin
+                .commands
+                .iter()
+                .any(|command| command.icon_src.is_none()),
+            "the noisy repeated image should exhaust the bounded command-artwork budget"
+        );
+
+        fs::remove_dir_all(storage).expect("remove artwork-budget fixture");
+    }
+
+    #[test]
+    fn plugin_and_command_artwork_are_normalized_and_integrity_locked() {
+        let storage = temporary_directory("artwork-projection");
+        let plugin_id = "ihub-plugin-artwork-projection";
+        let package = storage.join(plugin_id);
+        fs::create_dir_all(package.join("dist")).expect("frontend directory");
+        fs::create_dir_all(package.join("assets")).expect("artwork directory");
+        fs::write(package.join("dist/index.html"), "<main>artwork</main>")
+            .expect("frontend fixture");
+        write_test_png(&package.join("assets/icon.png"), [24, 180, 140, 255]);
+        fs::write(
+            package.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{plugin_id}",
+  "name": "Artwork projection",
+  "version": "1.0.0",
+  "icon": "assets/icon.png",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "contributes": {{
+    "commands": [{{
+      "id": "open",
+      "title": "Open",
+      "icon": "assets/icon.png"
+    }}]
+  }}
+}}"#
+            ),
+        )
+        .expect("artwork manifest");
+
+        let manager = manager_at(storage.clone());
+        let plugin = manager
+            .read_plugin_info(&package)
+            .expect("valid artwork plugin");
+        let plugin_icon = plugin.icon_src.expect("plugin icon projection");
+        let command_icon = plugin.commands[0]
+            .icon_src
+            .as_ref()
+            .expect("command icon projection");
+        assert_eq!(&plugin_icon, command_icon);
+        assert!(plugin_icon.starts_with("data:image/png;base64,"));
+        assert!(!plugin_icon.contains("assets/icon.png"));
+        let png = BASE64_STANDARD
+            .decode(
+                plugin_icon
+                    .strip_prefix("data:image/png;base64,")
+                    .expect("PNG data URL"),
+            )
+            .expect("base64 artwork");
+        let normalized = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("normalized artwork");
+        assert_eq!((normalized.width(), normalized.height()), (8, 8));
+
+        let manifest_path = package.join("plugin.json");
+        let manifest = super::read_manifest(&manifest_path).expect("artwork manifest");
+        let integrity =
+            snapshot_integrity(&package, &manifest_path, &manifest).expect("artwork integrity");
+        let artwork_assets = integrity
+            .artwork_assets
+            .as_ref()
+            .expect("new integrity always covers artwork");
+        assert_eq!(artwork_assets.len(), 1);
+        assert_eq!(artwork_assets[0].path, "assets/icon.png");
+        let source_lock = PluginSourceLock {
+            source: "https://example.invalid/artwork.git".to_owned(),
+            requested_ref: "v1.0.0".to_owned(),
+            resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            installed_at: "2026-07-29T00:00:00Z".to_owned(),
+            integrity: Some(integrity),
+        };
+
+        write_test_png(&package.join("assets/icon.png"), [180, 72, 96, 255]);
+        let canonical_package = package.canonicalize().expect("canonical plugin package");
+        let error = verify_snapshot_integrity(&canonical_package, &source_lock)
+            .expect_err("changed artwork must fail a current integrity lock");
+        assert!(error.contains("plugin artwork"), "{error}");
+
+        fs::remove_dir_all(storage).expect("remove artwork projection fixture");
+    }
+
+    #[test]
+    fn list_never_projects_artwork_from_a_tampered_managed_snapshot() {
+        let storage = temporary_directory("artwork-list-integrity");
+        let plugin_id = "ihub-plugin-artwork-list-integrity";
+        let package = storage.join(plugin_id);
+        fs::create_dir_all(package.join("dist")).expect("frontend directory");
+        fs::create_dir_all(package.join("assets")).expect("artwork directory");
+        fs::write(package.join("dist/index.html"), "<main>artwork list</main>")
+            .expect("frontend fixture");
+        write_test_png(&package.join("assets/icon.png"), [20, 160, 120, 255]);
+        fs::write(
+            package.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{plugin_id}",
+  "name": "Artwork list integrity",
+  "version": "1.0.0",
+  "icon": "assets/icon.png",
+  "entry": {{ "frontend": "dist/index.html" }},
+  "contributes": {{
+    "commands": [{{
+      "id": "open",
+      "title": "Open",
+      "icon": "assets/icon.png"
+    }}]
+  }}
+}}"#
+            ),
+        )
+        .expect("artwork-list manifest");
+
+        let manifest_path = package.join("plugin.json");
+        let manifest = super::read_manifest(&manifest_path).expect("artwork-list manifest");
+        let integrity =
+            snapshot_integrity(&package, &manifest_path, &manifest).expect("artwork-list lock");
+        let source_lock = PluginSourceLock {
+            source: "https://github.com/neko233-com/ihub-plugin-artwork-list-integrity.git"
+                .to_owned(),
+            requested_ref: "v1.0.0".to_owned(),
+            resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            installed_at: "2026-07-29T00:00:00Z".to_owned(),
+            integrity: Some(integrity),
+        };
+        super::write_source_lock(&package, &source_lock).expect("write artwork-list source lock");
+
+        let manager = manager_at(storage.clone());
+        let canonical_package = package
+            .canonicalize()
+            .expect("canonical artwork-list package");
+        manager
+            .verify_managed_snapshot_integrity(&canonical_package)
+            .expect("fresh artwork-list lock must verify");
+        let verified = manager.list();
+        assert!(verified[0].icon_src.is_some());
+        assert!(verified[0].commands[0].icon_src.is_some());
+
+        write_test_png(&package.join("assets/icon.png"), [190, 50, 80, 255]);
+        let tampered = manager.list();
+        assert_eq!(tampered.len(), 1, "management metadata remains visible");
+        assert!(
+            tampered[0].icon_src.is_none(),
+            "unverified plugin identity must not cross IPC"
+        );
+        assert!(tampered[0].commands[0].icon_src.is_none());
+
+        fs::remove_dir_all(storage).expect("remove artwork-list fixture");
+    }
+
+    #[test]
+    fn pre_artwork_integrity_locks_remain_backward_compatible() {
+        let storage = temporary_directory("legacy-artwork-integrity");
+        let plugin_id = "ihub-plugin-legacy-artwork";
+        let package = storage.join(plugin_id);
+        fs::create_dir_all(package.join("dist")).expect("frontend directory");
+        fs::create_dir_all(package.join("assets")).expect("artwork directory");
+        fs::write(
+            package.join("dist/index.html"),
+            "<main>legacy artwork</main>",
+        )
+        .expect("frontend fixture");
+        write_test_png(&package.join("assets/icon.png"), [20, 40, 60, 255]);
+        fs::write(
+            package.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{plugin_id}",
+  "name": "Legacy artwork",
+  "version": "1.0.0",
+  "icon": "assets/icon.png",
+  "entry": {{ "frontend": "dist/index.html" }}
+}}"#
+            ),
+        )
+        .expect("legacy artwork manifest");
+
+        let manifest_path = package.join("plugin.json");
+        let manifest = super::read_manifest(&manifest_path).expect("legacy artwork manifest");
+        let mut integrity =
+            snapshot_integrity(&package, &manifest_path, &manifest).expect("current integrity");
+        integrity.artwork_assets = None;
+        let source_lock = PluginSourceLock {
+            source: "https://example.invalid/legacy.git".to_owned(),
+            requested_ref: "v1.0.0".to_owned(),
+            resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            installed_at: "2026-07-29T00:00:00Z".to_owned(),
+            integrity: Some(integrity),
+        };
+
+        write_test_png(&package.join("assets/icon.png"), [90, 80, 70, 255]);
+        let canonical_package = package.canonicalize().expect("canonical plugin package");
+        verify_snapshot_integrity(&canonical_package, &source_lock)
+            .expect("a legacy lock retains its previous verification contract");
+
+        fs::remove_dir_all(storage).expect("remove legacy artwork fixture");
+    }
+
+    #[test]
     fn pinned_git_install_writes_and_exposes_the_source_lock() {
         let storage = temporary_directory("pinned-storage");
         let (source, remote_parent, expected_commit) = tagged_bare_repository();
@@ -5519,6 +6107,7 @@ mod tests {
         assert_eq!(integrity.algorithm, "sha256");
         assert_eq!(integrity.frontend_assets.len(), 1);
         assert_eq!(integrity.frontend_assets[0].path, "dist/index.html");
+        assert_eq!(integrity.artwork_assets.as_deref(), Some(&[][..]));
         assert!(integrity.native_binaries.is_empty());
         assert_eq!(installed.commit.as_deref(), Some(expected_commit.as_str()));
         assert!(storage

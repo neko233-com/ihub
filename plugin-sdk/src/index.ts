@@ -49,6 +49,7 @@ export type {
   PluginSettingWriteResult,
   PluginTarget,
   QuickActionDefinition,
+  RuntimeCommandDefinition,
   SearchHandler,
   SearchProviderDefinition,
   SearchRequest,

@@ -15,9 +15,13 @@ export interface ManifestValidationResult {
 const pluginIdPattern = /^[a-z0-9][a-z0-9-]{1,62}$/;
 const semverPattern = /^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const relativePathPattern = /^(?![\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/;
+const artworkControlCharacterPattern = /[\u0000-\u001f\u007f-\u009f]/;
+const windowsDeviceNamePattern = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const targets = new Set(["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"]);
 const minNativeCommandTimeoutMs = 1_000;
 const maxNativeCommandTimeoutMs = 30 * 60 * 1_000;
+const maxManifestCommands = 64;
+const maxArtworkCandidates = 32;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -38,6 +42,54 @@ function checkRelativePath(value: unknown, path: string, issues: ManifestIssue[]
   }
 }
 
+function normalizedArtworkCandidate(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.includes(":") ||
+    artworkControlCharacterPattern.test(value) ||
+    value.startsWith("/") ||
+    value.startsWith("\\")
+  ) {
+    return undefined;
+  }
+
+  const components = value.split(/[\\/]/);
+  if (
+    components.some(
+      (component) =>
+        component.length === 0 ||
+        component === "." ||
+        component === ".." ||
+        component.endsWith(".") ||
+        component.endsWith(" ") ||
+        windowsDeviceNamePattern.test(component),
+    )
+  ) {
+    return undefined;
+  }
+
+  return components.join("/");
+}
+
+function checkArtworkPath(
+  value: unknown,
+  path: string,
+  issues: ManifestIssue[],
+  artworkCandidates: Set<string>,
+): void {
+  if (typeof value === "string") {
+    artworkCandidates.add(value.replaceAll("\\", "/"));
+  }
+  if (normalizedArtworkCandidate(value) === undefined) {
+    issues.push({
+      path,
+      message:
+        "must be a safe package-relative artwork path without control characters, empty/dot components, Windows device names, colons, or trailing dots/spaces",
+    });
+  }
+}
+
 /**
  * A fast developer-facing validation layer. Release tooling should additionally
  * validate the same document against manifest.schema.json with a full JSON
@@ -45,6 +97,7 @@ function checkRelativePath(value: unknown, path: string, issues: ManifestIssue[]
  */
 export function validateManifest(value: unknown): ManifestValidationResult {
   const issues: ManifestIssue[] = [];
+  const artworkCandidates = new Set<string>();
   if (!isRecord(value)) {
     return { valid: false, issues: [{ path: "$", message: "must be an object" }] };
   }
@@ -62,6 +115,15 @@ export function validateManifest(value: unknown): ManifestValidationResult {
   const version = stringAt(value, "version", "$", issues);
   if (version && !semverPattern.test(version)) {
     issues.push({ path: "$.version", message: "must be a semantic version" });
+  }
+  if (value.icon !== undefined && value.logo !== undefined) {
+    issues.push({ path: "$", message: "must declare only one of icon or logo" });
+  }
+  if (value.icon !== undefined) {
+    checkArtworkPath(value.icon, "$.icon", issues, artworkCandidates);
+  }
+  if (value.logo !== undefined) {
+    checkArtworkPath(value.logo, "$.logo", issues, artworkCandidates);
   }
 
   const engines = value.engines;
@@ -138,11 +200,20 @@ export function validateManifest(value: unknown): ManifestValidationResult {
     }
 
     if (Array.isArray(contributions.commands)) {
+      if (contributions.commands.length > maxManifestCommands) {
+        issues.push({
+          path: "$.contributes.commands",
+          message: `must contain at most ${maxManifestCommands} commands`,
+        });
+      }
       contributions.commands.forEach((command, index) => {
         const path = `$.contributes.commands[${index}]`;
         if (!isRecord(command)) {
           issues.push({ path, message: "must be an object" });
           return;
+        }
+        if (command.icon !== undefined) {
+          checkArtworkPath(command.icon, `${path}.icon`, issues, artworkCandidates);
         }
 
         if (command.run === undefined) {
@@ -177,6 +248,13 @@ export function validateManifest(value: unknown): ManifestValidationResult {
         }
       });
     }
+  }
+
+  if (artworkCandidates.size > maxArtworkCandidates) {
+    issues.push({
+      path: "$",
+      message: `must reference at most ${maxArtworkCandidates} distinct artwork paths`,
+    });
   }
 
   return { valid: issues.length === 0, issues };

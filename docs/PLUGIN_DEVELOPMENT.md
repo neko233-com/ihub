@@ -10,7 +10,7 @@ iHub 插件是一个可发布的目录：前端使用 TypeScript（推荐 Vite�
 
 在桌面端安装并打开官方 **Plugin Developer Tools**（或使用内置的 **工具 → 开发者 → 创建插件项目**），先通过系统选择器选择一个已存在的父目录，再输入小写 kebab-case ID（例如 `ihub-plugin-my-feature`）。官方插件只把系统签发的短期、不透明目录授权交给宿主；页面不会提交任意路径。iHub 会在该父目录下创建同名子目录，原子预占目标路径；如果目录或同名文件已存在，操作会失败且绝不覆盖已有内容。
 
-生成的工程默认是可立即构建、链接的 TypeScript + Vite 前端插件，包含 `plugin.json`、无外部 SDK 依赖的 `src/ihub-bridge.ts`、`worker/` 原生样例、Windows/macOS 构建脚本、`docs/JSONL_RPC.md`、`docs/ENABLE_NATIVE_WORKER.md`、`public/icon.svg`、`vite.config.ts`、`package.json`、`scripts/verify-plugin.mjs` 和 README。前端 bridge 复现 iHub 的 iframe `postMessage` 契约，因此在 SDK 尚未发布到 npm 时也能直接 `pnpm install`、`pnpm dev` 和 `pnpm build`；之后可自行迁移到已发布的官方 SDK。`pnpm build` 最后只读检查 `plugin.json`、`dist/` 入口和已显式声明的本机工件路径，不安装依赖、不启动开发服务器、不执行插件代码或原生 worker。`plugin.json` 不会预先声明不存在的二进制；需要原生能力时，开发者必须先产出并验证当前平台的 worker，再显式添加其声明。创建器不会自动执行安装、构建或其他脚本。
+生成的工程默认是可立即构建、链接的 TypeScript + Vite 前端插件，包含 `plugin.json`、无外部 SDK 依赖的 `src/ihub-bridge.ts`、`worker/` 原生样例、Windows/macOS 构建脚本、`docs/JSONL_RPC.md`、`docs/ENABLE_NATIVE_WORKER.md`、`public/icon.png`、`vite.config.ts`、`package.json`、`scripts/verify-plugin.mjs` 和 README。前端 bridge 复现 iHub 的 iframe `postMessage` 契约，因此在 SDK 尚未发布到 npm 时也能直接 `pnpm install`、`pnpm dev` 和 `pnpm build`；之后可自行迁移到已发布的官方 SDK。`pnpm build` 最后只读检查 `plugin.json`、`dist/` 入口、声明图标和已显式声明的本机工件路径，不安装依赖、不启动开发服务器、不执行插件代码或原生 worker。`plugin.json` 不会预先声明不存在的二进制；需要原生能力时，开发者必须先产出并验证当前平台的 worker，再显式添加其声明。创建器不会自动执行安装、构建或其他脚本。
 
 要在 iHub 中调试，先执行一次 `pnpm build`，就可以在 **插件中心 → 开发者 → 链接本地插件** 输入该项目的**绝对目录**。创建成功后，该开发者页会自动填入刚创建的目录；“打开项目文件夹”仍是开发者明确点击后才会调用 Finder/Explorer 的便利操作，不会运行终端命令或项目文件。要测试原生命令，再用 `scripts/build-worker.ps1`（Windows）或 `sh scripts/build-worker.sh`（macOS）构建当前平台的 Rust worker，并只把真实存在的 `bin/<target>/` 工件添加到清单；`docs/JSONL_RPC.md` 说明一行请求、一行响应的 `jsonl-rpc-v1` 约定。iHub 只保存经规范化后的路径，不复制、不改写项目文件；每次打开前端时，它只为该插件实际 `entry.frontend` 所在的已构建目录创建一条新的独立 loopback 资源租约，不会扩大 Tauri `asset:` 访问范围。每次重新构建后，关闭并重新打开插件前端即可读取新的 `dist/` 输出。这个开发链接不是文件监视器或 HMR：已打开的 iframe 不会自行刷新，且本地插件与安装快照同 ID 时会暂时优先使用本地项目；解除链接后会恢复原有安装快照。
 
@@ -58,6 +58,7 @@ ihub-plugin-my-feature/
 | `id` | 是 | 稳定的小写 kebab-case 包 ID；发布后不要改。 |
 | `engines.ihub` / `engines.api` | 是 | 宿主及 API 兼容范围。 |
 | `entry.frontend` | 是 | 包内前端入口，例如 `dist/index.html`；入口必须位于 `plugin.json` 所在目录的专用子目录，不能使用根目录 `index.html`。 |
+| `icon` / `logo` | 否 | 包内 PNG、JPEG 或 WebP 插件身份图；优先使用 `icon`，二者不可同时声明。顶层身份图无效时插件拒绝加载；宿主只把重新编码后的 PNG data URL 交给界面。 |
 | `contributes` | 否 | 命令、搜索提供器、设置和快捷动作的静态声明。 |
 | `activationEvents` | 否 | `onStartup`、`onSearch`、`onCommand:<id>` 或 `onFile:<ext>`。 |
 | `permissions` | 是 | 前端 Bridge 的能力请求；空对象也必须明确写出。完整安装确认将在生产分发流程中加入。 |
@@ -90,7 +91,7 @@ ihub-plugin-my-feature/
 }
 ```
 
-清单中的包内路径不能是绝对路径，也不能借由 `..` 离开插件根目录。`entry.frontend` 必须放在专用构建目录（通常是 `dist/`）内：iHub 只会把**该入口所在目录**作为 loopback 静态资源根，绝不会把包含 `plugin.json`、`.env`、`bin/` 或源码的包根暴露给浏览器。每个 `backend.binaries[].target` 只能声明一次：`windows-x86_64`、`windows-aarch64`、`darwin-x86_64`、`darwin-aarch64`。
+清单中的包内路径不能是绝对路径，也不能借由 `..` 或符号链接离开插件根目录。图像路径还不能包含控制字符、冒号、空组件、`.` 组件、Windows 设备名或以点/空格结尾的组件。`icon`、`logo` 以及静态 `contributes.commands[].icon` 只应使用经过 Rust 图像解码器验证的有界 PNG、JPEG 或 WebP；SVG、脚本、损坏图片、过大文件和过大像素尺寸都不可发布。顶层 `icon`/`logo` 无效会拒绝插件；为了兼容旧包，不可用的命令级图标会被安全忽略并回退到宿主默认图标，不会因此拒绝整个插件。界面永远不会收到本地路径或原始文件。每份清单最多 64 个静态命令、最多引用 32 个不同图像候选；运行时 `commands.register` 不能添加图标，SDK 还会防御性剥离无类型 JavaScript 传入的 `icon`。`entry.frontend` 必须放在专用构建目录（通常是 `dist/`）内：iHub 只会把**该入口所在目录**作为 loopback 静态资源根，绝不会把包含 `plugin.json`、`.env`、`bin/` 或源码的包根暴露给浏览器。每个 `backend.binaries[].target` 只能声明一次：`windows-x86_64`、`windows-aarch64`、`darwin-x86_64`、`darwin-aarch64`。
 
 每个 `contributes.commands[]` 的 `id` 必须唯一，并可选 `execution: "frontend" | "native"`。不写时保持兼容行为：含原生 worker 的插件默认启动 native 命令，其余插件默认打开前端。带 worker 的插件若要先显示自己的 UI（例如 OCR 先让用户选图），应在该入口命令明确写 `"execution": "frontend"`；原生命令只能通过清单锁定的 worker 执行。原生命令还可显式写 `"run": { "timeoutMs": 900000 }`：该字段只能与 `execution: "native"` 一起使用，范围为 1,000–1,800,000 ms；省略时保持兼容的 60 秒上限。
 
@@ -339,7 +340,7 @@ SDK 为宿主经父窗口桥分派的以下事件提供监听接口：
 - 当前 MVP 为二进制命令提供 `IHUB_PLUGIN_ID`、`IHUB_COMMAND_ID` 环境变量，并以 JSONL 写入标准输入；请求数据不会再镜像进环境变量。生产协议可再补充版本、数据目录与协议标识；不要假定工作目录是插件目录。
 - 二进制须自行处理取消、超时和子进程回收。当前宿主为每次调用启动并等待一个 worker；省略 `run.timeoutMs` 时最多等待 60 秒，显式声明的前台上限最多 30 分钟。到期时宿主仅终止并回收声明的 worker，不承诺杀死它启动的进程树。`backend.restart` 不是已实现的常驻/自动重启语义，插件不能依赖它。
 
-原生后端可以由 Rust、Go、C/C++、Python 打包程序或现有 CLI 实现。iHub 会为每次 Git 导入写入来源、请求 ref、实际解析 commit 和安装时间的 source lock；新导入还会锁定 `plugin.json`、整个可服务的前端构建目录，以及清单声明的每个原生二进制的 SHA-256。后续打开前端、执行命令或检查/应用更新时若这些文件与锁不一致，iHub 会拒绝加载或运行该快照；重新导入才能生成新的经用户确认的锁。例行 Git 更新会拒绝任何桥接权限或原生二进制声明变化；发布者签名与界面中的逐字段权限/哈希 diff 仍是下一阶段能力。
+原生后端可以由 Rust、Go、C/C++、Python 打包程序或现有 CLI 实现。iHub 会为每次 Git 导入写入来源、请求 ref、实际解析 commit 和安装时间的 source lock；新导入还会锁定 `plugin.json`、整个可服务的前端构建目录、清单声明图标，以及每个原生二进制的 SHA-256。后续打开前端、读取图标、执行命令或检查/应用更新时若这些文件与锁不一致，iHub 会拒绝加载或运行该快照；重新导入才能生成新的经用户确认的锁。例行 Git 更新会拒绝任何桥接权限或原生二进制声明变化；发布者签名与界面中的逐字段权限/哈希 diff 仍是下一阶段能力。
 
 ## GitHub 直装与去中心化分发
 
@@ -353,7 +354,7 @@ iHub 的插件中心只是一个可选发现源，不是唯一下载源。当前
 
 它会先解析远端 ref 的实际 commit，再检出并复核这个 commit，读取包根（或单层子目录）的 `plugin.json` / `ihub.plugin.json`，最后将来源、请求 ref、实际 commit 与安装时间写入本机 source lock。导入过程中只运行 Git 并读取已构建的插件文件：**不会**执行 `npm install`、`pnpm install`、构建脚本、Git hook 或仓库中的任意 package script。
 
-这不代表 Git 仓库本身安全：插件的前端和经用户选择启动的原生二进制仍是不受沙箱限制的代码。当前 MVP 已提供 ref 选择、source lock、显式本地链接，以及“检查更新 → 用户确认 → 暂存校验后原子替换”的 Git 快照刷新；检查阶段只重新解析保存的来源/ref，不写入 lock、不检出代码也不启动插件。新 Git 快照会为 manifest、完整前端资产目录和 manifest 声明的原生二进制写入 SHA-256，并在加载/执行/更新前复核；自动探测会先验证这些记录，不完整或不匹配就跳过并保留手动检查入口。普通例行更新若发现桥接权限、原生二进制、原生命令参数、执行声明或 `run.timeoutMs` 变化会拒绝替换，要求用户卸载、审阅后走显式导入；界面尚不提供逐字段权限/哈希 diff，也不提供第三方二进制的静默自动更新。对同一来源重新导入会解析并锁定当时选择的 ref；它不是替代受审阅 Release 的完整供应链验证。仅开发者可通过插件中心显式链接一个本地绝对目录；该链接不复制源文件，也不会让 Git 导入器接受本地路径。
+这不代表 Git 仓库本身安全：插件的前端和经用户选择启动的原生二进制仍是不受沙箱限制的代码。当前 MVP 已提供 ref 选择、source lock、显式本地链接，以及“检查更新 → 用户确认 → 暂存校验后原子替换”的 Git 快照刷新；检查阶段只重新解析保存的来源/ref，不写入 lock、不检出代码也不启动插件。新 Git 快照会为 manifest、完整前端资产目录、声明图标和 manifest 声明的原生二进制写入 SHA-256，并在加载/执行/更新前复核；自动探测会先验证这些记录，不完整或不匹配就跳过并保留手动检查入口。普通例行更新若发现桥接权限、原生二进制、原生命令参数、执行声明或 `run.timeoutMs` 变化会拒绝替换，要求用户卸载、审阅后走显式导入；界面尚不提供逐字段权限/哈希 diff，也不提供第三方二进制的静默自动更新。对同一来源重新导入会解析并锁定当时选择的 ref；它不是替代受审阅 Release 的完整供应链验证。仅开发者可通过插件中心显式链接一个本地绝对目录；该链接不复制源文件，也不会让 Git 导入器接受本地路径。
 
 ### 作者从生成模板发布
 
