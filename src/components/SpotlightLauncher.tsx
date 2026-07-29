@@ -849,9 +849,7 @@ const spotlightLauncherStyles = `
     width: min(160px, 24vw);
   }
 
-  .ihub-spotlight__drag-zone::before { height: 2px; width: 17px; }
-  .ihub-spotlight__drag-zone:hover::before { width: 23px; }
-  .ihub-spotlight__drag-zone.is-armed::before { width: 25px; }
+  .ihub-spotlight__drag-zone::before { display: none; }
 
   .ihub-spotlight__brand,
   .ihub-spotlight__search-field > svg,
