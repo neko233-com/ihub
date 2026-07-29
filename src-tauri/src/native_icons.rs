@@ -378,11 +378,13 @@ mod windows_backend {
                 CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, STGM_READ,
             },
+            System::Environment::ExpandEnvironmentStringsW,
+            System::WindowsProgramming::{GetPrivateProfileIntW, GetPrivateProfileStringW},
             UI::{
                 Shell::{
                     IShellItemImageFactory, IShellLinkW, SHCreateItemFromParsingName,
-                    SHGetFileInfoW, ShellLink, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
-                    SIIGBF_ICONONLY,
+                    SHDefExtractIconW, SHGetFileInfoW, ShellLink, SHFILEINFOW, SHGFI_ICON,
+                    SHGFI_LARGEICON, SIIGBF_ICONONLY,
                 },
                 WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL, HICON},
             },
@@ -448,7 +450,7 @@ mod windows_backend {
     impl Drop for OwnedIcon {
         fn drop(&mut self) {
             if !self.0.is_invalid() {
-                // SAFETY: SHGetFileInfoW returned an owned icon for SHGFI_ICON.
+                // SAFETY: the Windows Shell transferred ownership of this icon.
                 unsafe {
                     let _ = DestroyIcon(self.0);
                 }
@@ -537,19 +539,40 @@ mod windows_backend {
         }
     }
 
+    #[derive(Debug)]
+    struct ShortcutIconSources {
+        target: Option<PathBuf>,
+        custom_icon: Option<(PathBuf, i32)>,
+    }
+
     pub(super) fn icon_data_url(path: &Path) -> Option<String> {
         let wide_path = nul_terminated_wide(path)?;
-        // Launcher applications should use the program glyph, not a generic
-        // .lnk document/overlay. If a local shortcut cannot be resolved, the
-        // original Shell item remains the bounded fallback.
-        let shortcut_target = shortcut_target_path(path, &wide_path)
-            .as_deref()
-            .and_then(nul_terminated_wide);
+        // Windows shortcuts may explicitly point at an icon resource different
+        // from their launch target (for example, a PowerShell launcher with the
+        // product's own .ico). Honor that native source and resource index
+        // first, then use the target program glyph without a shortcut overlay.
+        // The original .lnk remains the bounded fallback for unusual links.
+        let shortcut_sources = shortcut_icon_sources(path, &wide_path);
+        let internet_shortcut_icon = internet_shortcut_icon_source(path, &wide_path);
         let extract =
             |source: &[u16]| shell_item_image(source).or_else(|| shell_icon_fallback(source));
-        let image = shortcut_target
-            .as_deref()
-            .and_then(extract)
+        let image = shortcut_sources
+            .as_ref()
+            .and_then(|sources| sources.custom_icon.as_ref())
+            .and_then(|(icon_path, icon_index)| indexed_icon_image(icon_path, *icon_index))
+            .or_else(|| {
+                shortcut_sources
+                    .as_ref()
+                    .and_then(|sources| sources.target.as_deref())
+                    .and_then(nul_terminated_wide)
+                    .as_deref()
+                    .and_then(extract)
+            })
+            .or_else(|| {
+                internet_shortcut_icon
+                    .as_ref()
+                    .and_then(|(icon_path, icon_index)| indexed_icon_image(icon_path, *icon_index))
+            })
             .or_else(|| extract(&wide_path))?;
         encode_png_data_url(image.0, image.1, image.2)
     }
@@ -563,7 +586,7 @@ mod windows_backend {
         (wide.len() <= MAX_PATH_CODE_UNITS + 1).then_some(wide)
     }
 
-    fn shortcut_target_path(path: &Path, wide_path: &[u16]) -> Option<PathBuf> {
+    fn shortcut_icon_sources(path: &Path, wide_path: &[u16]) -> Option<ShortcutIconSources> {
         if !path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
@@ -574,20 +597,120 @@ mod windows_backend {
         // SAFETY: this function only runs on the dedicated STA. The shortcut
         // and persistence interfaces are created, loaded, used, and released
         // on that same thread. GetPath writes into the bounded live buffer.
-        let target = unsafe {
+        let (target, custom_icon) = unsafe {
             let shortcut: IShellLinkW =
                 CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
             let persistence: IPersistFile = shortcut.cast().ok()?;
             persistence
                 .Load(PCWSTR(wide_path.as_ptr()), STGM_READ)
                 .ok()?;
+
             let mut target = vec![0_u16; MAX_PATH_CODE_UNITS + 1];
-            shortcut.GetPath(&mut target, ptr::null_mut(), 0).ok()?;
-            let end = target.iter().position(|unit| *unit == 0)?;
-            (end > 0).then(|| PathBuf::from(OsString::from_wide(&target[..end])))?
+            let target = shortcut
+                .GetPath(&mut target, ptr::null_mut(), 0)
+                .ok()
+                .and_then(|_| path_from_wide_buffer(&target));
+
+            let mut icon_path = vec![0_u16; MAX_PATH_CODE_UNITS + 1];
+            let mut icon_index = 0_i32;
+            let custom_icon = shortcut
+                .GetIconLocation(&mut icon_path, &mut icon_index)
+                .ok()
+                .and_then(|_| path_from_wide_buffer(&icon_path))
+                .map(|icon_path| (icon_path, icon_index));
+
+            (target, custom_icon)
         };
 
-        let mut components = target.components();
+        let sources = ShortcutIconSources {
+            target: target.and_then(expanded_local_file),
+            custom_icon: custom_icon.and_then(|(icon_path, icon_index)| {
+                expanded_local_file(icon_path).map(|icon_path| (icon_path, icon_index))
+            }),
+        };
+        (sources.target.is_some() || sources.custom_icon.is_some()).then_some(sources)
+    }
+
+    fn internet_shortcut_icon_source(path: &Path, wide_path: &[u16]) -> Option<(PathBuf, i32)> {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("url"))
+        {
+            return None;
+        }
+
+        let section = nul_terminated_text("InternetShortcut");
+        let icon_file_key = nul_terminated_text("IconFile");
+        let icon_index_key = nul_terminated_text("IconIndex");
+        let empty = [0_u16];
+        let mut icon_path = vec![0_u16; MAX_PATH_CODE_UNITS + 1];
+        // SAFETY: all strings are NUL-terminated and stay live. The destination
+        // is a bounded UTF-16 buffer, and the profile APIs only read this local
+        // regular Internet Shortcut file.
+        let (length, icon_index) = unsafe {
+            let length = GetPrivateProfileStringW(
+                PCWSTR(section.as_ptr()),
+                PCWSTR(icon_file_key.as_ptr()),
+                PCWSTR(empty.as_ptr()),
+                Some(icon_path.as_mut_slice()),
+                PCWSTR(wide_path.as_ptr()),
+            );
+            let icon_index = GetPrivateProfileIntW(
+                PCWSTR(section.as_ptr()),
+                PCWSTR(icon_index_key.as_ptr()),
+                0,
+                PCWSTR(wide_path.as_ptr()),
+            );
+            (length, icon_index)
+        };
+        if length == 0 || length as usize >= icon_path.len().saturating_sub(1) {
+            return None;
+        }
+
+        let icon_path = path_from_wide_buffer(&icon_path)?;
+        expanded_local_file(icon_path).map(|icon_path| (icon_path, icon_index))
+    }
+
+    fn nul_terminated_text(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(iter::once(0)).collect()
+    }
+
+    fn path_from_wide_buffer(buffer: &[u16]) -> Option<PathBuf> {
+        let end = buffer.iter().position(|unit| *unit == 0)?;
+        let value = &buffer[..end];
+        let quote = b'"' as u16;
+        let value =
+            if value.len() >= 2 && value.first() == Some(&quote) && value.last() == Some(&quote) {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            };
+        (!value.is_empty()).then(|| PathBuf::from(OsString::from_wide(value)))
+    }
+
+    fn expanded_local_file(path: PathBuf) -> Option<PathBuf> {
+        let source = nul_terminated_wide(&path)?;
+        // SAFETY: source is NUL-terminated. The first call only requests the
+        // required length; the second receives a buffer of exactly that size.
+        let expanded = unsafe {
+            let required = ExpandEnvironmentStringsW(PCWSTR(source.as_ptr()), None);
+            if required == 0 || required as usize > MAX_PATH_CODE_UNITS + 1 {
+                return None;
+            }
+            let mut buffer = vec![0_u16; required as usize];
+            let written =
+                ExpandEnvironmentStringsW(PCWSTR(source.as_ptr()), Some(buffer.as_mut_slice()));
+            if written == 0 || written > required {
+                return None;
+            }
+            path_from_wide_buffer(&buffer)?
+        };
+
+        local_regular_file(expanded)
+    }
+
+    fn local_regular_file(path: PathBuf) -> Option<PathBuf> {
+        let mut components = path.components();
         let local_drive = matches!(
             components.next(),
             Some(Component::Prefix(prefix))
@@ -595,12 +718,35 @@ mod windows_backend {
         );
         if !local_drive
             || !matches!(components.next(), Some(Component::RootDir))
-            || target.as_os_str().encode_wide().count() > MAX_PATH_CODE_UNITS
+            || path.as_os_str().encode_wide().count() > MAX_PATH_CODE_UNITS
         {
             return None;
         }
-        let metadata = std::fs::symlink_metadata(&target).ok()?;
-        (metadata.is_file() && !metadata.file_type().is_symlink()).then_some(target)
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        (metadata.is_file() && !metadata.file_type().is_symlink()).then_some(path)
+    }
+
+    fn indexed_icon_image(path: &Path, icon_index: i32) -> Option<(Vec<u8>, u32, u32)> {
+        let wide_path = nul_terminated_wide(path)?;
+        let mut handle = HICON::default();
+        // SAFETY: the path is NUL-terminated and remains live. The successful
+        // call transfers one large HICON to the caller, wrapped immediately.
+        unsafe {
+            SHDefExtractIconW(
+                PCWSTR(wide_path.as_ptr()),
+                icon_index,
+                0,
+                Some(&mut handle),
+                None,
+                ICON_EDGE,
+            )
+            .ok()
+            .ok()?;
+        }
+        if handle.is_invalid() {
+            return None;
+        }
+        icon_to_rgba(OwnedIcon(handle))
     }
 
     fn shell_item_image(wide_path: &[u16]) -> Option<(Vec<u8>, u32, u32)> {
@@ -693,7 +839,10 @@ mod windows_backend {
         if result == 0 || info.hIcon.is_invalid() {
             return None;
         }
-        let icon = OwnedIcon(info.hIcon);
+        icon_to_rgba(OwnedIcon(info.hIcon))
+    }
+
+    fn icon_to_rgba(icon: OwnedIcon) -> Option<(Vec<u8>, u32, u32)> {
         let black = draw_icon(icon.0, 0)?;
         let white = draw_icon(icon.0, u8::MAX)?;
         Some((
@@ -823,15 +972,28 @@ mod windows_backend {
     }
 
     #[cfg(test)]
-    pub(super) fn test_create_shortcut(shortcut_path: &Path, target_path: &Path) -> Option<()> {
+    pub(super) fn test_create_shortcut(
+        shortcut_path: &Path,
+        target_path: &Path,
+        custom_icon: Option<(&Path, i32)>,
+    ) -> Option<()> {
         let shortcut_wide = nul_terminated_wide(shortcut_path)?;
         let target_wide = nul_terminated_wide(target_path)?;
+        let custom_icon = match custom_icon {
+            Some((path, index)) => Some((nul_terminated_wide(path)?, index)),
+            None => None,
+        };
         // SAFETY: the caller owns a live STA apartment. The COM objects and
-        // both NUL-terminated path buffers remain alive for every call.
+        // NUL-terminated path buffers remain alive for every call.
         unsafe {
             let shortcut: IShellLinkW =
                 CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
             shortcut.SetPath(PCWSTR(target_wide.as_ptr())).ok()?;
+            if let Some((icon_path, icon_index)) = custom_icon.as_ref() {
+                shortcut
+                    .SetIconLocation(PCWSTR(icon_path.as_ptr()), *icon_index)
+                    .ok()?;
+            }
             let persistence: IPersistFile = shortcut.cast().ok()?;
             persistence
                 .Save(PCWSTR(shortcut_wide.as_ptr()), true)
@@ -842,7 +1004,23 @@ mod windows_backend {
 
     #[cfg(test)]
     pub(super) fn test_shortcut_target_path(path: &Path) -> Option<PathBuf> {
-        shortcut_target_path(path, &nul_terminated_wide(path)?)
+        shortcut_icon_sources(path, &nul_terminated_wide(path)?)?.target
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_shortcut_custom_icon(path: &Path) -> Option<(PathBuf, i32)> {
+        shortcut_icon_sources(path, &nul_terminated_wide(path)?)?.custom_icon
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_indexed_icon_data_url(path: &Path, index: i32) -> Option<String> {
+        let image = indexed_icon_image(path, index)?;
+        encode_png_data_url(image.0, image.1, image.2)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_internet_shortcut_icon(path: &Path) -> Option<(PathBuf, i32)> {
+        internet_shortcut_icon_source(path, &nul_terminated_wide(path)?)
     }
 }
 
@@ -1009,7 +1187,8 @@ mod tests {
         let shortcut = TempShortcut(
             std::env::temp_dir().join(format!("ihub-native-icon-{}.lnk", uuid::Uuid::new_v4())),
         );
-        windows_backend::test_create_shortcut(&shortcut.0, &target).expect("create test shortcut");
+        windows_backend::test_create_shortcut(&shortcut.0, &target, None)
+            .expect("create test shortcut");
 
         let resolved =
             windows_backend::test_shortcut_target_path(&shortcut.0).expect("shortcut target");
@@ -1020,6 +1199,83 @@ mod tests {
         assert_eq!(
             windows_backend::icon_data_url(&shortcut.0),
             windows_backend::icon_data_url(&target)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shortcut_icon_honors_its_native_custom_icon_resource() {
+        struct TempShortcut(PathBuf);
+
+        impl Drop for TempShortcut {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let _apartment =
+            windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+        let target = std::env::current_exe().expect("current executable");
+        let custom_icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/icon.ico");
+        let shortcut = TempShortcut(
+            std::env::temp_dir().join(format!("ihub-custom-icon-{}.lnk", uuid::Uuid::new_v4())),
+        );
+        windows_backend::test_create_shortcut(&shortcut.0, &target, Some((&custom_icon, 0)))
+            .expect("create custom-icon shortcut");
+
+        let resolved_icon =
+            windows_backend::test_shortcut_custom_icon(&shortcut.0).expect("shortcut custom icon");
+        assert_eq!(
+            std::fs::canonicalize(resolved_icon.0).expect("resolved icon"),
+            std::fs::canonicalize(&custom_icon).expect("expected icon")
+        );
+        assert_eq!(resolved_icon.1, 0);
+        assert_eq!(
+            windows_backend::icon_data_url(&shortcut.0),
+            windows_backend::test_indexed_icon_data_url(&custom_icon, 0)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn internet_shortcut_icon_honors_icon_file_and_index() {
+        struct TempInternetShortcut(PathBuf);
+
+        impl Drop for TempInternetShortcut {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let _apartment =
+            windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+        let custom_icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/icon.ico");
+        let shortcut = TempInternetShortcut(
+            std::env::temp_dir().join(format!("ihub-custom-icon-{}.url", uuid::Uuid::new_v4())),
+        );
+        let source = format!(
+            "[InternetShortcut]\r\nURL=https://example.invalid/\r\nIconFile={}\r\nIconIndex=0\r\n",
+            custom_icon.display()
+        );
+        let mut encoded = vec![0xff, 0xfe];
+        encoded.extend(
+            source
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        std::fs::write(&shortcut.0, encoded).expect("write Internet Shortcut");
+
+        let resolved_icon = windows_backend::test_internet_shortcut_icon(&shortcut.0)
+            .expect("Internet Shortcut custom icon");
+        assert_eq!(
+            std::fs::canonicalize(resolved_icon.0).expect("resolved icon"),
+            std::fs::canonicalize(&custom_icon).expect("expected icon")
+        );
+        assert_eq!(resolved_icon.1, 0);
+        assert_eq!(
+            windows_backend::icon_data_url(&shortcut.0),
+            windows_backend::test_indexed_icon_data_url(&custom_icon, 0)
         );
     }
 
@@ -1038,5 +1294,34 @@ mod tests {
             .expect("Windows Shell executable icon");
         assert!(icon.starts_with("data:image/png;base64,"));
         assert!(icon.len() <= MAX_ICON_DATA_URL_BYTES);
+
+        if shell_item
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+        {
+            let _apartment =
+                windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+            if let Some((custom_icon, icon_index)) =
+                windows_backend::test_shortcut_custom_icon(&shell_item)
+            {
+                assert_eq!(
+                    Some(icon),
+                    windows_backend::test_indexed_icon_data_url(&custom_icon, icon_index),
+                    "a launcher shortcut must honor its native custom icon resource"
+                );
+            } else {
+                let target = windows_backend::test_shortcut_target_path(&shell_item)
+                    .expect("local shortcut target");
+                let target_icon = service
+                    .try_request(&target, "application")
+                    .expect("STA worker accepted target request")
+                    .wait_timeout(Duration::from_secs(5))
+                    .expect("Windows Shell target icon");
+                assert_eq!(
+                    icon, target_icon,
+                    "a launcher shortcut must render the same glyph as its target EXE"
+                );
+            }
+        }
     }
 }
