@@ -4,6 +4,7 @@ import { ChevronLeft, LoaderCircle, Puzzle, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { command, isDesktop } from "../lib/desktop";
 import type { PluginFrontendEvent, PluginFrontendLease, PluginInfo } from "../lib/types";
+import { PluginArtwork, safePluginArtworkSrc } from "./PluginArtwork";
 
 const REQUEST_CHANNEL = "ihub-plugin-bridge/v1";
 const RESPONSE_CHANNEL = "ihub-host-bridge/v1";
@@ -652,6 +653,8 @@ export function PluginFrontendFrame({
     onToast(error);
   }, [error, onSurfaceUnavailable, onToast, pluginId, runtimeOnly, sourceLeaseId]);
 
+  const artworkSrc = safePluginArtworkSrc(plugin?.iconSrc);
+
   if (runtimeOnly) {
     return source && bridgeIsReady ? (
       <iframe
@@ -695,8 +698,14 @@ export function PluginFrontendFrame({
                 <span>返回</span>
               </button>
               <span className="plugin-frame__tag">
-                <span aria-hidden="true" className="plugin-frame__tag-icon">
-                  <Puzzle size={15} strokeWidth={1.9} />
+                <span
+                  aria-hidden="true"
+                  className={`plugin-frame__tag-icon${artworkSrc ? " is-artwork" : ""}`}
+                >
+                  <PluginArtwork
+                    fallback={<Puzzle size={15} strokeWidth={1.9} />}
+                    iconSrc={artworkSrc}
+                  />
                 </span>
                 <h1>{plugin.name}</h1>
               </span>

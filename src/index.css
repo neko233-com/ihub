@@ -3191,7 +3191,19 @@ kbd {
   flex: 0 0 auto;
   height: 26px;
   justify-content: center;
+  overflow: hidden;
   width: 26px;
+}
+
+.plugin-frame__tag-icon.is-artwork {
+  background: transparent;
+}
+
+.plugin-frame__tag-icon img {
+  display: block;
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
 }
 
 .plugin-frame__tag h1 {

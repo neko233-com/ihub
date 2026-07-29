@@ -42,6 +42,10 @@ import {
   type LauncherPastedImage,
   type SpotlightLauncherItem,
 } from "./components/SpotlightLauncher";
+import {
+  pluginCommandArtworkSrc,
+  pluginSearchResultArtworkSrc,
+} from "./components/PluginArtwork";
 import type { RecordingPhase, ToolboxLaunchContext, ToolboxTab } from "./components/ToolboxDrawer";
 import {
   availableLauncherContextActions,
@@ -1185,9 +1189,10 @@ export function App() {
     () => results.map((result) => spotlightItemForSearchResult(
       result,
       nativeIconForResult(searchIconCache, result)
-        ?? nativeIconForResult(homeIconCache, result),
+        ?? nativeIconForResult(homeIconCache, result)
+        ?? pluginSearchResultArtworkSrc(result, plugins),
     )),
-    [homeIconCache, results, searchIconCache],
+    [homeIconCache, plugins, results, searchIconCache],
   );
   const pastedFileItems = useMemo<SpotlightLauncherItem[]>(
     () => pastedFileResults.map((result) => spotlightItemForSearchResult(result)),
@@ -1254,6 +1259,7 @@ export function App() {
           detail: [plugin.name, pluginCommand.description].filter(Boolean).join(" · ") || undefined,
           badge: plugin.name,
           icon: Puzzle,
+          iconSrc: pluginCommandArtworkSrc(plugin, pluginCommand),
           tone: "violet" as const,
         }));
     }), [plugins]);

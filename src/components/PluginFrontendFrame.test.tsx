@@ -8,6 +8,7 @@ const surfacePlugin: PluginInfo = {
   name: "示例插件",
   version: "1.0.0",
 };
+const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrG8AAAAASUVORK5CYII=";
 
 describe("PluginFrontendFrame surface chrome", () => {
   it("renders the compact host bar without technical bridge footer copy", () => {
@@ -30,5 +31,31 @@ describe("PluginFrontendFrame surface chrome", () => {
     expect(markup).not.toContain("iHub Bridge");
     expect(markup).not.toContain("frontend entry");
     expect(markup).not.toContain("<footer");
+  });
+
+  it("uses validated plugin artwork in the host identity tag", () => {
+    const artworkMarkup = renderToStaticMarkup(
+      <PluginFrontendFrame
+        onClose={() => undefined}
+        onPendingEventHandled={() => undefined}
+        onToast={() => undefined}
+        pendingEvent={null}
+        plugin={{ ...surfacePlugin, iconSrc: onePixelPng }}
+      />,
+    );
+    const unsafeMarkup = renderToStaticMarkup(
+      <PluginFrontendFrame
+        onClose={() => undefined}
+        onPendingEventHandled={() => undefined}
+        onToast={() => undefined}
+        pendingEvent={null}
+        plugin={{ ...surfacePlugin, iconSrc: "https://example.com/plugin.png" }}
+      />,
+    );
+
+    expect(artworkMarkup).toContain('plugin-frame__tag-icon is-artwork');
+    expect(artworkMarkup).toContain(`<img alt="" draggable="false" src="${onePixelPng}"/>`);
+    expect(unsafeMarkup).not.toContain("plugin-frame__tag-icon is-artwork");
+    expect(unsafeMarkup).not.toContain("https://example.com/plugin.png");
   });
 });

@@ -31,6 +31,10 @@ import {
 import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { command, isDesktop } from "../lib/desktop";
 import {
+  PluginArtwork,
+  safePluginArtworkSrc,
+} from "./PluginArtwork";
+import {
   pluginCatalogItemsForView,
   pluginCatalogViewMode,
 } from "../lib/plugin-center-catalog-view";
@@ -581,7 +585,21 @@ const pluginCenterStyles = `
     border-radius: 4px;
     color: #f2f2f2;
     height: 27px;
+    overflow: hidden;
     width: 27px;
+  }
+
+  .plugin-center__installed-icon.is-artwork,
+  .plugin-center__market-icon.is-artwork {
+    background: transparent;
+  }
+
+  .plugin-center__installed-icon img,
+  .plugin-center__market-icon img {
+    display: block;
+    height: 100%;
+    object-fit: contain;
+    width: 100%;
   }
 
   .plugin-center__installed-icon--json { background: #53505d; }
@@ -861,6 +879,7 @@ const pluginCenterStyles = `
     border-radius: 6px;
     color: #f3f3f3;
     height: 43px;
+    overflow: hidden;
     width: 43px;
   }
 
@@ -2501,6 +2520,7 @@ export function PluginCenter({
                   <div className="plugin-center__installed-list">
                     {sidebarEntries.map((item) => {
                       const Icon = iconForCatalog[item.entry.icon];
+                      const artworkSrc = safePluginArtworkSrc(item.installed?.iconSrc);
                       const isSelected = Boolean(item.installed && selectedInstalledId === item.installed.id);
                       return (
                         <button
@@ -2515,7 +2535,12 @@ export function PluginCenter({
                           }}
                           type="button"
                         >
-                          <span className={`plugin-center__installed-icon plugin-center__installed-icon--${item.entry.icon}`}><Icon size={10} /></span>
+                          <span className={`plugin-center__installed-icon plugin-center__installed-icon--${item.entry.icon}${artworkSrc ? " is-artwork" : ""}`}>
+                            <PluginArtwork
+                              fallback={<Icon size={10} />}
+                              iconSrc={artworkSrc}
+                            />
+                          </span>
                           <span className="plugin-center__installed-copy">
                             <strong>{item.installed?.name ?? item.entry.name}</strong>
                             <small title={[item.installed ? lifecycleTitle(item.installed) : undefined, sourceLockTitle(item.installed)].filter(Boolean).join("\n\n") || undefined}>
@@ -2767,6 +2792,7 @@ export function PluginCenter({
                     {displayedItems.map((item) => {
                       const Icon = iconForCatalog[item.entry.icon];
                       const plugin = item.installed;
+                      const artworkSrc = safePluginArtworkSrc(plugin?.iconSrc);
                       const installed = Boolean(plugin);
                       const workspaceProject = item.entry.workspaceProject
                         ? officialWorkspaceProjects[item.entry.id]
@@ -2854,7 +2880,12 @@ export function PluginCenter({
                       }
                       return (
                         <article className={"plugin-center__market-item" + (plugin?.enabled === false ? " is-disabled" : "") + (platformNotice ? " is-platform-unsupported" : "")} key={item.entry.id}>
-                          <span className={`plugin-center__market-icon plugin-center__market-icon--${item.entry.icon}`}><Icon size={12} /></span>
+                          <span className={`plugin-center__market-icon plugin-center__market-icon--${item.entry.icon}${artworkSrc ? " is-artwork" : ""}`}>
+                            <PluginArtwork
+                              fallback={<Icon size={12} />}
+                              iconSrc={artworkSrc}
+                            />
+                          </span>
                           <div className="plugin-center__market-copy">
                             <strong>{item.entry.name}</strong>
                             <p>{item.entry.description}</p>
