@@ -968,7 +968,8 @@ export function App() {
   // authorization channel.
   const [launcherShortcuts, setLauncherShortcuts] = useState<LauncherShortcutView[]>([]);
   const [recentItemIds, setRecentItemIds] = useState<string[]>(() =>
-    readStoredStringArray(launcherRecentStorageKey, LAUNCHER_RECENT_CAPACITY));
+    readStoredStringArray(launcherRecentStorageKey, LAUNCHER_RECENT_CAPACITY)
+      .filter(isLauncherRecentDestination));
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
   const [homeIconCache, setHomeIconCache] = useState<SystemIconMap>({});
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
