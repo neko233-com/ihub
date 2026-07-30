@@ -209,7 +209,7 @@ export function createRegionCaptureDemoSource(): RegionCaptureSource {
     <circle cx="98" cy="61" r="10" fill="#f5c451"/>
     <circle cx="128" cy="61" r="10" fill="#4ecb71"/>
     <rect x="36" y="116" width="240" height="388" rx="18" fill="#dfe4e8"/>
-    <rect x="306" y="116" width="618" height="228" rx="18" fill="#1677ff"/>
+    <rect x="306" y="116" width="618" height="228" rx="18" fill="#3f51b5"/>
     <rect x="338" y="150" width="286" height="22" rx="11" fill="#fff" opacity=".94"/>
     <rect x="338" y="190" width="424" height="14" rx="7" fill="#fff" opacity=".62"/>
     <rect x="306" y="374" width="294" height="130" rx="18" fill="#fff"/>

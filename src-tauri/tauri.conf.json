@@ -30,7 +30,6 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "shadow": true,
-        "theme": "Light",
         "acceptFirstMouse": true
       }
     ],
