@@ -16,7 +16,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::indexer::{LauncherShortcutSource, ResolvedSystemIconSource, SearchIndex};
+use crate::{
+    host_log,
+    indexer::{LauncherShortcutSource, ResolvedSystemIconSource, SearchIndex},
+};
 
 const SHORTCUTS_FILE_NAME: &str = "launcher-shortcuts-v1.json";
 const SHORTCUTS_SCHEMA_VERSION: u32 = 1;
@@ -85,7 +88,10 @@ impl LauncherShortcutStore {
 
     fn with_path(data_path: PathBuf) -> Self {
         let state = load_state(&data_path).unwrap_or_else(|error| {
-            eprintln!("iHub could not restore launcher shortcuts: {error}");
+            host_log::warn(
+                "shortcuts",
+                format!("Could not restore launcher shortcuts: {error}"),
+            );
             PersistedLauncherShortcuts::default()
         });
         Self {
@@ -298,7 +304,10 @@ impl LauncherShortcutStore {
             });
         }
         if let Err(error) = fs::remove_file(&backup) {
-            eprintln!("iHub could not remove replaced launcher shortcut backup: {error}");
+            host_log::warn(
+                "shortcuts",
+                format!("Could not remove a replaced launcher shortcut backup: {error}"),
+            );
         }
         Ok(())
     }

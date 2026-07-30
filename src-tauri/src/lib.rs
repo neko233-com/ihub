@@ -1,10 +1,12 @@
 mod app;
+mod background_process;
 mod builtin_tools;
 mod clipboard_access;
 mod clipboard_history;
 mod cloud_credentials;
 mod cloud_drive;
 mod detached_plugin_window;
+mod host_log;
 mod indexer;
 mod launcher_hotkey;
 mod launcher_shortcuts;

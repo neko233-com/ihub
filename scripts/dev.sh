@@ -449,7 +449,11 @@ const root = fs.realpathSync.native(configuredRoot);
 const watchedPaths = execFileSync(
   'git',
   ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-  { encoding: 'buffer', stdio: ['ignore', 'pipe', 'inherit'] },
+  {
+    encoding: 'buffer',
+    stdio: ['ignore', 'pipe', 'inherit'],
+    windowsHide: true,
+  },
 )
   .toString('utf8')
   .split('\0')

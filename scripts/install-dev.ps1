@@ -155,6 +155,7 @@ foreach ($requiredPath in @($developerScript, (Join-Path $repositoryRoot '.git')
 $installRoot = Join-Path $env:LOCALAPPDATA 'iHub Development'
 $markerPath = Join-Path $installRoot 'launcher.json'
 $launcherPath = Join-Path $installRoot 'Launch iHub Development.ps1'
+$launcherShimPath = Join-Path $installRoot 'Launch iHub Development.vbs'
 $persistentStopSignalPath = Join-Path $installRoot 'persistent-development-install.stop'
 $persistentWatcherWrapperPath = Join-Path $installRoot 'Run iHub Development Watch Service.ps1'
 $persistentRefreshWrapperPath = Join-Path $installRoot 'Run iHub Development Safe Refresh.ps1'
@@ -184,6 +185,24 @@ function Assert-ScheduledTasksSupport {
     }
 }
 
+function Test-IHubSafeRegularFile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return (
+            -not $item.PSIsContainer -and
+            (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-TrustedExistingDevelopmentLauncher {
     param(
         [Parameter(Mandatory)][string]$ExpectedSourceRoot
@@ -193,13 +212,9 @@ function Get-TrustedExistingDevelopmentLauncher {
         throw "No iHub Development launcher is installed at $installRoot. First run .\\scripts\\install-dev.ps1 -NoLaunch, then explicitly enable the persistent service."
     }
 
-    foreach ($expectedFile in @($markerPath, $launcherPath)) {
-        if (-not (Test-Path -LiteralPath $expectedFile -PathType Leaf)) {
+    foreach ($expectedFile in @($markerPath, $launcherPath, $launcherShimPath)) {
+        if (-not (Test-IHubSafeRegularFile -Path $expectedFile)) {
             throw "The trusted iHub Development launcher file is missing: $expectedFile. Re-run .\\scripts\\install-dev.ps1 -NoLaunch before enabling the persistent service."
-        }
-        $item = Get-Item -LiteralPath $expectedFile -Force
-        if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-            throw "Refusing to use an unsafe iHub Development launcher file: $($item.FullName)"
         }
     }
 
@@ -220,7 +235,7 @@ function Get-TrustedExistingDevelopmentLauncher {
     if ($null -eq $managedByProperty -or $null -eq $sourceRootProperty -or $managedByProperty.Value -ne 'iHub Development Launcher' -or [string]::IsNullOrWhiteSpace([string]$sourceRootProperty.Value)) {
         throw "The iHub Development launcher marker is not trusted: $markerPath. No persistent task was changed."
     }
-    if ($launcherRevision -lt 3) {
+    if ($launcherRevision -lt 4) {
         throw "The iHub Development launcher is older than the verified-install status protocol. Re-run .\\scripts\\install-dev.ps1 -NoLaunch before enabling the service."
     }
 
@@ -935,22 +950,31 @@ function Show-IHubPersistentDevelopmentInstallStatus {
     $markerState = 'missing'
     $configuredSourceRoot = $null
     $launcherRevision = 0
-    if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
-        try {
-            $existingMarker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
-            if ($existingMarker.managedBy -eq 'iHub Development Launcher') {
-                if ($null -ne $existingMarker.PSObject.Properties['launcherRevision']) {
-                    [void][int]::TryParse([string]$existingMarker.launcherRevision, [ref]$launcherRevision)
+    if (Test-Path -LiteralPath $markerPath) {
+        if (-not (Test-IHubSafeRegularFile -Path $markerPath)) {
+            $markerState = 'foreign-or-invalid'
+        }
+        else {
+            try {
+                $existingMarker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+                if ($existingMarker.managedBy -eq 'iHub Development Launcher') {
+                    if ($null -ne $existingMarker.PSObject.Properties['launcherRevision']) {
+                        [void][int]::TryParse([string]$existingMarker.launcherRevision, [ref]$launcherRevision)
+                    }
+                    $launcherFilesReady = (
+                        (Test-IHubSafeRegularFile -Path $launcherPath) -and
+                        (Test-IHubSafeRegularFile -Path $launcherShimPath)
+                    )
+                    $markerState = if ($launcherRevision -ge 4 -and $launcherFilesReady) { 'trusted' } else { 'refresh-required' }
+                    $configuredSourceRoot = [string]$existingMarker.sourceRoot
                 }
-                $markerState = if ($launcherRevision -ge 3) { 'trusted' } else { 'refresh-required' }
-                $configuredSourceRoot = [string]$existingMarker.sourceRoot
+                else {
+                    $markerState = 'foreign-or-invalid'
+                }
             }
-            else {
+            catch {
                 $markerState = 'foreign-or-invalid'
             }
-        }
-        catch {
-            $markerState = 'foreign-or-invalid'
         }
     }
 
@@ -1012,7 +1036,7 @@ Assert-OwnedInstallRoot -Root $installRoot -MarkerPath $markerPath
 $marker = [ordered]@{
     schemaVersion = 1
     managedBy     = 'iHub Development Launcher'
-    launcherRevision = 3
+    launcherRevision = 4
     sourceRoot    = $repositoryRoot
     installedAt   = [DateTime]::UtcNow.ToString('o')
 }
@@ -1100,12 +1124,49 @@ exit 0
 '@
 Write-AtomicUtf8File -Path $launcherPath -Content $launcherContent
 
+# Start Menu shortcuts point to GUI-subsystem wscript.exe, not the
+# console-subsystem powershell.exe. WScript starts the trusted PowerShell
+# launcher with window style 0 from its first process-creation instruction, so
+# Explorer never has a console host to flash before -WindowStyle is parsed.
+$launcherShimContent = @'
+Option Explicit
+
+Dim shell, fileSystem, launcherPath, powershellPath, commandLine, index, argument
+Set shell = CreateObject("WScript.Shell")
+Set fileSystem = CreateObject("Scripting.FileSystemObject")
+launcherPath = fileSystem.BuildPath(fileSystem.GetParentFolderName(WScript.ScriptFullName), "Launch iHub Development.ps1")
+powershellPath = shell.ExpandEnvironmentStrings("%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe")
+commandLine = QuoteArgument(powershellPath) & " -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File " & QuoteArgument(launcherPath)
+
+For index = 0 To WScript.Arguments.Count - 1
+    argument = CStr(WScript.Arguments(index))
+    If InStr(argument, Chr(34)) > 0 Then
+        WScript.Quit 87
+    End If
+    commandLine = commandLine & " " & QuoteArgument(argument)
+Next
+
+WScript.Quit shell.Run(commandLine, 0, False)
+
+Function QuoteArgument(value)
+    QuoteArgument = Chr(34) & value & Chr(34)
+End Function
+'@
+Write-AtomicUtf8File -Path $launcherShimPath -Content $launcherShimContent
+
 $startMenuRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::StartMenu)
 if ([string]::IsNullOrWhiteSpace($startMenuRoot)) {
     throw 'The Windows Start Menu folder is unavailable; launcher files were created but no shortcut was written.'
 }
 $shortcutDirectory = Join-Path $startMenuRoot 'Programs\iHub'
 New-Item -ItemType Directory -Path $shortcutDirectory -Force | Out-Null
+if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+    throw 'SystemRoot is unavailable; cannot resolve the trusted Windows GUI script host.'
+}
+$systemWscriptPath = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\wscript.exe'))
+if (-not (Test-IHubSafeRegularFile -Path $systemWscriptPath)) {
+    throw "The trusted Windows GUI script host is unavailable or unsafe: $systemWscriptPath"
+}
 
 function Write-DeveloperShortcut {
     param(
@@ -1116,10 +1177,11 @@ function Write-DeveloperShortcut {
 
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($Path)
-    $shortcut.TargetPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $shortcut.TargetPath = $systemWscriptPath
     $shortcut.Arguments = $Arguments
-    $shortcut.WorkingDirectory = $repositoryRoot
+    $shortcut.WorkingDirectory = $installRoot
     $shortcut.Description = $Description
+    $shortcut.WindowStyle = 7
     if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
         $shortcut.IconLocation = "$iconPath,0"
     }
@@ -1131,7 +1193,7 @@ $alwaysLatestShortcutPath = Join-Path $shortcutDirectory 'iHub Development (Alwa
 $updateAndLaunchShortcutPath = Join-Path $shortcutDirectory 'iHub Development (Update & Launch).lnk'
 $installCurrentBuildShortcutPath = Join-Path $shortcutDirectory 'iHub Development (Install Current Build).lnk'
 $watchInstallCurrentBuildShortcutPath = Join-Path $shortcutDirectory 'iHub Development (Watch & Install Current Build).lnk'
-$baseArguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
+$baseArguments = "//B //NoLogo `"$launcherShimPath`""
 Write-DeveloperShortcut -Path $currentSourceShortcutPath -Arguments $baseArguments -Description 'Launch iHub from the configured current-source development worktree.'
 Write-DeveloperShortcut -Path $alwaysLatestShortcutPath -Arguments "$baseArguments -UpdateIfClean" -Description 'Follow the configured iHub upstream when a clean fast-forward is safe, otherwise launch the current saved source.'
 Write-DeveloperShortcut -Path $updateAndLaunchShortcutPath -Arguments "$baseArguments -Update" -Description 'Safely fast-forward a clean iHub worktree, then launch it.'

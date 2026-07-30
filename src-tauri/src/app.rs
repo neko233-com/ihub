@@ -3,7 +3,6 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, SyncSender},
@@ -27,10 +26,12 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use uuid::Uuid;
 
 use crate::{
+    background_process::background_command,
     clipboard_history::{
         ClipboardHistory, ClipboardHistoryRestoreResult, ClipboardHistorySnapshot,
     },
     detached_plugin_window::DetachedPluginWindowRegistry,
+    host_log::{self, HostLogSnapshot},
     indexer::{default_root_strings, SearchIndex},
     launcher_hotkey::{normalize_launcher_hotkey, LauncherHotkeyStore, DEFAULT_LAUNCHER_HOTKEY},
     launcher_shortcuts::{LauncherShortcutStore, LauncherShortcutView},
@@ -304,7 +305,10 @@ impl AppState {
         if let Err(error) =
             plugin_settings.remove_declared_secrets(plugins.declared_secret_setting_keys())
         {
-            eprintln!("iHub could not scrub legacy secret plugin settings: {error}");
+            host_log::error(
+                "plugins",
+                format!("Could not scrub legacy secret plugin settings: {error}"),
+            );
         }
         Self {
             index: SearchIndex::with_storage(app_data_dir.clone()),
@@ -466,6 +470,11 @@ struct PluginHostState {
     /// iframe never receives it, so a plugin timer cannot self-authorize a
     /// cursor sample without the visible host overlay being confirmed.
     cursor_color_approvals: Mutex<HashMap<String, CursorColorApproval>>,
+    /// Plugin-authored diagnostics are useful, but a broken iframe must not
+    /// turn the synchronous bounded host log into a disk or transition-lock
+    /// denial of service. Keep one small fixed-window counter per active
+    /// plugin and aggregate drops without retaining message text.
+    plugin_log_windows: Mutex<HashMap<String, PluginLogWindow>>,
 }
 
 impl Default for PluginHostState {
@@ -484,6 +493,7 @@ impl Default for PluginHostState {
             capture_focus_leases: Mutex::new(HashMap::new()),
             cursor_color_sampled_at: Mutex::new(HashMap::new()),
             cursor_color_approvals: Mutex::new(HashMap::new()),
+            plugin_log_windows: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -628,6 +638,19 @@ struct CursorColorApproval {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct PluginLogWindow {
+    started_at: Instant,
+    accepted: usize,
+    dropped: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginLogAdmission {
+    Accept { previously_dropped: u64 },
+    Drop { report_limit: bool },
+}
+
 struct NativeDialogGuard<'a> {
     depth: &'a AtomicUsize,
 }
@@ -752,6 +775,62 @@ impl PluginHostState {
 
     fn auto_hide_is_suspended(&self) -> bool {
         self.native_dialog_is_open() || self.capture_focus_lease_is_active()
+    }
+
+    fn admit_plugin_log(&self, plugin_id: &str) -> PluginLogAdmission {
+        self.admit_plugin_log_at(plugin_id, Instant::now())
+    }
+
+    fn admit_plugin_log_at(&self, plugin_id: &str, now: Instant) -> PluginLogAdmission {
+        let mut windows = self
+            .plugin_log_windows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        windows.retain(|_, window| {
+            now.checked_duration_since(window.started_at)
+                .unwrap_or_default()
+                < PLUGIN_LOG_WINDOW_RETENTION
+        });
+        if let Some(window) = windows.get_mut(plugin_id) {
+            if now
+                .checked_duration_since(window.started_at)
+                .unwrap_or_default()
+                >= PLUGIN_LOG_WINDOW
+            {
+                let previously_dropped = window.dropped;
+                *window = PluginLogWindow {
+                    started_at: now,
+                    accepted: 1,
+                    dropped: 0,
+                };
+                return PluginLogAdmission::Accept { previously_dropped };
+            }
+            if window.accepted < MAX_PLUGIN_LOGS_PER_WINDOW {
+                window.accepted += 1;
+                return PluginLogAdmission::Accept {
+                    previously_dropped: 0,
+                };
+            }
+            window.dropped = window.dropped.saturating_add(1);
+            return PluginLogAdmission::Drop {
+                report_limit: window.dropped == 1,
+            };
+        }
+
+        windows.insert(
+            plugin_id.to_owned(),
+            PluginLogWindow {
+                started_at: now,
+                accepted: 1,
+                dropped: 0,
+            },
+        );
+        trim_oldest_records(&mut windows, MAX_PLUGIN_LOG_WINDOWS, |window| {
+            window.started_at
+        });
+        PluginLogAdmission::Accept {
+            previously_dropped: 0,
+        }
     }
 
     /// Reserves one fixed-delay cursor sample for a plugin. The reservation is
@@ -908,6 +987,12 @@ const CURSOR_COLOR_SAMPLE_COOLDOWN: Duration = Duration::from_secs(3);
 const MAX_CURSOR_COLOR_SAMPLE_PLUGINS: usize = 32;
 const CURSOR_COLOR_APPROVAL_TTL: Duration = Duration::from_secs(5);
 const MAX_CURSOR_COLOR_APPROVALS: usize = 16;
+const MAX_PLUGIN_LOG_LEVEL_BYTES: usize = 16;
+const MAX_PLUGIN_LOG_MESSAGE_BYTES: usize = 8 * 1024;
+const MAX_PLUGIN_LOGS_PER_WINDOW: usize = 32;
+const MAX_PLUGIN_LOG_WINDOWS: usize = 128;
+const PLUGIN_LOG_WINDOW: Duration = Duration::from_secs(10);
+const PLUGIN_LOG_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
 
 /// The plugin-facing projection deliberately strips the cursor coordinates
 /// from the trusted Toolbox result. A plugin receives a color value only;
@@ -1093,6 +1178,7 @@ pub async fn get_system_icons(
 
 #[tauri::command]
 pub fn index_default_roots(state: State<'_, AppState>) -> IndexStatus {
+    host_log::info("index", "Default-root index rebuild was requested.");
     state.index.rebuild_default_roots()
 }
 
@@ -1101,6 +1187,13 @@ pub fn set_index_roots(
     roots: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<IndexStatus, String> {
+    host_log::info(
+        "index",
+        format!(
+            "Custom-root index rebuild was requested for {} root(s).",
+            roots.len()
+        ),
+    );
     state.index.set_roots(roots)
 }
 
@@ -1447,7 +1540,7 @@ pub async fn install_plugin_from_git(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
+    let plugin_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.install_from_git(&source)?;
@@ -1458,9 +1551,21 @@ pub async fn install_plugin_from_git(
         })
     })
     .await
-    .map_err(|error| format!("Plugin installation task failed: {error}"))??;
+    .map_err(|error| format!("Plugin installation task failed: {error}"))
+    .and_then(|result| result);
+    let mut plugin = plugin_result.map_err(|error| {
+        host_log::warn(
+            "plugins",
+            format!("Managed plugin installation failed: {error}"),
+        );
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    host_log::info(
+        "plugins",
+        format!("Installed managed plugin '{}'.", plugin.id),
+    );
     Ok(plugin)
 }
 
@@ -1536,6 +1641,10 @@ pub async fn update_plugin_from_git(
             plugin_assets.with_plugin_operation(&plugin_id, || {
                 finish_server.finish_plugin_transition(&plugin_id);
             });
+            host_log::warn(
+                "plugins",
+                format!("Plugin '{plugin_id}' update failed: {error}"),
+            );
             return Err(error);
         }
         Err(error) => {
@@ -1543,6 +1652,10 @@ pub async fn update_plugin_from_git(
             plugin_assets.with_plugin_operation(&plugin_id, || {
                 finish_server.finish_plugin_transition(&plugin_id);
             });
+            host_log::error(
+                "plugins",
+                format!("Plugin '{plugin_id}' update task failed: {error}"),
+            );
             return Err(format!("Plugin update task failed: {error}"));
         }
     };
@@ -1571,6 +1684,13 @@ pub async fn update_plugin_from_git(
     let mut update = update;
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
+    host_log::info(
+        "plugins",
+        format!(
+            "Plugin '{}' update finished (changed={}).",
+            update.plugin.id, update.updated
+        ),
+    );
     Ok(update)
 }
 
@@ -1586,7 +1706,7 @@ pub async fn link_plugin_from_local(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
+    let plugin_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.link_from_local(&directory)?;
@@ -1600,9 +1720,18 @@ pub async fn link_plugin_from_local(
         })
     })
     .await
-    .map_err(|error| format!("Local plugin link task failed: {error}"))??;
+    .map_err(|error| format!("Local plugin link task failed: {error}"))
+    .and_then(|result| result);
+    let mut plugin = plugin_result.map_err(|error| {
+        host_log::warn("plugins", format!("Local plugin link failed: {error}"));
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    host_log::info(
+        "plugins",
+        format!("Linked local development plugin '{}'.", plugin.id),
+    );
     Ok(plugin)
 }
 
@@ -1632,7 +1761,7 @@ pub async fn link_official_workspace_plugin(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let mut plugin = tauri::async_runtime::spawn_blocking(move || {
+    let plugin_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let plugin = plugins.link_official_workspace_plugin(&plugin_id)?;
@@ -1643,9 +1772,21 @@ pub async fn link_official_workspace_plugin(
         })
     })
     .await
-    .map_err(|error| format!("Official workspace plugin link task failed: {error}"))??;
+    .map_err(|error| format!("Official workspace plugin link task failed: {error}"))
+    .and_then(|result| result);
+    let mut plugin = plugin_result.map_err(|error| {
+        host_log::warn(
+            "plugins",
+            format!("Official workspace plugin link failed: {error}"),
+        );
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
+    host_log::info(
+        "plugins",
+        format!("Linked official workspace plugin '{}'.", plugin.id),
+    );
     Ok(plugin)
 }
 
@@ -1657,10 +1798,11 @@ pub async fn unlink_plugin_from_local(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let log_plugin_id = plugin_id.clone();
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let unlink_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             plugins.unlink_from_local(&plugin_id)?;
@@ -1671,8 +1813,20 @@ pub async fn unlink_plugin_from_local(
         })
     })
     .await
-    .map_err(|error| format!("Local plugin unlink task failed: {error}"))??;
+    .map_err(|error| format!("Local plugin unlink task failed: {error}"))
+    .and_then(|result| result);
+    unlink_result.map_err(|error| {
+        host_log::warn(
+            "plugins",
+            format!("Local plugin '{log_plugin_id}' unlink failed: {error}"),
+        );
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
+    host_log::info(
+        "plugins",
+        format!("Unlinked local development plugin '{log_plugin_id}'."),
+    );
     Ok(())
 }
 
@@ -1689,7 +1843,7 @@ pub async fn set_plugin_enabled(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
-    let mut update = tauri::async_runtime::spawn_blocking(move || {
+    let update_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let update = plugins.set_enabled(&plugin_id, enabled)?;
@@ -1702,12 +1856,28 @@ pub async fn set_plugin_enabled(
         })
     })
     .await
-    .map_err(|error| format!("Plugin lifecycle task failed: {error}"))??;
+    .map_err(|error| format!("Plugin lifecycle task failed: {error}"))
+    .and_then(|result| result);
+    let mut update = update_result.map_err(|error| {
+        host_log::warn(
+            "plugins",
+            format!("Plugin lifecycle change failed: {error}"),
+        );
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
     let _ = app.emit(
         &format!("ihub://plugin/{}/lifecycle", update.plugin.id),
         json!({ "state": if enabled { "enabled" } else { "disabled" } }),
+    );
+    host_log::info(
+        "plugins",
+        format!(
+            "Plugin '{}' was {}.",
+            update.plugin.id,
+            if enabled { "enabled" } else { "disabled" }
+        ),
     );
     Ok(update)
 }
@@ -1725,7 +1895,7 @@ pub async fn uninstall_managed_plugin(
     let plugin_assets = state.plugin_assets.clone();
     let plugin_settings = state.plugin_settings.clone();
     let host = state.host.clone();
-    let removed = tauri::async_runtime::spawn_blocking(move || {
+    let uninstall_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
             let removed = plugins.uninstall_managed_snapshot(&plugin_id)?;
@@ -1737,20 +1907,35 @@ pub async fn uninstall_managed_plugin(
             // or tempt the caller to retry a destructive operation; retain
             // the harmless orphaned namespace and surface it in diagnostics.
             if let Err(error) = plugin_settings.remove_plugin(&removed.plugin_id) {
-                eprintln!(
-                    "iHub could not remove settings for uninstalled plugin '{}': {error}",
-                    removed.plugin_id
+                host_log::warn(
+                    "plugins",
+                    format!(
+                        "Could not remove settings for uninstalled plugin '{}': {error}",
+                        removed.plugin_id
+                    ),
                 );
             }
             Ok::<PluginUninstallResult, String>(removed)
         })
     })
     .await
-    .map_err(|error| format!("Plugin uninstall task failed: {error}"))??;
+    .map_err(|error| format!("Plugin uninstall task failed: {error}"))
+    .and_then(|result| result);
+    let removed = uninstall_result.map_err(|error| {
+        host_log::warn(
+            "plugins",
+            format!("Managed plugin uninstall failed: {error}"),
+        );
+        error
+    })?;
     refresh_plugin_shortcuts(&app);
     let _ = app.emit(
         &format!("ihub://plugin/{}/lifecycle", removed.plugin_id),
         json!({ "state": "uninstalled" }),
+    );
+    host_log::info(
+        "plugins",
+        format!("Uninstalled managed plugin '{}'.", removed.plugin_id),
     );
     Ok(removed)
 }
@@ -1994,6 +2179,8 @@ pub async fn run_plugin_command(
     if !is_plugin_id(&plugin_id) || !is_plugin_id(&command_id) {
         return Err("Invalid plugin or command ID.".to_owned());
     }
+    let log_plugin_id = plugin_id.clone();
+    let log_command_id = command_id.clone();
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let reservation_server = plugin_assets.clone();
@@ -2005,8 +2192,33 @@ pub async fn run_plugin_command(
         plugins.run_command(&plugin_id, &command_id, input)
     })
     .await
-    .map_err(|error| format!("Plugin command task failed: {error}"))?;
+    .map_err(|error| {
+        host_log::error(
+            "plugins",
+            format!("Native command '{log_plugin_id}/{log_command_id}' task failed: {error}"),
+        );
+        format!("Plugin command task failed: {error}")
+    })?;
     drop(native_command_lease);
+    match &result {
+        Ok(outcome) => host_log::info(
+            "plugins",
+            format!(
+                "Native command '{log_plugin_id}/{log_command_id}' finished (success={}, exitCode={}).",
+                outcome.success,
+                outcome
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            ),
+        ),
+        Err(error) => host_log::warn(
+            "plugins",
+            format!(
+                "Native command '{log_plugin_id}/{log_command_id}' failed without recording stdout, stderr, input, or paths: {error}"
+            ),
+        ),
+    }
     result
 }
 
@@ -2033,13 +2245,29 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<AutostartStatus, S
             .disable()
             .map_err(|error| format!("Could not disable autostart: {error}"))?;
     }
-    get_autostart_status(app)
+    let status = get_autostart_status(app)?;
+    host_log::info(
+        "lifecycle",
+        if status.enabled {
+            "Autostart was enabled."
+        } else {
+            "Autostart was disabled."
+        },
+    );
+    Ok(status)
 }
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
+    host_log::info(
+        "lifecycle",
+        "User requested a full host exit; releasing resident listeners.",
+    );
     if let Err(error) = app.state::<AppState>().super_panel.shutdown_listener() {
-        eprintln!("iHub could not stop the Super Panel listener before exit: {error}");
+        host_log::error(
+            "super-panel",
+            format!("Could not stop the listener before exit: {error}"),
+        );
     }
     app.exit(0);
 }
@@ -2053,6 +2281,13 @@ pub fn set_launcher_hotkey(
     let accelerator = normalize_launcher_hotkey(&accelerator)?;
     let status = replace_launcher_hotkey(&app, &state, accelerator.clone(), Some(accelerator))?;
     refresh_plugin_shortcuts(&app);
+    host_log::info(
+        "hotkey",
+        format!(
+            "Launcher hotkey changed to {}.",
+            status.accelerator.as_deref().unwrap_or("unavailable")
+        ),
+    );
     Ok(status)
 }
 
@@ -2063,6 +2298,13 @@ pub fn reset_launcher_hotkey(
 ) -> Result<LauncherHotkeyStatus, String> {
     let status = replace_launcher_hotkey(&app, &state, LAUNCHER_PRIMARY_HOTKEY.to_owned(), None)?;
     refresh_plugin_shortcuts(&app);
+    host_log::info(
+        "hotkey",
+        format!(
+            "Launcher hotkey reset to {}.",
+            status.accelerator.as_deref().unwrap_or("unavailable")
+        ),
+    );
     Ok(status)
 }
 
@@ -2165,6 +2407,21 @@ pub fn get_app_health(app: AppHandle, state: State<'_, AppState>) -> AppHealth {
         index: state.index.status(),
         plugin_count: state.plugins.list().len(),
     }
+}
+
+/// Returns only the bounded, redacted host diagnostics retained by the native
+/// logger. File-system locations and raw log-file bytes never cross IPC.
+#[tauri::command]
+pub fn get_host_log() -> Result<HostLogSnapshot, String> {
+    host_log::snapshot()
+}
+
+/// Clears only iHub's fixed rotating diagnostics files. The command is
+/// available to the trusted main window but intentionally absent from the
+/// detached-plugin capability.
+#[tauri::command]
+pub fn clear_host_log() -> Result<HostLogSnapshot, String> {
+    host_log::clear()
 }
 
 /// Produces the registry target spelling from Rust's OS and architecture names.
@@ -2317,7 +2574,16 @@ pub fn set_super_panel_enabled(
     if enabled {
         ensure_super_panel_listener(&app)?;
     }
-    Ok(state.super_panel.status())
+    let status = state.super_panel.status();
+    host_log::info(
+        "super-panel",
+        if status.enabled && status.listener_running {
+            "Super Panel was enabled and its listener is running."
+        } else {
+            "Super Panel was disabled and its listener was stopped."
+        },
+    );
+    Ok(status)
 }
 
 /// Consumes exactly one recent, host-issued long-right-click token and then
@@ -2331,6 +2597,10 @@ pub fn consume_super_panel_context(
     state: State<'_, AppState>,
 ) -> Result<SuperPanelContextPayload, String> {
     state.super_panel.consume_context(&context_token)?;
+    host_log::debug(
+        "super-panel",
+        "A one-shot context was consumed; clipboard content and paths were not logged.",
+    );
 
     if let Ok(paths) =
         crate::clipboard_access::with_clipboard(|clipboard| clipboard.get().file_list())
@@ -2610,18 +2880,65 @@ pub async fn plugin_host_call(
             })?;
         let plugins = state.plugins.clone();
         let plugin_id = request_plugin_id.clone();
+        let log_command_id = command_id.clone();
         let native_result = tauri::async_runtime::spawn_blocking(move || {
             plugins.run_command(&plugin_id, &command_id, Some(input))
         })
         .await
-        .map_err(|error| format!("Native plugin command task failed: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Native plugin command task failed: {error}");
+            host_log::error(
+                "plugins",
+                format!(
+                    "Bridge native command '{request_plugin_id}/{log_command_id}' task failed: {error}"
+                ),
+            );
+            message
+        })?;
         // Do not retain the reservation during serialization or response
         // delivery. The worker process has already exited (or errored) here.
         drop(native_command_lease);
+        match &native_result {
+            Ok(outcome) => host_log::info(
+                "plugins",
+                format!(
+                    "Bridge native command '{request_plugin_id}/{log_command_id}' finished (success={}, exitCode={}).",
+                    outcome.success,
+                    outcome
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "none".to_owned())
+                ),
+            ),
+            Err(error) => host_log::warn(
+                "plugins",
+                format!(
+                    "Bridge native command '{request_plugin_id}/{log_command_id}' failed without recording input, stdout, stderr, or paths: {error}"
+                ),
+            ),
+        }
         return native_result.and_then(|result| {
             serde_json::to_value(result)
                 .map_err(|error| format!("Could not encode native plugin command result: {error}"))
         });
+    }
+
+    if request.method == "log" {
+        // Validate the exact active lease and permission under the transition
+        // read lock, then release it before any disk-backed diagnostic work.
+        // A log already accepted from a live document is harmless if a source
+        // transition begins immediately afterward, while holding the global
+        // lock across flush() would delay disable/update operations.
+        plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_for(&request.lease_id, &request_plugin_id) {
+                return Err(
+                    "This plugin frontend session has expired. Reopen the plugin to continue."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)
+        })?;
+        return handle_plugin_log_call(&request, &state);
     }
 
     plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
@@ -3031,7 +3348,8 @@ fn plugin_host_call_for_active_lease(
         // A plugin's executable process surface is its declared backend
         // worker. `process.spawn` is intentionally not exposed until iHub has
         // a real allow-list executor rather than an acknowledgement-only API.
-        "notifications.show" | "log" => {
+        "log" => handle_plugin_log_call(&request, state),
+        "notifications.show" => {
             let event_name = format!("ihub://plugin/{}/host-call", request.plugin_id);
             app.emit(
                 &event_name,
@@ -3717,6 +4035,67 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
     host.clear_plugin_capture_focus_leases(plugin_id);
     host.clear_plugin_cursor_color_approvals(plugin_id);
     host.clear_plugin_cursor_color_sample(plugin_id);
+}
+
+fn handle_plugin_log_call(request: &PluginHostRequest, state: &AppState) -> Result<Value, String> {
+    let level = request
+        .params
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or("info");
+    if level.len() > MAX_PLUGIN_LOG_LEVEL_BYTES {
+        return Err(format!(
+            "Plugin log level exceeds the {MAX_PLUGIN_LOG_LEVEL_BYTES}-byte limit."
+        ));
+    }
+    let message = request
+        .params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Plugin emitted a diagnostic without a text message.");
+    if message.len() > MAX_PLUGIN_LOG_MESSAGE_BYTES {
+        return Err(format!(
+            "Plugin log message exceeds the {} KiB limit.",
+            MAX_PLUGIN_LOG_MESSAGE_BYTES / 1024
+        ));
+    }
+
+    let component = format!("plugin:{}", request.plugin_id);
+    match state.host.admit_plugin_log(&request.plugin_id) {
+        PluginLogAdmission::Accept { previously_dropped } => {
+            if previously_dropped > 0 {
+                host_log::warn(
+                    &component,
+                    format!(
+                        "Dropped {previously_dropped} plugin-authored diagnostic message(s) during the previous rate-limit window."
+                    ),
+                );
+            }
+            // `details` may contain arbitrary application content, paths,
+            // context handles, or secrets, so it is deliberately ignored.
+            // The message is bounded here and pattern-sanitized again before
+            // the host log persists it.
+            match level {
+                "debug" => host_log::debug(&component, message),
+                "warn" | "warning" => host_log::warn(&component, message),
+                "error" => host_log::error(&component, message),
+                _ => host_log::info(&component, message),
+            }
+            Ok(json!({ "accepted": true, "rateLimited": false }))
+        }
+        PluginLogAdmission::Drop { report_limit } => {
+            if report_limit {
+                host_log::warn(
+                    &component,
+                    format!(
+                        "Plugin diagnostics exceeded {MAX_PLUGIN_LOGS_PER_WINDOW} messages per {} seconds; further messages are being dropped.",
+                        PLUGIN_LOG_WINDOW.as_secs()
+                    ),
+                );
+            }
+            Ok(json!({ "accepted": false, "rateLimited": true }))
+        }
+    }
 }
 
 fn canonical_selected_directory(directory: PathBuf) -> Result<String, String> {
@@ -4510,6 +4889,10 @@ fn release_detached_plugin_window_lease(window: &tauri::Window) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            host_log::info(
+                "lifecycle",
+                "A second launch request focused the resident host.",
+            );
             show_launcher(app);
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -4524,10 +4907,15 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" {
+                    host_log::debug(
+                        "lifecycle",
+                        "Main window close request hid the resident launcher.",
+                    );
                     api.prevent_close();
                     let _ = window.emit("ihub://hide-search", json!({}));
                     let _ = window.hide();
                 } else {
+                    host_log::debug("plugins", "A detached plugin host window closed.");
                     // A normal decorated detached window really closes. Revoke
                     // its iframe lease before the webview disappears so React
                     // cleanup is an optimization rather than a security
@@ -4536,6 +4924,7 @@ pub fn run() {
                 }
             }
             WindowEvent::Destroyed => {
+                host_log::debug("lifecycle", "A host window was destroyed.");
                 // Platform shutdown paths can skip CloseRequested. This is
                 // idempotent after the normal close branch.
                 release_detached_plugin_window_lease(window);
@@ -4562,6 +4951,7 @@ pub fn run() {
                 }
                 let _ = window.emit("ihub://hide-search", json!({}));
                 let _ = window.hide();
+                host_log::debug("lifecycle", "Launcher hid after focus moved away.");
             }
             _ => {}
         })
@@ -4575,7 +4965,16 @@ pub fn run() {
                 app.set_dock_visibility(false);
             }
 
-            let state = AppState::new(app.path().app_data_dir()?);
+            let app_data_dir = app.path().app_data_dir()?;
+            if let Err(error) = host_log::initialize(&app_data_dir) {
+                // Logging is diagnostic infrastructure, not an availability
+                // dependency. Keep the launcher usable when app-data storage
+                // is temporarily read-only; later log reads surface the same
+                // bounded error through the settings UI.
+                host_log::error("lifecycle", error);
+            }
+            host_log::info("lifecycle", "iHub host startup initialized.");
+            let state = AppState::new(app_data_dir);
             state.index.start_change_watcher();
             state.index.rebuild_default_roots();
             let clipboard_history = state.clipboard_history.clone();
@@ -4583,7 +4982,10 @@ pub fn run() {
             app.manage(DetachedPluginWindowRegistry::default());
             if app.state::<AppState>().super_panel.enabled() {
                 if let Err(error) = ensure_super_panel_listener(app.handle()) {
-                    eprintln!("iHub could not restore the Super Panel listener: {error}");
+                    host_log::error(
+                        "super-panel",
+                        format!("Could not restore the listener: {error}"),
+                    );
                 }
             }
             let _ = std::thread::Builder::new()
@@ -4600,7 +5002,26 @@ pub fn run() {
             let launcher_hotkey = register_launcher_hotkey(app.handle(), preferred_launcher_hotkey);
             app.state::<AppState>()
                 .set_launcher_hotkey_status(launcher_hotkey);
+            let active_hotkey = app.state::<AppState>().launcher_hotkey_status();
+            host_log::info(
+                "hotkey",
+                format!(
+                    "Launcher hotkey registration finished with {}.",
+                    active_hotkey
+                        .accelerator
+                        .as_deref()
+                        .unwrap_or("no active accelerator")
+                ),
+            );
             refresh_plugin_shortcuts(app.handle());
+            host_log::info(
+                "lifecycle",
+                if launched_from_autostart() {
+                    "Resident host ready after autostart."
+                } else {
+                    "Resident host ready after an explicit launch."
+                },
+            );
             if !launched_from_autostart() {
                 show_launcher(app.handle());
             }
@@ -4682,6 +5103,8 @@ pub fn run() {
             set_launcher_hotkey,
             reset_launcher_hotkey,
             get_app_health,
+            get_host_log,
+            clear_host_log,
             center_launcher_window,
             plugin_host_call,
             dispatch_detached_plugin_frontend_event,
@@ -4766,14 +5189,20 @@ fn register_launcher_hotkey(
             }
             Ok(()) => {
                 if let Some(preferred) = preferred_accelerator.as_deref() {
-                    eprintln!(
-                        "iHub could not activate preferred launcher hotkey {preferred}; using {} as a recovery binding. Tray menu \"Show iHub\" remains available.",
-                        candidate.accelerator
+                    host_log::warn(
+                        "hotkey",
+                        format!(
+                            "Could not activate preferred launcher hotkey {preferred}; using {} as a recovery binding. The tray action remains available.",
+                            candidate.accelerator
+                        ),
                     );
                 } else {
-                    eprintln!(
-                        "iHub could not activate {LAUNCHER_PRIMARY_HOTKEY}; using {} as a recovery binding. Tray menu \"Show iHub\" remains available.",
-                        candidate.accelerator
+                    host_log::warn(
+                        "hotkey",
+                        format!(
+                            "Could not activate {LAUNCHER_PRIMARY_HOTKEY}; using {} as a recovery binding. The tray action remains available.",
+                            candidate.accelerator
+                        ),
                     );
                 }
                 return LauncherHotkeyStatus::fallback_for(
@@ -4782,16 +5211,20 @@ fn register_launcher_hotkey(
                 );
             }
             Err(error) => {
-                eprintln!(
-                    "iHub could not register launcher hotkey {} {error}",
-                    candidate.accelerator
+                host_log::warn(
+                    "hotkey",
+                    format!(
+                        "Could not register launcher hotkey {} {error}",
+                        candidate.accelerator
+                    ),
                 );
             }
         }
     }
 
-    eprintln!(
-        "iHub could not register a launcher hotkey. Tray menu \"Show iHub\" remains available."
+    host_log::error(
+        "hotkey",
+        "Could not register a launcher hotkey. The tray action remains available.",
     );
     LauncherHotkeyStatus::unavailable_for(preferred_accelerator)
 }
@@ -4878,7 +5311,10 @@ fn refresh_plugin_shortcuts(app: &AppHandle) {
             continue;
         }
         if let Err(error) = unregister_launcher_binding(app, &accelerator) {
-            eprintln!("iHub could not unregister stale plugin shortcut {accelerator}: {error}");
+            host_log::warn(
+                "hotkey",
+                format!("Could not unregister stale plugin shortcut {accelerator}: {error}"),
+            );
             failed_unregistrations.insert(accelerator);
         }
     }
@@ -4916,6 +5352,12 @@ fn refresh_plugin_shortcuts(app: &AppHandle) {
         }
     }
 
+    let active_count = retained.len();
+    let unavailable_count = plan
+        .statuses
+        .values()
+        .filter(|status| status.registration != "registered")
+        .count();
     *state
         .plugin_shortcuts
         .lock()
@@ -4923,6 +5365,12 @@ fn refresh_plugin_shortcuts(app: &AppHandle) {
         active: retained,
         statuses: plan.statuses,
     };
+    host_log::info(
+        "hotkey",
+        format!(
+            "Plugin shortcut reconciliation finished (active={active_count}, inactiveOrBlocked={unavailable_count})."
+        ),
+    );
     let _ = app.emit("ihub://plugin-shortcuts-changed", json!({}));
 }
 
@@ -4956,9 +5404,12 @@ fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
                 // plugin-ID record. Never accept an event target from a
                 // renderer or broadcast a detached command to every WebView.
                 if let Err(error) = app.emit_to(&label, "ihub://plugin-global-shortcut", payload) {
-                    eprintln!(
-                        "iHub could not deliver detached plugin shortcut {}: {error}",
-                        binding.shortcut
+                    host_log::warn(
+                        "hotkey",
+                        format!(
+                            "Could not deliver detached plugin shortcut {}: {error}",
+                            binding.shortcut
+                        ),
                     );
                     return;
                 }
@@ -4971,9 +5422,12 @@ fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!(
-                    "iHub could not route detached plugin shortcut {}: {error}",
-                    binding.shortcut
+                host_log::warn(
+                    "hotkey",
+                    format!(
+                        "Could not route detached plugin shortcut {}: {error}",
+                        binding.shortcut
+                    ),
                 );
                 return;
             }
@@ -4985,9 +5439,12 @@ fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
     // WebView cannot also observe and execute the same binding.
     show_launcher(app);
     if let Err(error) = app.emit_to("main", "ihub://plugin-global-shortcut", payload) {
-        eprintln!(
-            "iHub could not deliver plugin shortcut {}: {error}",
-            binding.shortcut
+        host_log::warn(
+            "hotkey",
+            format!(
+                "Could not deliver plugin shortcut {}: {error}",
+                binding.shortcut
+            ),
         );
     }
 }
@@ -5077,18 +5534,26 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             Some(TrayAction::About) => open_tray_surface(app, "about"),
             Some(TrayAction::Help) => {
                 if let Err(error) = open_fixed_tray_url(IHUB_HELP_URL) {
-                    eprintln!("iHub could not open its fixed help URL: {error}");
+                    host_log::warn(
+                        "lifecycle",
+                        format!("Could not open the fixed help URL: {error}"),
+                    );
                 }
             }
             Some(TrayAction::Feedback) => {
                 if let Err(error) = open_fixed_tray_url(IHUB_FEEDBACK_URL) {
-                    eprintln!("iHub could not open its fixed feedback URL: {error}");
+                    host_log::warn(
+                        "lifecycle",
+                        format!("Could not open the fixed feedback URL: {error}"),
+                    );
                 }
             }
             Some(TrayAction::Restart) => {
+                host_log::info("lifecycle", "User requested a host restart.");
                 if let Err(error) = app.state::<AppState>().super_panel.shutdown_listener() {
-                    eprintln!(
-                        "iHub could not stop the Super Panel listener before restart: {error}"
+                    host_log::error(
+                        "super-panel",
+                        format!("Could not stop the listener before restart: {error}"),
                     );
                 }
                 app.restart();
@@ -5129,6 +5594,10 @@ fn reveal_super_panel(app: &AppHandle, trigger: SuperPanelTrigger) {
     let Some(event) = event else {
         return;
     };
+    host_log::debug(
+        "super-panel",
+        "A deliberate long-right-click opened the compact launcher.",
+    );
 
     let _ = window.unminimize();
     if let Some(state) = window.try_state::<AppState>() {
@@ -5181,10 +5650,16 @@ fn apply_super_panel_reveal_geometry<R: tauri::Runtime>(
         return;
     };
     if let Err(error) = window.set_size(layout.size) {
-        eprintln!("iHub could not size the Super Panel surface: {error}");
+        host_log::warn(
+            "super-panel",
+            format!("Could not size the launcher surface: {error}"),
+        );
     }
     if let Err(error) = window.set_position(layout.position) {
-        eprintln!("iHub could not anchor the Super Panel surface: {error}");
+        host_log::warn(
+            "super-panel",
+            format!("Could not anchor the launcher surface: {error}"),
+        );
     }
 }
 
@@ -5272,7 +5747,7 @@ fn apply_launcher_reveal_geometry<R: tauri::Runtime>(window: &tauri::WebviewWind
         // Without any display, moving/resizing is neither useful nor safe.
         // Leave the existing native geometry untouched until a display is
         // available rather than guessing an off-screen coordinate.
-        eprintln!("iHub could not find a display for the launcher reveal.");
+        host_log::warn("window", "Could not find a display for launcher reveal.");
         return;
     };
 
@@ -5282,34 +5757,40 @@ fn apply_launcher_reveal_geometry<R: tauri::Runtime>(window: &tauri::WebviewWind
         size: work_area.size,
     })
     .reveal_layout(monitor.scale_factor()) else {
-        eprintln!("iHub found a display with no usable launcher work area.");
+        host_log::warn("window", "The display has no usable launcher work area.");
         return;
     };
 
     if let Err(error) = window.set_size(layout.size) {
-        eprintln!("iHub could not fit the launcher into the display work area: {error}");
+        host_log::warn(
+            "window",
+            format!("Could not fit the launcher into the display work area: {error}"),
+        );
     }
     if let Err(error) = window.set_position(layout.position) {
-        eprintln!("iHub could not center the launcher in the display work area: {error}");
+        host_log::warn(
+            "window",
+            format!("Could not center the launcher in the display work area: {error}"),
+        );
     }
 }
 
 fn open_path_in_system(path: &PathBuf) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("explorer.exe");
+        let mut command = background_command("explorer.exe");
         command.arg(path);
         command
     };
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("open");
+        let mut command = background_command("open");
         command.arg(path);
         command
     };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = background_command("xdg-open");
         command.arg(path);
         command
     };
@@ -5326,19 +5807,19 @@ fn open_external_in_system(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("explorer.exe");
+        let mut command = background_command("explorer.exe");
         command.arg(url);
         command
     };
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("open");
+        let mut command = background_command("open");
         command.arg(url);
         command
     };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = background_command("xdg-open");
         command.arg(url);
         command
     };
@@ -5483,10 +5964,11 @@ mod tests {
         LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
         LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PluginBatchRenamePreview,
         PluginCursorColor, PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
-        PluginLauncherContextImageRequest, PluginLauncherContextRequest, LAUNCHER_CONTEXT_TTL,
-        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
-        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_SEARCH_SELECTION_TTL,
+        PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
+        LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE,
+        LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES,
+        MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_LOGS_PER_WINDOW,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_SEARCH_SELECTION_TTL,
     };
 
     #[test]
@@ -6954,6 +7436,45 @@ mod tests {
         clear_plugin_runtime_state(&host, owner);
         host.reserve_plugin_cursor_color_sample(owner)
             .expect("closing a runtime must discard its pending cooldown state");
+    }
+
+    #[test]
+    fn plugin_diagnostics_are_rate_limited_and_report_aggregated_drops() {
+        let host = PluginHostState::default();
+        let plugin_id = "bounded-logger";
+        let started_at = Instant::now();
+        for _ in 0..MAX_PLUGIN_LOGS_PER_WINDOW {
+            assert_eq!(
+                host.admit_plugin_log_at(plugin_id, started_at),
+                PluginLogAdmission::Accept {
+                    previously_dropped: 0
+                }
+            );
+        }
+        assert_eq!(
+            host.admit_plugin_log_at(plugin_id, started_at),
+            PluginLogAdmission::Drop { report_limit: true }
+        );
+        assert_eq!(
+            host.admit_plugin_log_at(plugin_id, started_at),
+            PluginLogAdmission::Drop {
+                report_limit: false
+            }
+        );
+        clear_plugin_runtime_state(&host, plugin_id);
+        assert_eq!(
+            host.admit_plugin_log_at(plugin_id, started_at),
+            PluginLogAdmission::Drop {
+                report_limit: false
+            },
+            "disposing and reopening a plugin runtime must not reset the diagnostics limiter"
+        );
+        assert_eq!(
+            host.admit_plugin_log_at(plugin_id, started_at + PLUGIN_LOG_WINDOW),
+            PluginLogAdmission::Accept {
+                previously_dropped: 3
+            }
+        );
     }
 
     #[test]

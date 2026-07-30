@@ -77,3 +77,6 @@ windows-sys = { version = "0.61.2", features = [
 core-foundation = "0.10"
 core-graphics = "0.25"
 keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

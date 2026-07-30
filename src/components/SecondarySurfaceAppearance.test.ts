@@ -45,4 +45,16 @@ describe("secondary surfaces uTools light appearance", () => {
       /\.toolbox-feedback\.is-error \{[^}]*color: #a84249;/s,
     );
   });
+
+  it("keeps the bounded diagnostics viewer scrollable and readable", () => {
+    expect(stylesheet).toMatch(
+      /\.settings-log__viewport \{[^}]*background: var\(--ihub-surface-deep\);[^}]*border: 1px solid var\(--ihub-border\);[^}]*max-height: 220px;[^}]*overflow: auto;/s,
+    );
+    expect(stylesheet).toMatch(
+      /\.settings-log__entry \{[^}]*display: grid;[^}]*font-family: "SFMono-Regular"[^}]*grid-template-columns: 54px 36px minmax\(70px, 105px\) minmax\(0, 1fr\);/s,
+    );
+    expect(stylesheet).toMatch(
+      /\.settings-log__entry\.is-error \.settings-log__level \{[^}]*color: #b33f46;/s,
+    );
+  });
 });

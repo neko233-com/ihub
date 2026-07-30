@@ -257,7 +257,7 @@ test('normalizer CLI writes a normalized manifest without changing signatures', 
         '--tag',
         TAG,
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', windowsHide: true },
     );
     assert.equal(result.status, 0, result.stderr);
     const normalized = JSON.parse(readFileSync(outputPath, 'utf8'));

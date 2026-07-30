@@ -513,6 +513,160 @@ a:focus-visible {
   opacity: 0.72;
 }
 
+.settings-section--diagnostics .settings-section__copy {
+  grid-column: 2 / 4;
+  min-width: 0;
+}
+
+.settings-log__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.settings-log__action {
+  align-items: center;
+  background: var(--ihub-accent-soft);
+  border: 1px solid var(--ihub-accent-border);
+  border-radius: 6px;
+  color: var(--ihub-accent-strong);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  gap: 5px;
+  min-height: 27px;
+  padding: 0 8px;
+}
+
+.settings-log__action:hover:not(:disabled) {
+  background: rgba(50, 119, 168, 0.16);
+  color: #1f587f;
+}
+
+.settings-log__action.is-danger {
+  background: rgba(193, 67, 67, 0.07);
+  border-color: rgba(193, 67, 67, 0.22);
+  color: #a33a3a;
+}
+
+.settings-log__action.is-danger:hover:not(:disabled) {
+  background: rgba(193, 67, 67, 0.13);
+  color: #872d2d;
+}
+
+.settings-log__action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.settings-log__action:focus-visible,
+.settings-log__viewport:focus-visible {
+  outline: 2px solid rgba(50, 119, 168, 0.55);
+  outline-offset: 2px;
+}
+
+.settings-log__viewport {
+  background: var(--ihub-surface-deep);
+  border: 1px solid var(--ihub-border);
+  border-radius: 8px;
+  color: var(--ihub-text);
+  margin-top: 10px;
+  max-height: 220px;
+  min-height: 96px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #b6b6b6 transparent;
+}
+
+.settings-log__entries {
+  list-style: none;
+  margin: 0;
+  padding: 5px 0;
+}
+
+.settings-log__entry {
+  align-items: baseline;
+  border-bottom: 1px solid var(--ihub-border);
+  display: grid;
+  font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  gap: 7px;
+  grid-template-columns: 54px 36px minmax(70px, 105px) minmax(0, 1fr);
+  line-height: 1.5;
+  padding: 5px 8px;
+}
+
+.settings-log__entry:last-child {
+  border-bottom: 0;
+}
+
+.settings-log__entry time {
+  color: #858b90;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-log__level {
+  color: #59717f;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+}
+
+.settings-log__entry.is-warn .settings-log__level {
+  color: #9a6a18;
+}
+
+.settings-log__entry.is-error .settings-log__level {
+  color: #b33f46;
+}
+
+.settings-log__entry.is-debug .settings-log__level {
+  color: #777d81;
+}
+
+.settings-log__component {
+  color: #356986;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-log__message {
+  color: var(--ihub-text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.settings-log__empty {
+  color: var(--ihub-text-muted);
+  font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+  font-size: 9px;
+  margin: 0;
+  padding: 22px 10px;
+  text-align: center;
+}
+
+.settings-log__meta {
+  color: var(--ihub-text-muted) !important;
+  font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+  font-size: 8px !important;
+  line-height: 1.45 !important;
+  margin-top: 6px !important;
+}
+
+@media (max-width: 560px) {
+  .settings-log__entry {
+    grid-template-columns: 52px 36px minmax(0, 1fr);
+  }
+
+  .settings-log__message {
+    grid-column: 1 / -1;
+  }
+}
+
 .update-progress {
   background: rgba(210, 234, 235, 0.09);
   border-radius: 999px;

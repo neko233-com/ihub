@@ -11,6 +11,10 @@ if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $installScriptPath = Join-Path $repositoryRoot 'scripts\install-dev.ps1'
 $developmentScriptPath = Join-Path $repositoryRoot 'scripts\dev.ps1'
+$publicInstallScriptPath = Join-Path $repositoryRoot 'scripts\install.ps1'
+$backgroundProcessModulePath = Join-Path $repositoryRoot 'src-tauri\src\background_process.rs'
+$rustSourceRoot = Join-Path $repositoryRoot 'src-tauri\src'
+$nsisHookPath = Join-Path $repositoryRoot 'src-tauri\windows\installer-hooks.nsh'
 
 function Read-PowerShellAst {
     param(
@@ -83,8 +87,156 @@ function Assert-OrderedSourceMarkers {
 
 $installAst = Read-PowerShellAst -Path $installScriptPath -Label 'install-dev.ps1'
 $developmentAst = Read-PowerShellAst -Path $developmentScriptPath -Label 'dev.ps1'
+$publicInstallAst = Read-PowerShellAst -Path $publicInstallScriptPath -Label 'install.ps1'
 Assert-NoForcedProcessTermination -Ast $installAst -Label 'install-dev.ps1'
 Assert-NoForcedProcessTermination -Ast $developmentAst -Label 'dev.ps1'
+Assert-NoForcedProcessTermination -Ast $publicInstallAst -Label 'install.ps1'
+
+# A release iHub process has no parent console. Every console-subsystem child
+# therefore needs CREATE_NO_WINDOW at the Rust boundary, while every
+# PowerShell entry point launched from Explorer or Task Scheduler must hide
+# its own host before git/node/cargo/makensis inherit it.
+$backgroundProcessSource = Get-Content -LiteralPath $backgroundProcessModulePath -Raw
+foreach ($requiredMarker in @(
+        'const CREATE_NO_WINDOW: u32 = 0x0800_0000;'
+        'command.creation_flags(CREATE_NO_WINDOW);'
+    )) {
+    if (-not $backgroundProcessSource.Contains($requiredMarker)) {
+        throw "background_process.rs is missing required Windows background-process marker '$requiredMarker'."
+    }
+}
+
+$directRustConstructors = @()
+foreach ($rustSource in @(Get-ChildItem -LiteralPath $rustSourceRoot -Recurse -File -Filter '*.rs')) {
+    if ([string]::Equals($rustSource.FullName, $backgroundProcessModulePath, [StringComparison]::OrdinalIgnoreCase)) {
+        continue
+    }
+    $source = Get-Content -LiteralPath $rustSource.FullName -Raw
+    if ($source.Contains('Command::new(') -or $source.Contains('std::process::Command::new(')) {
+        $directRustConstructors += $rustSource.Name
+    }
+}
+if ($directRustConstructors.Count -gt 0) {
+    throw "Rust child processes bypass background_command in: $($directRustConstructors -join ', ')."
+}
+
+$hiddenPowerShellArguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File'
+$taskArgumentFunction = $installAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'ConvertTo-PowerShellFileArguments'
+    }, $true)
+if ($null -eq $taskArgumentFunction -or -not $taskArgumentFunction.Body.Extent.Text.Contains($hiddenPowerShellArguments)) {
+    throw 'Persistent scheduled-task PowerShell arguments do not require a hidden, non-interactive host.'
+}
+$shortcutArgumentAssignment = $installAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'baseArguments'
+    }, $true)
+if (
+    $null -eq $shortcutArgumentAssignment -or
+    -not $shortcutArgumentAssignment.Right.Extent.Text.Contains('//B //NoLogo') -or
+    -not $shortcutArgumentAssignment.Right.Extent.Text.Contains('$launcherShimPath')
+) {
+    throw 'Development Start Menu shortcuts do not require the background WScript launcher shim.'
+}
+$shortcutTargetAssignment = $installAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$shortcut.TargetPath'
+    }, $true)
+if (
+    $null -eq $shortcutTargetAssignment -or
+    -not $shortcutTargetAssignment.Right.Extent.Text.Contains('$systemWscriptPath')
+) {
+    throw 'Development Start Menu shortcuts still target a console-subsystem executable.'
+}
+$installScriptSource = Get-Content -LiteralPath $installScriptPath -Raw
+foreach ($requiredShimMarker in @(
+        "Join-Path `$env:SystemRoot 'System32\wscript.exe'"
+        'Test-IHubSafeRegularFile -Path $systemWscriptPath'
+        'CreateObject("WScript.Shell")'
+        'shell.Run(commandLine, 0, False)'
+        '-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File'
+    )) {
+    if (-not $installScriptSource.Contains($requiredShimMarker)) {
+        throw "The GUI development launcher shim is missing '$requiredShimMarker'."
+    }
+}
+
+$nsisHookSource = Get-Content -LiteralPath $nsisHookPath -Raw
+if (
+    $nsisHookSource -match '(?i)!system\s+`[^`]*powershell(?:\.exe)?' -and
+    $nsisHookSource -notmatch '(?i)!system\s+`[^`]*-NonInteractive\s+-WindowStyle\s+Hidden[^`]*`'
+) {
+    throw 'The NSIS build hook starts PowerShell without a hidden, non-interactive window.'
+}
+
+foreach ($scriptRecord in @(
+        [pscustomobject]@{ Ast = $developmentAst; Label = 'dev.ps1' }
+        [pscustomobject]@{ Ast = $publicInstallAst; Label = 'install.ps1' }
+    )) {
+    foreach ($command in @($scriptRecord.Ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Start-Process'
+                }, $true))) {
+        if (
+            $command.Extent.Text -match "(?i)(?:^|\s)(?:'|`")?/S(?:'|`")?(?:\s|$)" -and
+            $command.Extent.Text -notmatch '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)'
+        ) {
+            throw "$($scriptRecord.Label) starts an unattended installer without -WindowStyle Hidden at line $($command.Extent.StartLineNumber)."
+        }
+    }
+}
+
+# Node's child_process defaults to creating a console window when its parent
+# is a GUI-subsystem process. Every maintained script wrapper must opt into
+# windowsHide so git, cmd.exe, Node, Cargo, and build helpers stay backgrounded
+# even when a future caller launches the script outside an inherited console.
+$nodeChildCallPattern = '\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\('
+foreach ($scriptFile in @(Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'scripts') -Recurse -File)) {
+    if ($scriptFile.Extension -notin @('.js', '.mjs', '.cjs', '.sh')) {
+        continue
+    }
+    $scriptSource = Get-Content -LiteralPath $scriptFile.FullName -Raw
+    if ($scriptSource -notmatch 'node:child_process') {
+        continue
+    }
+    $childCallCount = [regex]::Matches($scriptSource, $nodeChildCallPattern).Count
+    $windowsHideCount = [regex]::Matches($scriptSource, '\bwindowsHide\s*:\s*true\b').Count
+    if ($childCallCount -ne $windowsHideCount) {
+        throw "$($scriptFile.Name) has $childCallCount Node child-process call(s) but $windowsHideCount windowsHide:true option(s)."
+    }
+}
+
+$cargoManifest = Get-Content -LiteralPath (Join-Path $repositoryRoot 'src-tauri\Cargo.toml') -Raw
+if ($cargoManifest -match '(?i)tauri[-_]plugin[-_]shell') {
+    throw 'The unrestricted Tauri shell process plugin must remain absent.'
+}
+
+$terminalLaunchPattern = '(?im)(?:open\s+(?:-a|--application)\s+["'']?Terminal(?:\.app)?|tell\s+application\s+["'']Terminal(?:\.app)?|Terminal\.app)'
+foreach ($sourceRoot in @(
+        (Join-Path $repositoryRoot 'src-tauri\src')
+        (Join-Path $repositoryRoot 'scripts')
+    )) {
+    foreach ($sourceFile in @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | Where-Object {
+                $_.Extension -in @('.rs', '.ps1', '.sh', '.js', '.mjs', '.cjs')
+            })) {
+        if (
+            [string]::Equals($sourceFile.FullName, $PSCommandPath, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($sourceFile.FullName, $backgroundProcessModulePath, [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            continue
+        }
+        $source = Get-Content -LiteralPath $sourceFile.FullName -Raw
+        if ($source -match $terminalLaunchPattern) {
+            throw "$($sourceFile.Name) contains an explicit macOS Terminal application launch."
+        }
+    }
+}
 
 $enableFunction = $installAst.Find({
         param($node)
@@ -160,7 +312,7 @@ try {
     New-Item -ItemType Directory -Path $smokeLocalAppData -Force | Out-Null
     $env:LOCALAPPDATA = $smokeLocalAppData
 
-    # Build only the two trusted-launcher files that the read-only task-object
+    # Build only the trusted-launcher files that the read-only task-object
     # preflight requires. Calling -NoLaunch here would create real Start Menu
     # shortcuts because Windows resolves that known folder independently of an
     # overridden APPDATA environment variable.
@@ -169,14 +321,32 @@ try {
     $smokeMarker = [ordered]@{
         schemaVersion    = 1
         managedBy        = 'iHub Development Launcher'
-        launcherRevision = 3
+        launcherRevision = 4
         sourceRoot       = $repositoryRoot
         installedAt      = [DateTime]::UtcNow.ToString('o')
     }
     Set-Content -LiteralPath (Join-Path $smokeInstallRoot 'launcher.json') -Value ($smokeMarker | ConvertTo-Json) -Encoding UTF8 -NoNewline
     Set-Content -LiteralPath (Join-Path $smokeInstallRoot 'Launch iHub Development.ps1') -Value "[CmdletBinding()]`r`nparam()" -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath (Join-Path $smokeInstallRoot 'Launch iHub Development.vbs') -Value "Option Explicit`r`nWScript.Quit 0" -Encoding UTF8 -NoNewline
 
     & $installScriptPath -EnablePersistentDevelopmentInstall -UpstreamCheckMinutes 30 -WhatIf
+
+    $trustedStatus = ((& $installScriptPath -DevelopmentInstallStatus) -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($trustedStatus.launcherMarker -ne 'trusted') {
+        throw "Development install status did not trust the complete revision-4 launcher fixture: $($trustedStatus.launcherMarker)"
+    }
+    $smokeShimPath = Join-Path $smokeInstallRoot 'Launch iHub Development.vbs'
+    $smokeShimBackupPath = Join-Path $smokeInstallRoot 'Launch iHub Development.vbs.smoke-backup'
+    [IO.File]::Move($smokeShimPath, $smokeShimBackupPath)
+    try {
+        $missingShimStatus = ((& $installScriptPath -DevelopmentInstallStatus) -join [Environment]::NewLine) | ConvertFrom-Json
+        if ($missingShimStatus.launcherMarker -ne 'refresh-required') {
+            throw "Development install status trusted a revision-4 marker with a missing WScript shim: $($missingShimStatus.launcherMarker)"
+        }
+    }
+    finally {
+        [IO.File]::Move($smokeShimBackupPath, $smokeShimPath)
+    }
 }
 finally {
     $env:LOCALAPPDATA = $previousLocalAppData

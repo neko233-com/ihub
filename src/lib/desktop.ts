@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SuperPanelEvent } from "./types";
+import {
+  browserHostLogSnapshot,
+  emptyHostLogSnapshot,
+  normalizeHostLogSnapshot,
+} from "./host-log";
+import type { HostLogSnapshot, SuperPanelEvent } from "./types";
 
 export const isDesktop = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -157,4 +162,28 @@ export async function onSuperPanel(
     }
     callback(payload as SuperPanelEvent);
   });
+}
+
+/** Reads the native logger's bounded projection. Browser preview returns a
+ * static, content-free fixture and never attempts filesystem access. */
+export async function readHostLog(): Promise<HostLogSnapshot> {
+  if (!isDesktop()) {
+    return browserHostLogSnapshot();
+  }
+  return normalizeHostLogSnapshot(
+    await command<HostLogSnapshot>("get_host_log"),
+  );
+}
+
+/** Clears only the host logger's fixed rotating files. Browser preview clears
+ * a fresh fixture in memory so UI validation cannot mutate the workstation. */
+export async function clearHostLog(
+  current?: HostLogSnapshot,
+): Promise<HostLogSnapshot> {
+  if (!isDesktop()) {
+    return emptyHostLogSnapshot(current ?? browserHostLogSnapshot());
+  }
+  return normalizeHostLogSnapshot(
+    await command<HostLogSnapshot>("clear_host_log"),
+  );
 }

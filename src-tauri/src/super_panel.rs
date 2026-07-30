@@ -19,6 +19,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::host_log;
+
 pub(crate) const SUPER_PANEL_HOLD_MS: u64 = 460;
 const SUPER_PANEL_MOVE_TOLERANCE_PHYSICAL_PX: i32 = 10;
 const DETECTOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -176,11 +178,18 @@ impl SuperPanelState {
     }
 
     pub(crate) fn listener_failed(&self, error: String) {
+        host_log::error(
+            "super-panel",
+            format!("Native listener failed and will be disabled: {error}"),
+        );
         let stop_error = self.set_enabled(false).err();
         if let Some(path) = self.preference_path.as_deref() {
             if let Err(persist_error) = persist_preference(path, false) {
-                eprintln!(
-                    "iHub could not persist the disabled Super Panel state after listener failure: {persist_error}"
+                host_log::error(
+                    "super-panel",
+                    format!(
+                        "Could not persist disabled state after listener failure: {persist_error}"
+                    ),
                 );
             }
         }
@@ -229,6 +238,7 @@ impl SuperPanelState {
                     .last_error
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                host_log::info("super-panel", "Native listener started.");
                 Ok(())
             }
             Err(failure) => {
@@ -259,6 +269,7 @@ impl SuperPanelState {
         match listener.stop() {
             Ok(()) => {
                 *slot = None;
+                host_log::info("super-panel", "Native listener stopped.");
                 Ok(())
             }
             Err(error) => {
@@ -323,7 +334,10 @@ impl SuperPanelState {
 impl Drop for SuperPanelState {
     fn drop(&mut self) {
         if let Err(error) = self.stop_listener() {
-            eprintln!("iHub could not stop the Super Panel listener during shutdown: {error}");
+            host_log::error(
+                "super-panel",
+                format!("Could not stop the listener during shutdown: {error}"),
+            );
         }
     }
 }
@@ -419,7 +433,10 @@ fn persist_preference(path: &Path, enabled: bool) -> Result<(), String> {
         });
     }
     if let Err(error) = fs::remove_file(&backup) {
-        eprintln!("iHub could not remove an old Super Panel preference backup: {error}");
+        host_log::warn(
+            "super-panel",
+            format!("Could not remove an old preference backup: {error}"),
+        );
     }
     Ok(())
 }
@@ -578,7 +595,10 @@ impl GlobalRightHoldListener {
 impl Drop for GlobalRightHoldListener {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
-            eprintln!("iHub could not finish stopping a Super Panel listener: {error}");
+            host_log::error(
+                "super-panel",
+                format!("Could not finish stopping a listener: {error}"),
+            );
         }
     }
 }

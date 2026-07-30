@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    host_log,
     models::{IndexStatus, SearchResult},
     ntfs_usn,
 };
@@ -957,7 +958,10 @@ impl SearchIndex {
         }) {
             Ok(watcher) => watcher,
             Err(error) => {
-                eprintln!("iHub could not create the local search change watcher: {error}");
+                host_log::error(
+                    "index",
+                    format!("Could not create the local search change watcher: {error}"),
+                );
                 set_watch_status(
                     &self.inner,
                     "unavailable",
@@ -971,6 +975,7 @@ impl SearchIndex {
         update_watch_registration_status(&self.inner, &roots, registration);
         let (control_sender, control_receiver) = mpsc::channel();
         let inner = Arc::clone(&self.inner);
+        let watched_root_count = roots.len();
         match thread::Builder::new()
             .name("ihub-file-index-watcher".to_owned())
             .spawn(move || {
@@ -988,9 +993,16 @@ impl SearchIndex {
                 // The initial roots are registered before this thread starts,
                 // closing the gap between startup indexing and event capture.
                 *control = Some(control_sender);
+                host_log::info(
+                    "index",
+                    format!("Local search watcher started for {watched_root_count} root(s)."),
+                );
             }
             Err(error) => {
-                eprintln!("iHub could not start the local search watcher thread: {error}");
+                host_log::error(
+                    "index",
+                    format!("Could not start the local search watcher thread: {error}"),
+                );
                 set_watch_status(
                     &self.inner,
                     "unavailable",
@@ -1176,8 +1188,11 @@ impl SearchIndex {
                         return true;
                     }
                     Err(replay_error) => {
-                        eprintln!(
-                            "iHub declined cross-restart USN replay after the zero-change proof failed ({zero_change_error}): {replay_error}"
+                        host_log::warn(
+                            "index",
+                            format!(
+                                "Declined cross-restart USN replay after the zero-change proof failed ({zero_change_error}): {replay_error}"
+                            ),
                         );
                     }
                 }
@@ -1618,7 +1633,10 @@ impl SearchIndex {
         match result {
             Ok(()) => IncrementalSnapshotDecision::Persisted,
             Err(error) => {
-                eprintln!("iHub could not persist an incremental local-index update: {error}");
+                host_log::warn(
+                    "index",
+                    format!("Could not persist an incremental local-index update: {error}"),
+                );
                 IncrementalSnapshotDecision::RetryAfterWriteFailure
             }
         }
@@ -1667,6 +1685,13 @@ impl SearchIndex {
     /// `roots_lock` while choosing the roots and incrementing its generation.
     fn rebuild_locked(&self, roots: Vec<PathBuf>) {
         let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        host_log::info(
+            "index",
+            format!(
+                "Local search rebuild generation {generation} started for {} root(s).",
+                roots.len()
+            ),
+        );
         // A full path rebuild may represent a new authorization scope. Clear
         // body text before it starts; name/path snapshot results stay usable.
         invalidate_content_index(&self.inner, "正在等待新的路径扫描后重建正文索引。");
@@ -1858,7 +1883,10 @@ impl SearchIndex {
                         binding_for_snapshot,
                     )
                     {
-                        eprintln!("iHub could not persist the local index snapshot: {error}");
+                        host_log::warn(
+                            "index",
+                            format!("Could not persist the local index snapshot: {error}"),
+                        );
                     }
                 }
                 {
@@ -1882,6 +1910,12 @@ impl SearchIndex {
                 status.mft_message = Some(truncate_mft_message(&mft_message));
                 drop(status);
                 drop(_roots_guard);
+                host_log::info(
+                    "index",
+                    format!(
+                        "Local search rebuild generation {generation} completed with {count} entry or entries."
+                    ),
+                );
                 schedule_content_index_rebuild(&inner, generation);
             });
     }
@@ -2183,7 +2217,10 @@ fn run_change_watcher(
                 // Backends surface overflows and watch failures as errors. A
                 // full scan of the same roots is the safe recovery; it never
                 // broadens to a default directory.
-                eprintln!("iHub local search watcher reported an event error: {error}");
+                host_log::warn(
+                    "index",
+                    format!("Local search watcher reported an event error: {error}"),
+                );
                 if !watched_roots.is_empty() {
                     record_watched_full_rebuild(&mut pending_rebuild, Instant::now());
                     pending_snapshot = None;
@@ -2205,9 +2242,12 @@ fn replace_watched_roots(
         // A removable root can disappear before its unwatch call. The path
         // filter below is still authoritative, so this is diagnostic only.
         if let Err(error) = watcher.unwatch(&old_root) {
-            eprintln!(
-                "iHub could not stop watching local search root '{}': {error}",
-                old_root.display()
+            host_log::warn(
+                "index",
+                format!(
+                    "Could not stop watching local search root '{}': {error}",
+                    old_root.display()
+                ),
             );
         }
     }
@@ -2218,7 +2258,7 @@ fn replace_watched_roots(
                 "索引目录 '{}' 当前不可用；请重新选择或恢复该目录。",
                 root.display()
             );
-            eprintln!("iHub local search {message}");
+            host_log::warn("index", &message);
             registration.first_error.get_or_insert(message);
             continue;
         }
@@ -2229,7 +2269,7 @@ fn replace_watched_roots(
             }
             Err(error) => {
                 let message = format!("无法监听索引目录 '{}': {error}", root.display());
-                eprintln!("iHub local search {message}");
+                host_log::warn("index", &message);
                 registration.first_error.get_or_insert(message);
             }
         }
@@ -2583,6 +2623,10 @@ fn schedule_content_index_rebuild(inner: &Arc<IndexInner>, generation: u64) {
         .name("ihub-content-indexer".to_owned())
         .spawn(move || rebuild_content_index(worker_inner, generation, revision))
     {
+        host_log::error(
+            "index",
+            format!("Could not start the bounded content-index worker: {error}"),
+        );
         let _ = set_content_status_if_current(
             inner,
             Some(generation),
@@ -2606,7 +2650,10 @@ fn schedule_application_entry_refresh(inner: &Arc<IndexInner>, generation: u64) 
         .name("ihub-application-refresh".to_owned())
         .spawn(move || refresh_application_entries(worker_inner, generation))
     {
-        eprintln!("iHub could not start the application refresh worker: {error}");
+        host_log::error(
+            "index",
+            format!("Could not start the application refresh worker: {error}"),
+        );
     }
 }
 
@@ -2707,7 +2754,7 @@ fn rebuild_content_index(inner: Arc<IndexInner>, generation: u64, revision: u64)
             human_size(indexed_bytes as u64)
         )
     };
-    let _ = set_content_status_if_current(
+    let published = set_content_status_if_current(
         inner.as_ref(),
         Some(generation),
         revision,
@@ -2716,6 +2763,14 @@ fn rebuild_content_index(inner: Arc<IndexInner>, generation: u64, revision: u64)
         indexed_bytes,
         Some(message),
     );
+    if published {
+        host_log::info(
+            "index",
+            format!(
+                "Bounded in-memory content index completed with {indexed_files} file(s) and {indexed_bytes} byte(s)."
+            ),
+        );
+    }
 }
 
 fn content_candidate_is_supported(entry: &IndexedEntry) -> bool {

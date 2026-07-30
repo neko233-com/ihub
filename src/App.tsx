@@ -8,6 +8,7 @@ import {
   Check,
   CircleAlert,
   Clock3,
+  Copy,
   Download,
   FileText,
   Files,
@@ -20,8 +21,10 @@ import {
   Power,
   Puzzle,
   RefreshCw,
+  ScrollText,
   Settings2,
   Sparkles,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -65,6 +68,7 @@ import {
   type PluginSearchProviderReadinessEvent,
 } from "./lib/plugin-search-provider-readiness";
 import {
+  clearHostLog,
   command,
   isDesktop,
   onFocusSearch,
@@ -74,7 +78,16 @@ import {
   onPluginShortcutsChanged,
   onSuperPanel,
   onTrayNavigation,
+  readHostLog,
 } from "./lib/desktop";
+import {
+  browserHostLogSnapshot,
+  canClearHostLog,
+  formatHostLogBytes,
+  formatHostLogForClipboard,
+  formatHostLogTimestamp,
+} from "./lib/host-log";
+import { HostLogCoordinator } from "./lib/host-log-coordinator";
 import type { DetachedPluginWindowOpened } from "./lib/detached-plugin-window";
 import {
   findLauncherContentResults,
@@ -131,6 +144,7 @@ import type {
   ClipboardFile,
   ClipboardImage,
   ClipboardHistorySnapshot,
+  HostLogSnapshot,
   IndexStatus,
   LauncherHotkeyStatus,
   LauncherShortcutView,
@@ -977,6 +991,19 @@ export function App() {
   const toolboxContextRequestRef = useRef(0);
   const launcherContextDispatchKeyRef = useRef<string | null>(null);
   const launcherContextGenerationRef = useRef(0);
+  const hostLogViewportRef = useRef<HTMLDivElement | null>(null);
+  const hostLogFollowTailRef = useRef(true);
+  const hostLogSnapshotRef = useRef<HostLogSnapshot | null>(
+    isDesktop() ? null : browserHostLogSnapshot(),
+  );
+  const hostLogCoordinatorRef = useRef<HostLogCoordinator<HostLogSnapshot> | null>(null);
+  if (!hostLogCoordinatorRef.current) {
+    hostLogCoordinatorRef.current = new HostLogCoordinator(
+      readHostLog,
+      clearHostLog,
+    );
+  }
+  const hostLogCoordinator = hostLogCoordinatorRef.current;
   const pendingLauncherContextDispatchRef = useRef<PendingLauncherContextDispatch | null>(null);
   const activeLauncherContextSurfaceRef = useRef<ActiveLauncherContextSurface | null>(null);
   const issuedLauncherContextRef = useRef<IssuedLauncherContext | null>(null);
@@ -1056,6 +1083,13 @@ export function App() {
   const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null);
   const [isUpdatingAutostart, setIsUpdatingAutostart] = useState(false);
   const [autostartError, setAutostartError] = useState<string | null>(null);
+  const [hostLog, setHostLog] = useState<HostLogSnapshot | null>(
+    () => hostLogSnapshotRef.current,
+  );
+  const [hostLogBusyAction, setHostLogBusyAction] = useState<
+    "refresh" | "copy" | "clear" | null
+  >(null);
+  const [hostLogError, setHostLogError] = useState<string | null>(null);
   const [superPanelStatus, setSuperPanelStatus] = useState<SuperPanelStatus | null>(
     isDesktop() ? null : {
       enabled: false,
@@ -1405,6 +1439,114 @@ export function App() {
     window.setTimeout(() => setToast((current) => (current === message ? null : current)), 3600);
   }, []);
 
+  const publishHostLog = useCallback((snapshot: HostLogSnapshot) => {
+    hostLogSnapshotRef.current = snapshot;
+    setHostLog(snapshot);
+    setHostLogError(null);
+  }, []);
+
+  const refreshHostDiagnostics = useCallback((announce = false) => {
+    const task = hostLogCoordinator.startForeground(
+      "refresh",
+      ({ read }) => read(),
+    );
+    if (!task.started) {
+      return Promise.resolve();
+    }
+
+    setHostLogBusyAction("refresh");
+    setHostLogError(null);
+    return task.promise.then((outcome) => {
+      if (outcome.status !== "applied") {
+        return;
+      }
+      publishHostLog(outcome.snapshot);
+      if (announce) {
+        showToast(`已刷新 ${outcome.snapshot.entries.length} 条有界诊断日志。`);
+      }
+    }).catch((error: unknown) => {
+      setHostLogError(error instanceof Error ? error.message : "无法读取诊断日志。");
+    }).finally(() => {
+      setHostLogBusyAction((current) => current === "refresh" ? null : current);
+    });
+  }, [hostLogCoordinator, publishHostLog, showToast]);
+
+  const copyHostDiagnostics = useCallback(() => {
+    const task = hostLogCoordinator.startForeground(
+      "copy",
+      async ({ isCurrent, read }) => {
+        let snapshot = hostLogSnapshotRef.current;
+        if (!snapshot) {
+          const outcome = await read();
+          if (outcome.status !== "applied") {
+            return null;
+          }
+          snapshot = outcome.snapshot;
+          publishHostLog(snapshot);
+        }
+
+        const text = formatHostLogForClipboard(snapshot);
+        try {
+          if (isDesktop()) {
+            await command<void>("write_clipboard_text", { text });
+          } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            throw new Error("当前浏览器不允许写入剪贴板。");
+          }
+        } catch (error) {
+          if (!isCurrent()) {
+            return null;
+          }
+          throw error;
+        }
+        return isCurrent() ? snapshot : null;
+      },
+    );
+    if (!task.started) {
+      return Promise.resolve();
+    }
+
+    setHostLogBusyAction("copy");
+    setHostLogError(null);
+    return task.promise.then((snapshot) => {
+      if (snapshot) {
+        showToast(`已复制 ${snapshot.entries.length} 条脱敏诊断日志。`);
+      }
+    }).catch((error: unknown) => {
+      setHostLogError(error instanceof Error ? error.message : "无法复制诊断日志。");
+    }).finally(() => {
+      setHostLogBusyAction((current) => current === "copy" ? null : current);
+    });
+  }, [hostLogCoordinator, publishHostLog, showToast]);
+
+  const clearHostDiagnostics = useCallback(() => {
+    const task = hostLogCoordinator.startClear(
+      hostLogSnapshotRef.current ?? undefined,
+    );
+    if (!task.started) {
+      return Promise.resolve();
+    }
+
+    setHostLogBusyAction("clear");
+    setHostLogError(null);
+    return task.promise.then((outcome) => {
+      if (outcome.status !== "applied") {
+        return;
+      }
+      publishHostLog(outcome.snapshot);
+      showToast(
+        isDesktop()
+          ? "已清空 iHub 固定轮转日志；后续事件会从空文件继续记录。"
+          : "已清空浏览器安全预览日志。",
+      );
+    }).catch((error: unknown) => {
+      setHostLogError(error instanceof Error ? error.message : "无法清空诊断日志。");
+    }).finally(() => {
+      setHostLogBusyAction((current) => current === "clear" ? null : current);
+    });
+  }, [hostLogCoordinator, publishHostLog, showToast]);
+
   useEffect(() => {
     if (!isRecordingLauncherHotkey) {
       return;
@@ -1447,6 +1589,62 @@ export function App() {
     setLauncherHotkeyDraft(null);
     setLauncherHotkeyError(null);
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+    hostLogFollowTailRef.current = true;
+    hostLogCoordinator.openSession();
+    let disposed = false;
+    let timeout: number | undefined;
+    const pollAfterCompletion = async () => {
+      try {
+        const outcome = await hostLogCoordinator.readInBackground();
+        if (!disposed && outcome.status === "applied") {
+          publishHostLog(outcome.snapshot);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setHostLogError(
+            error instanceof Error ? error.message : "无法读取诊断日志。",
+          );
+        }
+      } finally {
+        // Schedule from completion rather than wall-clock ticks: a slow native
+        // read can never overlap the next poll.
+        if (!disposed && isDesktop()) {
+          timeout = window.setTimeout(() => {
+            void pollAfterCompletion();
+          }, 3_000);
+        }
+      }
+    };
+    void pollAfterCompletion();
+    return () => {
+      disposed = true;
+      hostLogCoordinator.closeSession();
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
+    };
+  }, [hostLogCoordinator, publishHostLog, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || !hostLogFollowTailRef.current) {
+      return;
+    }
+    const viewport = hostLogViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (hostLogFollowTailRef.current) {
+        viewport.scrollTop = viewport.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [hostLog?.generatedAt, settingsOpen]);
 
   useEffect(() => {
     if (!pendingLauncherContextDispatch) {
@@ -3771,6 +3969,123 @@ export function App() {
                 >
                   <span />
                 </button>
+              </section>
+
+              <section
+                className="settings-section settings-section--diagnostics"
+                aria-labelledby="host-log-title"
+              >
+                <div className="settings-section__icon">
+                  <ScrollText size={16} />
+                </div>
+                <div className="settings-section__copy">
+                  <h3 id="host-log-title">滚动诊断日志</h3>
+                  <p>
+                    Rust 宿主按大小轮转并只保留固定文件；常见敏感字段和绝对路径会在落盘前做模式化脱敏。
+                    插件详情、剪贴板内容和命令输入不会写入，插件也不应把用户内容放进 message。
+                  </p>
+                  <div className="settings-log__actions" aria-label="诊断日志操作">
+                    <button
+                      aria-busy={hostLogBusyAction === "refresh"}
+                      className="settings-log__action"
+                      disabled={hostLogBusyAction !== null}
+                      onClick={() => void refreshHostDiagnostics(true)}
+                      type="button"
+                    >
+                      {hostLogBusyAction === "refresh"
+                        ? <LoaderCircle className="spin" size={12} />
+                        : <RefreshCw size={12} />}
+                      刷新
+                    </button>
+                    <button
+                      aria-busy={hostLogBusyAction === "copy"}
+                      className="settings-log__action"
+                      disabled={hostLogBusyAction !== null || (!hostLog?.entries.length && !hostLog?.writeFailures)}
+                      onClick={() => void copyHostDiagnostics()}
+                      type="button"
+                    >
+                      {hostLogBusyAction === "copy"
+                        ? <LoaderCircle className="spin" size={12} />
+                        : <Copy size={12} />}
+                      复制
+                    </button>
+                    <button
+                      aria-busy={hostLogBusyAction === "clear"}
+                      className="settings-log__action is-danger"
+                      disabled={hostLogBusyAction !== null || !canClearHostLog(hostLog, hostLogError)}
+                      onClick={() => void clearHostDiagnostics()}
+                      type="button"
+                    >
+                      {hostLogBusyAction === "clear"
+                        ? <LoaderCircle className="spin" size={12} />
+                        : <Trash2 size={12} />}
+                      清空
+                    </button>
+                  </div>
+                  {hostLogError ? (
+                    <p className="settings-error" role="alert">
+                      <CircleAlert size={13} />
+                      {hostLogError}
+                    </p>
+                  ) : null}
+                  {hostLog?.writeFailures ? (
+                    <p className="settings-error" role="status">
+                      <CircleAlert size={13} />
+                      日志写入失败 {hostLog.writeFailures} 次
+                      {hostLog.lastWriteError ? `：${hostLog.lastWriteError}` : "。"}
+                    </p>
+                  ) : null}
+                  <div
+                    aria-label="iHub 脱敏诊断日志"
+                    aria-live="off"
+                    className="settings-log__viewport"
+                    onScroll={(event) => {
+                      const viewport = event.currentTarget;
+                      hostLogFollowTailRef.current = viewport.scrollHeight
+                        - viewport.scrollTop
+                        - viewport.clientHeight <= 24;
+                    }}
+                    ref={hostLogViewportRef}
+                    role="log"
+                    tabIndex={0}
+                  >
+                    {hostLog?.entries.length ? (
+                      <ol className="settings-log__entries">
+                        {hostLog.entries.map((entry, index) => (
+                          <li
+                            className={`settings-log__entry is-${entry.level}`}
+                            key={`${entry.timestamp}:${entry.component}:${index}`}
+                          >
+                            <time dateTime={entry.timestamp}>
+                              {formatHostLogTimestamp(entry.timestamp)}
+                            </time>
+                            <span className="settings-log__level">
+                              {entry.level.toUpperCase()}
+                            </span>
+                            <span className="settings-log__component">
+                              {entry.component}
+                            </span>
+                            <span className="settings-log__message">
+                              {entry.message}
+                            </span>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="settings-log__empty">
+                        {hostLogBusyAction === "refresh"
+                          ? "正在读取宿主日志…"
+                          : "当前没有保留的诊断日志。"}
+                      </p>
+                    )}
+                  </div>
+                  <p className="settings-log__meta" aria-live="polite">
+                    {hostLog
+                      ? `${hostLog.entries.length} 条 · ${formatHostLogBytes(hostLog.totalBytes)} · 单文件 ${formatHostLogBytes(hostLog.maxFileBytes)} · 最多 ${hostLog.maxFiles} 个文件${hostLog.truncated ? " · 当前视图只显示最新 1000 条" : ""}`
+                      : "等待宿主日志…"}
+                    {isDesktop() ? " · 每 3 秒刷新，向上滚动时暂停跟随" : " · 浏览器安全 fixture"}
+                  </p>
+                </div>
               </section>
 
               <section className="settings-section" aria-labelledby="quit-title">

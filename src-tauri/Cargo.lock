@@ -2030,6 +2030,7 @@ dependencies = [
  "ignore",
  "image",
  "keyring",
+ "libc",
  "notify",
  "rayon",
  "regex",

@@ -347,7 +347,7 @@ try {
     }
     else {
         # Tauri's NSIS installer supports an unattended per-user installation.
-        $process = Start-Process -FilePath $installerPath -ArgumentList '/S' -Wait -PassThru
+        $process = Start-Process -FilePath $installerPath -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
     }
 
     if ($process.ExitCode -notin @(0, 3010)) {

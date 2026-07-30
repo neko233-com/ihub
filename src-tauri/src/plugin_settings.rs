@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::host_log;
+
 const SETTINGS_FILE_NAME: &str = "plugin-settings-v1.json";
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const MAX_PLUGINS_WITH_SETTINGS: usize = 512;
@@ -60,7 +62,10 @@ impl PluginSettingsStore {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let data_path = app_data_dir.join(SETTINGS_FILE_NAME);
         let state = load_state(&data_path).unwrap_or_else(|error| {
-            eprintln!("iHub could not restore plugin settings: {error}");
+            host_log::warn(
+                "plugins",
+                format!("Could not restore plugin settings: {error}"),
+            );
             PersistedPluginSettings::default()
         });
         Self {
@@ -240,7 +245,10 @@ impl PluginSettingsStore {
             });
         }
         if let Err(error) = fs::remove_file(&backup) {
-            eprintln!("iHub could not remove the replaced plugin settings backup: {error}");
+            host_log::warn(
+                "plugins",
+                format!("Could not remove a replaced plugin settings backup: {error}"),
+            );
         }
         Ok(())
     }
@@ -293,9 +301,12 @@ fn recover_interrupted_replace(path: &Path) -> Result<(), String> {
                     .unwrap_or(UNIX_EPOCH);
                 valid_backups.push((modified, backup));
             }
-            Err(error) => eprintln!(
-                "iHub ignored an invalid interrupted plugin settings backup {}: {error}",
-                backup.display()
+            Err(error) => host_log::warn(
+                "plugins",
+                format!(
+                    "Ignored an invalid interrupted plugin settings backup {}: {error}",
+                    backup.display()
+                ),
             ),
         }
     }
@@ -317,16 +328,22 @@ fn recover_interrupted_replace(path: &Path) -> Result<(), String> {
         }
         match fs::rename(&backup, path) {
             Ok(()) => {
-                eprintln!(
-                    "iHub recovered plugin settings from interrupted backup {}.",
-                    backup.display()
+                host_log::info(
+                    "plugins",
+                    format!(
+                        "Recovered plugin settings from interrupted backup {}.",
+                        backup.display()
+                    ),
                 );
                 return Ok(());
             }
             Err(_) if path.exists() => return Ok(()),
-            Err(error) => eprintln!(
-                "iHub could not recover plugin settings backup {}: {error}",
-                backup.display()
+            Err(error) => host_log::warn(
+                "plugins",
+                format!(
+                    "Could not recover plugin settings backup {}: {error}",
+                    backup.display()
+                ),
             ),
         }
     }

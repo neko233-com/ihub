@@ -1368,7 +1368,7 @@ function Install-CurrentNsisPackage {
     }
 
     $installerStartedAt = [DateTime]::UtcNow
-    $installerProcess = Start-Process -FilePath $Package.State.InstallerPath -ArgumentList @('/S') -Wait -PassThru
+    $installerProcess = Start-Process -FilePath $Package.State.InstallerPath -ArgumentList @('/S') -WindowStyle Hidden -Wait -PassThru
     if ($installerProcess.ExitCode -notin @(0, 3010)) {
         throw "The local NSIS installer exited with code $($installerProcess.ExitCode)."
     }

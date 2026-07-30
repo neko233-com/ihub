@@ -369,6 +369,30 @@ export interface AppHealth {
   updateAvailable?: boolean;
 }
 
+export type HostLogLevel = "debug" | "info" | "warn" | "error";
+
+/** One host-sanitized diagnostic entry. The native logger never projects its
+ * file location, plugin detail objects, clipboard payloads, or raw paths. */
+export interface HostLogEntry {
+  timestamp: string;
+  level: HostLogLevel;
+  component: string;
+  message: string;
+}
+
+/** Bounded projection of every retained rotating host log file. */
+export interface HostLogSnapshot {
+  generatedAt: string;
+  entries: HostLogEntry[];
+  truncated: boolean;
+  totalBytes: number;
+  activeFileBytes: number;
+  maxFileBytes: number;
+  maxFiles: number;
+  writeFailures: number;
+  lastWriteError?: string;
+}
+
 export type ClipboardHistoryItemKind = "text" | "image" | "files";
 
 /** Bounded image metadata only. Pixels stay in native storage until a person

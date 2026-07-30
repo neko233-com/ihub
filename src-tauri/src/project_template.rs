@@ -1927,8 +1927,10 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        process::{Command, Output},
+        process::Output,
     };
+
+    use crate::background_process::background_command;
 
     use super::{create_plugin_project, validate_plugin_id};
 
@@ -1953,7 +1955,7 @@ mod tests {
     }
 
     fn run_verifier(project: &Path) -> Output {
-        Command::new("node")
+        background_command("node")
             .arg("scripts/verify-plugin.mjs")
             .current_dir(project)
             .output()

@@ -10,7 +10,7 @@
 !macro NSIS_HOOK_PREINSTALL
   ; Tauri's following File instruction has no /oname option, so the immutable
   ; snapshot deliberately preserves the application's installed file name.
-  !system `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${IHUB_INSTALLER_HOOK_DIR}\write-nsis-payload-proof.ps1" -PayloadPath "${MAINBINARYSRCPATH}" -SnapshotPath "${MAINBINARYNAME}.exe" -ProofPath "${OUTFILE}.ihub-payload-proof.json" -IncludePath "${OUTFILE}.ihub-payload-proof.nsh"` = 0
+  !system `powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${IHUB_INSTALLER_HOOK_DIR}\write-nsis-payload-proof.ps1" -PayloadPath "${MAINBINARYSRCPATH}" -SnapshotPath "${MAINBINARYNAME}.exe" -ProofPath "${OUTFILE}.ihub-payload-proof.json" -IncludePath "${OUTFILE}.ihub-payload-proof.nsh"` = 0
   !include "${OUTFILE}.ihub-payload-proof.nsh"
 
   ; File in Tauri's template is processed immediately after this macro. Point

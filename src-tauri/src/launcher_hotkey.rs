@@ -15,6 +15,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::host_log;
+
 pub const DEFAULT_LAUNCHER_HOTKEY: &str = "Alt+Space";
 
 const HOTKEY_FILE_NAME: &str = "launcher-hotkey-v1.json";
@@ -63,7 +65,10 @@ impl LauncherHotkeyStore {
         match load_preference(&self.data_path) {
             Ok(preference) => preference,
             Err(error) => {
-                eprintln!("iHub could not restore the launcher hotkey: {error}");
+                host_log::warn(
+                    "hotkey",
+                    format!("Could not restore the launcher hotkey preference: {error}"),
+                );
                 None
             }
         }
@@ -318,7 +323,10 @@ fn persist_atomically(path: &Path, encoded: &[u8]) -> Result<(), String> {
         });
     }
     if let Err(error) = fs::remove_file(&backup) {
-        eprintln!("iHub could not remove the replaced launcher hotkey backup: {error}");
+        host_log::warn(
+            "hotkey",
+            format!("Could not remove a replaced launcher hotkey backup: {error}"),
+        );
     }
     Ok(())
 }

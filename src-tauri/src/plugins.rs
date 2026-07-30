@@ -15,7 +15,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use url::Url;
 
+use crate::background_process::background_command;
+use crate::host_log;
 use crate::launcher_hotkey::normalize_plugin_hotkey;
 use crate::models::{
     OfficialWorkspacePluginProject, PluginArtifactDigest, PluginAutomaticUpdateReport,
@@ -655,7 +658,10 @@ impl PluginManager {
         // `ensure_plugin_enabled`; this fallback only lets the user see which
         // plugin needs attention instead of making it disappear from the UI.
         let lifecycle = self.read_lifecycle_store().unwrap_or_else(|error| {
-            eprintln!("iHub could not read plugin lifecycle state: {error}");
+            host_log::warn(
+                "plugins",
+                format!("Could not read plugin lifecycle state: {error}"),
+            );
             PluginLifecycleStore::default()
         });
         let storage_root = self.root.as_ref().canonicalize().ok();
@@ -1605,7 +1611,7 @@ impl PluginManager {
                 .map(|argument| argument.replace("{{input}}", &input_text))
                 .collect::<Vec<_>>(),
         );
-        let mut child = Command::new(&binary)
+        let mut child = background_command(&binary)
             .args(args)
             .current_dir(package_root)
             .env("IHUB_PLUGIN_ID", plugin_id)
@@ -2750,6 +2756,30 @@ fn parse_git_source(value: &str) -> Result<GitSource, String> {
                 .to_owned(),
         );
     }
+    let parsed_remote =
+        Url::parse(remote_input).map_err(|_| "Enter a valid absolute HTTPS Git URL.".to_owned())?;
+    if parsed_remote.scheme() != "https" || parsed_remote.host_str().is_none() {
+        return Err("Enter a valid absolute HTTPS Git URL.".to_owned());
+    }
+    let authority = remote_input
+        .strip_prefix("https://")
+        .and_then(|value| value.split('/').next())
+        .unwrap_or_default();
+    if !parsed_remote.username().is_empty()
+        || parsed_remote.password().is_some()
+        || authority.contains('@')
+    {
+        return Err(
+            "Git URLs must not embed a username, password, or access token. Import from a credential-free public HTTPS URL."
+                .to_owned(),
+        );
+    }
+    if parsed_remote.query().is_some() {
+        return Err(
+            "Git URLs with query parameters are not accepted because they may persist credentials in plugin provenance."
+                .to_owned(),
+        );
+    }
     validate_requested_ref(requested_ref)?;
     Ok(GitSource {
         remote: remote_input.to_owned(),
@@ -2776,8 +2806,7 @@ fn git_source_from_lock(lock: &PluginSourceLock) -> Result<GitSource, String> {
                 });
             }
             Err(format!(
-                "The saved source lock for '{}' is not a safe Git source: {error}",
-                lock.source
+                "The saved source lock is not a safe Git source: {error} Re-import the plugin from a credential-free HTTPS URL."
             ))
         }
     }
@@ -3033,7 +3062,7 @@ fn git_command() -> Command {
 }
 
 fn git_command_with_transport(transport: GitTransportPolicy) -> Command {
-    let mut command = Command::new("git");
+    let mut command = background_command("git");
     configure_git_command_environment(&mut command, transport, env::vars_os());
     command
 }
@@ -3043,7 +3072,9 @@ fn git_command_with_transport(transport: GitTransportPolicy) -> Command {
 /// process-wide `url.*.insteadOf` supplied through those variables can rewrite
 /// an innocent looking canonical GitHub URL before transport policy applies.
 /// Remove *every* inherited `GIT_CONFIG_*` key, not merely the currently
-/// documented numbered names, then install the host's own config policy.
+/// documented numbered names, and remove askpass/SSH/proxy helper variables
+/// that could execute an inherited program even with terminal prompting off.
+/// Then install the host's own non-interactive config policy.
 fn configure_git_command_environment<I>(
     command: &mut Command,
     transport: GitTransportPolicy,
@@ -3052,7 +3083,7 @@ fn configure_git_command_environment<I>(
     I: IntoIterator<Item = (OsString, OsString)>,
 {
     for (key, _) in inherited {
-        if is_git_config_environment_key(&key) {
+        if is_git_config_environment_key(&key) || is_git_external_helper_environment_key(&key) {
             command.env_remove(key);
         }
     }
@@ -3070,6 +3101,12 @@ fn configure_git_command_environment<I>(
         "GIT_TEMPLATE_DIR",
         "GIT_CEILING_DIRECTORIES",
         "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_PROXY_COMMAND",
     ] {
         command.env_remove(key);
     }
@@ -3094,6 +3131,18 @@ fn is_git_config_environment_key(key: &OsStr) -> bool {
     key.to_string_lossy()
         .to_ascii_uppercase()
         .starts_with("GIT_CONFIG_")
+}
+
+fn is_git_external_helper_environment_key(key: &OsStr) -> bool {
+    matches!(
+        key.to_string_lossy().to_ascii_uppercase().as_str(),
+        "GIT_ASKPASS"
+            | "SSH_ASKPASS"
+            | "SSH_ASKPASS_REQUIRE"
+            | "GIT_SSH"
+            | "GIT_SSH_COMMAND"
+            | "GIT_PROXY_COMMAND"
+    )
 }
 
 #[cfg(windows)]
@@ -3815,7 +3864,7 @@ fn read_source_metadata(directory: &Path) -> Result<SourceMetadata, String> {
         }
         let text = fs::read_to_string(&lock_path)
             .map_err(|error| format!("Could not read plugin source lock: {error}"))?;
-        let lock = serde_json::from_str::<PluginSourceLock>(&text)
+        let mut lock = serde_json::from_str::<PluginSourceLock>(&text)
             .map_err(|error| format!("Invalid plugin source lock: {error}"))?;
         if lock.source.trim().is_empty()
             || lock.requested_ref.trim().is_empty()
@@ -3827,6 +3876,13 @@ fn read_source_metadata(directory: &Path) -> Result<SourceMetadata, String> {
         if let Some(integrity) = lock.integrity.as_ref() {
             validate_snapshot_integrity(integrity)?;
         }
+        // Source locks written by older development builds (or edited by the
+        // same local user) are untrusted input. Re-validate before any
+        // provenance reaches IPC or Git, and canonicalize safe shorthand
+        // without ever reflecting a rejected credential-bearing URL.
+        let validated_source = git_source_from_lock(&lock)?;
+        lock.source = validated_source.remote;
+        lock.requested_ref = validated_source.requested_ref;
         return Ok(SourceMetadata {
             source: lock.source.clone(),
             resolved_commit: Some(lock.resolved_commit.clone()),
@@ -3843,8 +3899,13 @@ fn read_source_metadata(directory: &Path) -> Result<SourceMetadata, String> {
         .map_err(|error| format!("Could not read plugin source record: {error}"))?;
     let legacy = serde_json::from_str::<LegacySourceRecord>(&text)
         .map_err(|error| format!("Invalid plugin source record: {error}"))?;
+    let source = parse_git_source(&legacy.source).map_err(|error| {
+        format!(
+            "The legacy plugin source record is not a safe Git source: {error} Re-import the plugin from a credential-free HTTPS URL."
+        )
+    })?;
     Ok(SourceMetadata {
-        source: legacy.source,
+        source: source.remote,
         resolved_commit: legacy.commit,
         installed_at: legacy.installed_at,
         lock: None,
@@ -4867,19 +4928,19 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 
-    use crate::models::PluginSourceLock;
+    use crate::{background_process::background_command, models::PluginSourceLock};
 
     use super::{
         automatic_update_skip_reason, command_execution, command_timeout,
         configure_git_command_environment, ensure_update_security_declaration_matches,
         is_trusted_official_auto_update_source, load_manifest_artwork,
         normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response,
-        resolve_official_workspace_plugin_at, snapshot_integrity, validate_manifest,
-        verify_snapshot_integrity, wait_for_child_with_timeout, ChildWaitOutcome, CommandExecution,
-        GitSource, GitTransportPolicy, PluginManager, PluginManifest, LEGACY_SOURCE_RECORD,
-        LIFECYCLE_RECORD, LOCAL_LINKS_RECORD, MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS,
-        MAX_PERMISSION_VALUE_CHARS, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
-        OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
+        read_source_metadata, resolve_official_workspace_plugin_at, snapshot_integrity,
+        validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
+        ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
+        PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
+        MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS, MAX_PERMISSION_VALUE_CHARS,
+        MAX_PROJECTED_ARTWORK_DATA_URL_BYTES, OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
     };
 
     fn temporary_directory(label: &str) -> PathBuf {
@@ -4970,7 +5031,7 @@ mod tests {
     }
 
     fn git_success(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = background_command("git")
             .arg("-C")
             .arg(directory)
             .args(arguments)
@@ -5003,7 +5064,7 @@ mod tests {
         git_success(&source, &["tag", "-a", "v1.2.3", "-m", "release 1.2.3"]);
         let expected_commit = git_success(&source, &["rev-parse", "v1.2.3^{commit}"]);
 
-        let clone = Command::new("git")
+        let clone = background_command("git")
             .args(["clone", "--quiet", "--bare"])
             .arg(&source)
             .arg(&remote)
@@ -5028,7 +5089,7 @@ mod tests {
         git_success(&source, &["add", "."]);
         git_success(&source, &["commit", "--quiet", "-m", "plugin"]);
 
-        let clone = Command::new("git")
+        let clone = background_command("git")
             .args(["clone", "--quiet", "--bare"])
             .arg(&source)
             .arg(&remote)
@@ -5086,7 +5147,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn long_running_child_command() -> Command {
-        let mut command = Command::new("powershell");
+        let mut command = background_command("powershell");
         command.args([
             "-NoLogo",
             "-NoProfile",
@@ -5099,7 +5160,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     fn long_running_child_command() -> Command {
-        let mut command = Command::new("sleep");
+        let mut command = background_command("sleep");
         command.arg("5");
         command
     }
@@ -5495,6 +5556,9 @@ mod tests {
         assert!(parse_git_source("http://github.com/owner/repo.git").is_err());
         assert!(parse_git_source("ssh://git@github.com/owner/repo.git").is_err());
         assert!(parse_git_source("git@github.com:owner/repo.git").is_err());
+        assert!(parse_git_source("https://ghp_secret_token@github.com/owner/repo.git").is_err());
+        assert!(parse_git_source("https://user:password@github.com/owner/repo.git").is_err());
+        assert!(parse_git_source("https://github.com/owner/repo.git?access_token=secret").is_err());
     }
 
     #[test]
@@ -5769,7 +5833,7 @@ mod tests {
 
     #[test]
     fn official_automatic_git_environment_rejects_config_injection_and_non_https_transport() {
-        let mut command = Command::new("git");
+        let mut command = background_command("git");
         configure_git_command_environment(
             &mut command,
             GitTransportPolicy::OfficialHttps,
@@ -5788,6 +5852,18 @@ mod tests {
                     OsString::from("url.bad.insteadOf=https://github.com/neko233-com/"),
                 ),
                 (OsString::from("GIT_DIR"), OsString::from("C:\\untrusted")),
+                (
+                    OsString::from("git_askpass"),
+                    OsString::from("C:\\untrusted\\credential-window.exe"),
+                ),
+                (
+                    OsString::from("SSH_ASKPASS"),
+                    OsString::from("C:\\untrusted\\ssh-window.exe"),
+                ),
+                (
+                    OsString::from("GIT_SSH_COMMAND"),
+                    OsString::from("C:\\untrusted\\ssh.exe --capture"),
+                ),
             ],
         );
         let environment = command
@@ -5805,6 +5881,9 @@ mod tests {
             "GIT_CONFIG_VALUE_0",
             "GIT_CONFIG_PARAMETERS",
             "GIT_DIR",
+            "git_askpass",
+            "SSH_ASKPASS",
+            "GIT_SSH_COMMAND",
         ] {
             assert_eq!(
                 environment.get(key),
@@ -6938,6 +7017,65 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef01234567")
         );
         assert!(plugin.source_lock.is_none());
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn credential_bearing_legacy_provenance_is_rejected_without_echo_or_ipc_projection() {
+        let storage = temporary_directory("unsafe-legacy-provenance");
+        let lock_plugin_root = storage.join("ihub-plugin-unsafe-lock");
+        write_plugin(
+            &lock_plugin_root,
+            "ihub-plugin-unsafe-lock",
+            "Unsafe lock",
+            "dist/index.html",
+        );
+        let lock_secret = "ghp_saved_source_lock_secret";
+        fs::write(
+            lock_plugin_root.join(SOURCE_LOCK),
+            format!(
+                r#"{{
+  "source": "https://{lock_secret}@github.com/example/ihub-plugin-unsafe-lock.git",
+  "requestedRef": "HEAD",
+  "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+  "installedAt": "2026-01-01T00:00:00Z"
+}}"#
+            ),
+        )
+        .expect("unsafe source lock should be written");
+        let lock_error = read_source_metadata(&lock_plugin_root)
+            .expect_err("credential-bearing source locks must be rejected");
+        assert!(!lock_error.contains(lock_secret), "{lock_error}");
+
+        let legacy_plugin_root = storage.join("ihub-plugin-unsafe-legacy");
+        write_plugin(
+            &legacy_plugin_root,
+            "ihub-plugin-unsafe-legacy",
+            "Unsafe legacy source",
+            "dist/index.html",
+        );
+        let legacy_secret = "legacy_query_secret";
+        fs::write(
+            legacy_plugin_root.join(LEGACY_SOURCE_RECORD),
+            format!(
+                r#"{{
+  "source": "https://github.com/example/ihub-plugin-unsafe-legacy.git?access_token={legacy_secret}",
+  "installedAt": "2026-01-01T00:00:00Z",
+  "commit": "0123456789abcdef0123456789abcdef01234567"
+}}"#
+            ),
+        )
+        .expect("unsafe legacy source should be written");
+        let legacy_error = read_source_metadata(&legacy_plugin_root)
+            .expect_err("credential-bearing legacy records must be rejected");
+        assert!(!legacy_error.contains(legacy_secret), "{legacy_error}");
+
+        let projected = manager_at(storage.clone()).list();
+        assert_eq!(projected.len(), 2);
+        assert!(projected
+            .iter()
+            .all(|plugin| plugin.source.is_none() && plugin.source_lock.is_none()));
 
         let _ = fs::remove_dir_all(storage);
     }

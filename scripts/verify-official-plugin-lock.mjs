@@ -326,6 +326,7 @@ function runGit(cwd, args) {
       encoding: "buffer",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
   } catch (error) {
     const details = Buffer.isBuffer(error.stderr) ? error.stderr.toString("utf8").trim() : "";

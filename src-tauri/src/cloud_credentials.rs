@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use uuid::{Uuid, Version};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::host_log;
+
 const PROFILE_FILE_NAME: &str = "cloud-profiles-v1.json";
 const PROFILE_SCHEMA_VERSION: u32 = 1;
 const SECRET_SCHEMA_VERSION: u32 = 1;
@@ -553,7 +555,10 @@ fn persist_atomically(path: &Path, encoded: &[u8]) -> Result<(), String> {
         });
     }
     if let Err(error) = fs::remove_file(&backup) {
-        eprintln!("iHub could not remove a replaced Cloud Drive profile backup: {error}");
+        host_log::warn(
+            "cloud-drive",
+            format!("Could not remove a replaced profile backup: {error}"),
+        );
     }
     Ok(())
 }

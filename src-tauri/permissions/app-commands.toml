@@ -81,6 +81,8 @@ commands.allow = [
   "set_launcher_hotkey",
   "reset_launcher_hotkey",
   "get_app_health",
+  "get_host_log",
+  "clear_host_log",
   "center_launcher_window",
   "plugin_host_call",
   "dispatch_detached_plugin_frontend_event",
