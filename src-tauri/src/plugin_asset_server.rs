@@ -925,6 +925,15 @@ mod tests {
     fn fetch_lease_response(lease: &super::PluginFrontendLease) -> String {
         const REQUEST_ATTEMPTS: usize = 3;
 
+        fn peer_closed(error: &std::io::Error) -> bool {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+        }
+
         let url = url::Url::parse(&lease.url).expect("lease URL should parse");
         let host = url.host_str().expect("lease URL should have a host");
         let port = url.port().expect("lease URL should have a port");
@@ -946,22 +955,23 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("test request should have a read timeout");
             if let Err(error) = stream.write_all(request.as_bytes()) {
-                let peer_closed = matches!(
-                    error.kind(),
-                    std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                );
-                if peer_closed && attempt < REQUEST_ATTEMPTS {
+                if peer_closed(&error) && attempt < REQUEST_ATTEMPTS {
                     thread::sleep(super::ACCEPT_POLL_INTERVAL);
                     continue;
                 }
                 panic!("test request attempt {attempt} should be written: {error}");
             }
             let mut response = Vec::new();
-            stream
-                .read_to_end(&mut response)
-                .expect("asset response should be readable");
+            if let Err(error) = stream.read_to_end(&mut response) {
+                if peer_closed(&error) && response.is_empty() && attempt < REQUEST_ATTEMPTS {
+                    thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                    continue;
+                }
+                panic!(
+                    "asset response attempt {attempt} should be readable after {} response bytes: {error}",
+                    response.len()
+                );
+            }
             let response = String::from_utf8(response).expect("asset response should be UTF-8");
             assert!(
                 response.starts_with("HTTP/1.1 200 OK\r\n"),
