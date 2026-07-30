@@ -83,6 +83,16 @@ Windows 的 `-Package` 优先使用 CI 已注入的 `TAURI_SIGNING_PRIVATE_KEY`�
 
 `-SkipInstall`、`-SkipCheck`（macOS 为对应的 `--skip-*`）只适合已明确知道环境完好的离线或调试场景。
 
+## 应用内滚动诊断日志
+
+桌面端的“偏好设置 → 滚动诊断日志”直接读取 Rust 宿主维护的有界 JSONL 日志，可以滚动查看、手动刷新、复制模式化脱敏后的文本或清空；设置页打开时会在上一次读取完成 3 秒后再发起下一次读取，所有读取单飞且默认跟随最新记录，用户向上滚动后会暂停自动跟随。清空操作会同步阻止新轮询、使旧读取响应失效并等待在途读取结束，再执行原生清空，因此旧快照不会在“已清空”之后回流。日志覆盖宿主启动／退出／重启、索引扫描与 watcher、启动器和插件快捷键、插件安装／更新／启停／卸载及原生命令结果摘要、超级面板 listener 等关键生命周期。浏览器预览只返回三条固定安全 fixture，不读取或清理本机文件。
+
+宿主采用固定上限：当前文件最多 256 KiB，总计最多 4 个文件，设置页最多显示最新 1000 条；写入、轮转、读取与清理由同一个进程内互斥保护，日志目录本身会拒绝 Windows reparse point／junction，打开后的文件句柄还会拒绝 reparse／symlink／hard-link／非普通文件，并以额外一字节探针执行硬读取上限。IPC 只返回结构化条目和容量统计，不返回日志目录或原始文件字节。常见敏感字段赋值（包括 JSON 引号键和带命名空间的环境变量）、Authorization、URL user-info、JWT 形态和 Windows／macOS／Linux 绝对路径会在**落盘前**替换；控制字符被移除，组件名和消息长度也有上限。宿主不会主动写入剪贴板内容、插件 `details`、launcher context、命令输入、stdout 或 stderr；原生插件命令只记录 ID、成功状态和退出码。
+
+插件 `log` 的自由文本消息仍属于插件作者提供的诊断，宿主只能做有界和模式化脱敏，无法从任意自然语言中可靠判断一段文字是否恰好来自剪贴板。因此插件不得把用户内容、凭据、token、路径或 opaque handle 放入日志；`details` 会被宿主明确丢弃而不落盘。每个插件的 message 另有 8 KiB 单条上限和 10 秒 32 条固定窗口，超限消息丢弃并只写聚合提示；日志 I/O 在插件 transition read-lock 释放后才执行。磁盘已满或应用数据目录暂时不可写时，日志失败不会拖垮常驻启动器，设置页会报告读取／清理失败。
+
+安装器、开发 watcher 与 updater 在 iHub 进程启动前或替换期间无法写入应用内日志，也不会为此启动应用。它们继续使用各自的有界状态／stdout／stderr 日志：Windows 持久 watcher 的最近失败输出在开发安装状态中，macOS LaunchAgent 日志位于其受限开发安装目录。排查“尚未启动成功”或“安装被占用”时应先查看这些外部状态；应用成功启动后的运行期问题再看设置页日志。
+
 ## 显式、安全地同步上游
 
 启动脚本的默认无参数模式**绝不会**执行 `git fetch`、`git pull`、`reset`、`checkout` 或 `clean`。需要把无法安全更新视为错误时，由开发者明确请求一次严格同步：
@@ -108,7 +118,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install-dev.ps1 -NoLaunch
 ```
 
-它会写入 `%LOCALAPPDATA%\iHub Development\`，并创建五个开始菜单快捷方式：
+它会写入 `%LOCALAPPDATA%\iHub Development\`，并创建五个开始菜单快捷方式。快捷方式固定指向经过普通文件／非 reparse 校验的 `%SystemRoot%\System32\wscript.exe //B` GUI 启动垫，不从可被用户 PATH 遮蔽的位置解析；启动垫从第一条进程创建指令就以隐藏样式运行受信任的非交互 PowerShell launcher，避免 Explorer 先创建可见控制台再解析 `-WindowStyle Hidden`：
 
 - **iHub Development (Always Latest, Safe)**：每次启动先在安全条件下跟随 upstream；工作树有改动、分叉、领先上游、没有 upstream 或网络不可用时，保留当前保存的源码并继续启动。
 - **iHub Development (Current Source)**：不复制源码、不覆盖稳定版、也不更新 Git；每次点击都调用所配置工作树中的 `scripts/dev.ps1`，因此运行的一定是这份工作树当前保存的代码。
@@ -129,7 +139,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install-dev.ps1 -EnablePersistentDevelopmentInstall -UpstreamCheckMinutes 30
 ```
 
-启用前会校验 `%LOCALAPPDATA%\iHub Development\launcher.json` 的 iHub marker，并确认它指向当前工作树；当前的 verified-install 状态协议要求 marker 的 `launcherRevision` 至少为 `3`。旧版 marker 会在 `-DevelopmentInstallStatus` 中显示为 `refresh-required`，且不能用于启用任务；升级后先重新运行 `.\scripts\install-dev.ps1 -NoLaunch` 即可安全刷新。旧工作树、丢失启动器或同名的非 iHub 任务都会拒绝覆盖。可先无副作用地预览：
+启用前会校验 `%LOCALAPPDATA%\iHub Development\launcher.json` 的 iHub marker，并确认它指向当前工作树；当前的 verified-install 状态协议要求 marker 的 `launcherRevision` 至少为 `4`，并要求隐藏 WScript 启动垫与 PowerShell launcher 都是普通文件。旧版 marker 会在 `-DevelopmentInstallStatus` 中显示为 `refresh-required`，且不能用于启用任务；升级后先重新运行 `.\scripts\install-dev.ps1 -NoLaunch` 即可安全刷新。旧工作树、丢失启动器或同名的非 iHub 任务都会拒绝覆盖。可先无副作用地预览：
 
 ```powershell
 .\scripts\install-dev.ps1 -EnablePersistentDevelopmentInstall -WhatIf
