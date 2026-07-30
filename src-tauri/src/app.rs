@@ -5928,6 +5928,13 @@ fn open_tray_surface(app: &AppHandle, section: &str) {
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    // TrayIconBuilder does not inherit Tauri's default window icon. Windows
+    // consequently keeps the resident process alive but has no visible tray
+    // entry unless the packaged application icon is provided explicitly.
+    let tray_icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::AssetNotFound("iHub tray icon".to_owned()))?;
     let show = MenuItem::with_id(app, "show", "显示 iHub", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "偏好设置", true, None::<&str>)?;
     let reindex = MenuItem::with_id(app, "reindex", "刷新文件索引", true, None::<&str>)?;
@@ -5956,6 +5963,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
     let _tray = TrayIconBuilder::with_id("ihub-tray")
+        .icon(tray_icon)
         .tooltip("iHub")
         .menu(&menu)
         .on_menu_event(|app, event| match tray_action(event.id().as_ref()) {
