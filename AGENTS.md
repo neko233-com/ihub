@@ -14,6 +14,7 @@
 - 本地安装只允许使用 `scripts/dev.ps1 -InstallLatest` 或 `scripts/install-dev.ps1 -NoLaunch -InstallLatest`。Git 安全更新与本地安装必须分开执行；不得通过 `reset`、`checkout`、`clean`、`stash` 或强制合并追求“最新”。
 - 持久开发任务只能属于当前用户并使用 `Interactive`、`Limited` 和隐藏的 PowerShell `-File` wrapper；禁止 `SYSTEM`、提权、保存密码、`-Command` 或直接把 `ihub.exe` 作为计划任务动作。
 - Windows 后台 Rust 子进程必须使用 `background_command`/`CREATE_NO_WINDOW`；Node 子进程必须使用 `windowsHide: true`。从 Explorer 或任务计划启动时，第一条进程创建指令就必须隐藏窗口。
+- Windows 常驻 iHub 必须始终注册可见的系统托盘图标与“显示 iHub”入口；`TrayIconBuilder` 必须显式绑定已打包的默认应用图标，不能只留下无界面的后台进程。
 - Tauri updater 的 `.sig` 不等于 Authenticode。若本地安装器是 `NotSigned`，只能说明 updater sidecar 与 payload proof 已验证，不得声称具有 Windows 发布者签名。
 - 只有 `launcherMarker=trusted`、两个持久任务均 owned 且 Running、`watcherService.state=healthy`、`lastError=null`，并且安装 EXE 的 SHA-256 同时等于 watcher fingerprint 与安装 proof，才能宣称“本机已安装当前最新版”。
 
