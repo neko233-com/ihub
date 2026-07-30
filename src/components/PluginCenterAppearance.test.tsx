@@ -17,26 +17,26 @@ function renderCenter() {
   );
 }
 
-describe("PluginCenter uTools visual contract", () => {
-  it("uses the uTools 7.8 light palette and two-pane geometry", () => {
+describe("PluginCenter Apple high-saturation visual contract", () => {
+  it("uses Apple glass material, system colors, and two-pane geometry", () => {
     const markup = renderCenter();
 
     expect(markup).toMatch(
-      /\.plugin-center \{[^}]*background: #f4f4f4;[^}]*border: 1px solid #d0d0d0;[^}]*color: rgba\(0, 0, 0, \.87\);[^}]*color-scheme: light;[^}]*font-family: system-ui,/s,
+      /\.plugin-center \{[^}]*--apple-center-blue: #0a84ff;[^}]*--apple-center-indigo: #5e5ce6;[^}]*--apple-center-purple: #bf5af2;[^}]*--apple-center-pink: #ff375f;[^}]*background:[^}]*#f5f5f7;[^}]*border: 1px solid rgba\(255, 255, 255, \.88\);[^}]*color: #1c1c1e;[^}]*color-scheme: light;[^}]*font-family: system-ui,/s,
     );
     expect(markup).toMatch(
       /\.plugin-center__body \{[^}]*grid-template-columns: 220px minmax\(0, 1fr\);/s,
     );
     expect(markup).toMatch(
-      /\.plugin-center__sidebar \{[^}]*background: #f4f4f4;[^}]*border-right: 1px solid #d0d0d0;[^}]*padding: 0;/s,
+      /\.plugin-center__sidebar \{[^}]*background: rgba\(244, 247, 255, \.72\);[^}]*backdrop-filter: blur\(22px\) saturate\(165%\);[^}]*border-right: 1px solid var\(--apple-center-separator\);[^}]*padding: 0;/s,
     );
     expect(markup).toMatch(
       /\.plugin-center__page-body \{[^}]*max-width: 800px;[^}]*padding: 12px 20px 23px;/s,
     );
     expect(markup).toMatch(
-      /\.plugin-center__context-confirm-card \{[^}]*background: #fff;[^}]*border: 1px solid #d0d0d0;/s,
+      /\.plugin-center__context-confirm-card \{[^}]*background: #fff;[^}]*border: 1px solid rgba\(60, 60, 67, \.18\);/s,
     );
-    expect(markup).toContain("color: #3f51b5");
+    expect(markup).toContain("color: #0a84ff");
     expect(markup).not.toContain("#1677ff");
     expect(markup).not.toContain('"DM Mono"');
   });
@@ -54,10 +54,10 @@ describe("PluginCenter uTools visual contract", () => {
       /\.plugin-center__installed-item \{[^}]*border-radius: 5px;[^}]*min-height: 42px;[^}]*padding: 8px 6px 8px 12px;/s,
     );
     expect(markup).toMatch(
-      /\.plugin-center__installed-item\.is-selected \{ background: #d7d7d7; \}/,
+      /\.plugin-center__installed-item\.is-selected \{ background: rgba\(10, 132, 255, \.18\); \}/,
     );
     expect(markup).toMatch(
-      /\.plugin-center__installed-item:hover \{ background: rgba\(0, 0, 0, \.04\); \}/,
+      /\.plugin-center__installed-item:hover \{ background: rgba\(94, 92, 230, \.10\); \}/,
     );
     expect(markup).toMatch(
       /\.plugin-center__installed-icon \{[^}]*height: 26px;[^}]*width: 26px;/s,

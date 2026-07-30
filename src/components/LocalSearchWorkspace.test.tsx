@@ -362,7 +362,7 @@ describe("LocalSearchWorkspace visual and native-icon contracts", () => {
 
   it("keeps all three panes visible at the native 800 logical-pixel width", () => {
     expect(stylesheet).toMatch(
-      /\.toolbox-drawer\.toolbox-drawer--search \{[^}]*--local-search-surface: #2d2f31;[^}]*color-scheme: dark;/s,
+      /\.toolbox-drawer\.toolbox-drawer--search \{[^}]*--local-search-surface: #0b1029;[^}]*--local-search-primary: #0a84ff;[^}]*--local-search-purple: #bf5af2;[^}]*color-scheme: dark;/s,
     );
     expect(stylesheet).toMatch(
       /\.local-search-workspace \{[^}]*grid-template-rows: 56px minmax\(0, 1fr\) 38px;/s,

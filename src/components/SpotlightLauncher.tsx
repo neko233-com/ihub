@@ -432,8 +432,8 @@ function activeGridColumnCount() {
 }
 
 const spotlightLauncherStyles = `
-  /* uTools 7.8 launcher contract. Keep the measured geometry, but make the
-     bright uTools palette the single, predictable visual mode. */
+  /* Apple high-saturation launcher contract. Keep the measured geometry, with
+     translucent material layers and explicit system-color semantics. */
   .ihub-spotlight-scrim {
     appearance: none;
     background: transparent;
@@ -445,29 +445,33 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight {
-    --ihub-utools-surface: #f4f4f4;
-    --ihub-utools-border: #cecece;
-    --ihub-utools-text: #212121;
-    --ihub-utools-input: #4d4d4d;
-    --ihub-utools-input-empty: #333;
-    --ihub-utools-placeholder: #7a7a7a;
-    --ihub-utools-title: #101010;
-    --ihub-utools-label: #212121;
-    --ihub-utools-detail: rgba(0, 0, 0, .5);
-    --ihub-utools-action: #666;
-    --ihub-utools-provider: #666;
-    --ihub-utools-hover: rgba(0, 0, 0, .04);
-    --ihub-utools-selected: #d7d7d7;
-    --ihub-utools-match: #c96a16;
-    --ihub-utools-scroll-track: #f4f4f4;
-    --ihub-utools-scroll-thumb: #c9c9c9;
-    --ihub-utools-avatar-glow-near: rgba(100, 255, 255, .6);
-    --ihub-utools-avatar-glow-far: rgba(0, 100, 255, .3);
-    background: var(--ihub-utools-surface);
-    border: 1px solid var(--ihub-utools-border);
+    --ihub-apple-surface: #f5f5f7;
+    --ihub-apple-material: rgba(255, 255, 255, .76);
+    --ihub-apple-border: rgba(60, 60, 67, .18);
+    --ihub-apple-text: #1c1c1e;
+    --ihub-apple-input: #0a84ff;
+    --ihub-apple-input-empty: #5e5ce6;
+    --ihub-apple-placeholder: #7c7c80;
+    --ihub-apple-title: #1c1c1e;
+    --ihub-apple-label: #2c2c2e;
+    --ihub-apple-detail: #636366;
+    --ihub-apple-action: #5e5ce6;
+    --ihub-apple-provider: #007aff;
+    --ihub-apple-hover: rgba(94, 92, 230, .10);
+    --ihub-apple-selected: rgba(10, 132, 255, .18);
+    --ihub-apple-match: #ff375f;
+    --ihub-apple-scroll-track: rgba(94, 92, 230, .08);
+    --ihub-apple-scroll-thumb: rgba(10, 132, 255, .68);
+    --ihub-apple-avatar-glow-near: rgba(255, 55, 95, .72);
+    --ihub-apple-avatar-glow-far: rgba(94, 92, 230, .48);
+    background:
+      radial-gradient(circle at 96% 6%, rgba(255, 55, 95, .18), transparent 28%),
+      radial-gradient(circle at 8% 98%, rgba(100, 210, 255, .20), transparent 31%),
+      var(--ihub-apple-surface);
+    border: 1px solid var(--ihub-apple-border);
     border-radius: 0;
-    box-shadow: none;
-    color: var(--ihub-utools-text);
+    box-shadow: inset 0 1px rgba(255, 255, 255, .86);
+    color: var(--ihub-apple-text);
     color-scheme: light;
     font-family: system-ui, "PingFang SC", "Helvetica Neue", "Microsoft Yahei", sans-serif;
     height: 100dvh;
@@ -488,7 +492,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight ::selection {
-    background: rgba(110, 159, 252, .5);
+    background: rgba(191, 90, 242, .38);
   }
 
   .ihub-spotlight__drag-zone {
@@ -512,6 +516,8 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__search-row {
+    background: rgba(255, 255, 255, .36);
+    backdrop-filter: blur(22px) saturate(170%);
     display: block;
     height: 56px;
     min-height: 56px;
@@ -535,7 +541,7 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__search-field input {
     background: transparent;
     border: 0;
-    color: var(--ihub-utools-input);
+    color: var(--ihub-apple-input);
     font-family: inherit;
     font-size: 18px;
     font-weight: 400;
@@ -548,12 +554,12 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__search-field input:placeholder-shown {
-    color: var(--ihub-utools-input-empty);
+    color: var(--ihub-apple-input-empty);
     font-size: 22px;
   }
 
   .ihub-spotlight__search-field input::placeholder {
-    color: var(--ihub-utools-placeholder);
+    color: var(--ihub-apple-placeholder);
     font-weight: 200;
     opacity: 1;
     user-select: none;
@@ -582,7 +588,7 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__top-button {
     align-items: center;
     background: transparent;
-    color: var(--ihub-utools-action);
+    color: var(--ihub-apple-action);
     display: inline-flex;
     height: 56px;
     justify-content: center;
@@ -619,8 +625,8 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__profile-button:hover .ihub-spotlight__profile-avatar,
   .ihub-spotlight__profile-button:focus-visible .ihub-spotlight__profile-avatar {
     box-shadow:
-      0 0 4px 1px var(--ihub-utools-avatar-glow-near),
-      0 0 8px 2px var(--ihub-utools-avatar-glow-far);
+      0 0 4px 1px var(--ihub-apple-avatar-glow-near),
+      0 0 8px 2px var(--ihub-apple-avatar-glow-far);
     filter: brightness(1.1);
     transform: scale(.95);
   }
@@ -630,7 +636,7 @@ const spotlightLauncherStyles = `
     overflow-x: hidden;
     overflow-y: auto;
     padding: 0;
-    scrollbar-color: var(--ihub-utools-scroll-thumb) var(--ihub-utools-scroll-track);
+    scrollbar-color: var(--ihub-apple-scroll-thumb) var(--ihub-apple-scroll-track);
     scrollbar-width: auto;
   }
 
@@ -641,12 +647,12 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__content::-webkit-scrollbar-track,
   .ihub-spotlight__content::-webkit-scrollbar-track-piece {
-    background: var(--ihub-utools-scroll-track);
+    background: var(--ihub-apple-scroll-track);
   }
 
   .ihub-spotlight__content::-webkit-scrollbar-thumb {
-    background: var(--ihub-utools-scroll-thumb);
-    border: 2px solid var(--ihub-utools-scroll-track);
+    background: var(--ihub-apple-scroll-thumb);
+    border: 2px solid var(--ihub-apple-scroll-track);
     border-radius: 4px;
   }
 
@@ -679,7 +685,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__group-title {
-    color: var(--ihub-utools-title);
+    color: var(--ihub-apple-title);
     font-size: 14px;
     font-weight: 700;
     letter-spacing: 0;
@@ -688,7 +694,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__group-count {
-    color: var(--ihub-utools-action);
+    color: var(--ihub-apple-action);
     font-family: inherit;
     font-size: 13px;
     font-weight: 400;
@@ -702,7 +708,7 @@ const spotlightLauncherStyles = `
     background: transparent;
     border: 0;
     border-radius: 4px;
-    color: var(--ihub-utools-action);
+    color: var(--ihub-apple-action);
     cursor: pointer;
     display: inline-flex;
     font: inherit;
@@ -715,14 +721,14 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__group-action:hover,
   .ihub-spotlight__group-back:hover {
-    background: var(--ihub-utools-hover);
-    color: var(--ihub-utools-text);
+    background: var(--ihub-apple-hover);
+    color: var(--ihub-apple-text);
   }
 
   .ihub-spotlight__group-action:focus-visible,
   .ihub-spotlight__group-back:focus-visible {
-    background: var(--ihub-utools-selected);
-    color: var(--ihub-utools-text);
+    background: var(--ihub-apple-selected);
+    color: var(--ihub-apple-text);
     outline: 0;
   }
 
@@ -763,16 +769,16 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__tile:hover:not(.is-keyboard-selected) {
-    background: var(--ihub-utools-hover);
+    background: var(--ihub-apple-hover);
   }
 
   .ihub-spotlight__tile:focus-visible {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     outline: 0;
   }
 
   .ihub-spotlight__tile.is-keyboard-selected {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     border: 0;
     box-shadow: none;
     outline: 0;
@@ -839,23 +845,23 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__tile-icon--mint {
-    background: #24796e;
+    background: #30d158;
   }
 
   .ihub-spotlight__tile-icon--violet {
-    background: #6550a8;
+    background: #bf5af2;
   }
 
   .ihub-spotlight__tile-icon--amber {
-    background: #9b6827;
+    background: #ff9f0a;
   }
 
   .ihub-spotlight__tile-icon--blue {
-    background: #2d6f9f;
+    background: #0a84ff;
   }
 
   .ihub-spotlight__tile-icon--slate {
-    background: #59666d;
+    background: #5e5ce6;
   }
 
   .ihub-spotlight__tile-icon.is-native {
@@ -874,7 +880,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__tile-label {
-    color: var(--ihub-utools-label);
+    color: var(--ihub-apple-label);
     display: -webkit-box;
     font-size: 12px;
     font-weight: 400;
@@ -921,16 +927,16 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__tile:hover:not(.is-keyboard-selected) {
-    background: var(--ihub-utools-hover);
+    background: var(--ihub-apple-hover);
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__tile:focus-visible {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     outline: 0;
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__tile.is-keyboard-selected {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     border: 0;
   }
 
@@ -947,14 +953,14 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__tile-label {
-    color: var(--ihub-utools-label);
+    color: var(--ihub-apple-label);
     font-size: 12px;
     padding: 0;
     text-align: left;
   }
 
   .ihub-spotlight__group--context .ihub-spotlight__tile-detail {
-    color: var(--ihub-utools-detail);
+    color: var(--ihub-apple-detail);
     display: -webkit-box;
     font-size: 10px;
     line-height: 1.2;
@@ -992,7 +998,7 @@ const spotlightLauncherStyles = `
     background: transparent;
     border: 0;
     border-radius: 0;
-    color: var(--ihub-utools-text);
+    color: var(--ihub-apple-text);
     cursor: pointer;
     display: grid;
     font: inherit;
@@ -1008,16 +1014,16 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__result-row:hover:not(.is-keyboard-selected) {
-    background: var(--ihub-utools-hover);
+    background: var(--ihub-apple-hover);
   }
 
   .ihub-spotlight__result-row:focus-visible {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     outline: 0;
   }
 
   .ihub-spotlight__result-row.is-keyboard-selected {
-    background: var(--ihub-utools-selected);
+    background: var(--ihub-apple-selected);
     border: 0;
     outline: 0;
     transform: none;
@@ -1030,7 +1036,7 @@ const spotlightLauncherStyles = `
 
   .ihub-spotlight__result-icon {
     align-items: center;
-    background: #59666d;
+    background: #5e5ce6;
     border-radius: 6px;
     color: #fff;
     display: inline-flex;
@@ -1068,7 +1074,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__result-label {
-    color: var(--ihub-utools-label);
+    color: var(--ihub-apple-label);
     display: block;
     font-size: 16px;
     font-weight: 400;
@@ -1077,7 +1083,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__result-detail {
-    color: var(--ihub-utools-detail);
+    color: var(--ihub-apple-detail);
     display: block;
     font-size: 12px;
     line-height: 18px;
@@ -1088,7 +1094,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__result-badge {
-    color: var(--ihub-utools-provider);
+    color: var(--ihub-apple-provider);
     font-family: inherit;
     font-size: 14px;
     font-weight: 300;
@@ -1101,7 +1107,7 @@ const spotlightLauncherStyles = `
     background: transparent;
     border: 0;
     border-radius: 0;
-    color: var(--ihub-utools-detail);
+    color: var(--ihub-apple-detail);
     display: flex;
     font-size: 12px;
     gap: 8px;
@@ -1110,7 +1116,7 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight__empty svg {
-    color: var(--ihub-utools-detail);
+    color: var(--ihub-apple-detail);
     flex: 0 0 auto;
   }
 
@@ -1118,7 +1124,7 @@ const spotlightLauncherStyles = `
   .ihub-spotlight__result-label mark,
   .ihub-spotlight__tile-label mark {
     background: transparent;
-    color: var(--ihub-utools-match);
+    color: var(--ihub-apple-match);
   }
 
   .ihub-spotlight__shortcuts,

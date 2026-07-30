@@ -13,7 +13,7 @@ function launcherStyles() {
   const match = markup.match(/<style>([\s\S]*?)<\/style>/);
   expect(match).not.toBeNull();
   const styles = match?.[1] ?? "";
-  const contractIndex = styles.indexOf("/* uTools 7.8 launcher contract.");
+  const contractIndex = styles.indexOf("/* Apple high-saturation launcher contract.");
   expect(contractIndex).toBeGreaterThan(-1);
   return styles.slice(contractIndex);
 }
@@ -38,7 +38,7 @@ function expectOneRule(
   ).toBe(true);
 }
 
-describe("SpotlightLauncher installed-uTools visual contract", () => {
+describe("SpotlightLauncher Apple high-saturation visual contract", () => {
   it("lets the main WebView inherit the operating-system color scheme", () => {
     const tauriConfig = JSON.parse(
       readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
@@ -49,16 +49,16 @@ describe("SpotlightLauncher installed-uTools visual contract", () => {
     expect(mainWindow).not.toHaveProperty("theme");
   });
 
-  it("declares the measured bright launcher tokens", () => {
+  it("declares the measured Apple material and high-saturation tokens", () => {
     const styles = launcherStyles();
 
-    expect(styles).toMatch(/--ihub-utools-surface:\s*#f4f4f4/i);
-    expect(styles).toMatch(/--ihub-utools-border:\s*#cecece/i);
-    expect(styles).toMatch(/--ihub-utools-text:\s*#212121/i);
-    expect(styles).toMatch(/--ihub-utools-hover:\s*rgba\(0,\s*0,\s*0,\s*0?\.04\)/i);
-    expect(styles).toMatch(/--ihub-utools-selected:\s*#d7d7d7/i);
+    expect(styles).toMatch(/--ihub-apple-surface:\s*#f5f5f7/i);
+    expect(styles).toMatch(/--ihub-apple-material:\s*rgba\(255,\s*255,\s*255,\s*\.76\)/i);
+    expect(styles).toMatch(/--ihub-apple-input:\s*#0a84ff/i);
+    expect(styles).toMatch(/--ihub-apple-hover:\s*rgba\(94,\s*92,\s*230,\s*\.10\)/i);
+    expect(styles).toMatch(/--ihub-apple-selected:\s*rgba\(10,\s*132,\s*255,\s*\.18\)/i);
     expect(styles).toMatch(/color-scheme:\s*light/i);
-    expect(styles).not.toMatch(/--ihub-utools-surface:\s*#303133/i);
+    expect(styles).not.toMatch(/--ihub-apple-surface:\s*#f4f4f4/i);
     expect(styles).not.toMatch(/@media \(prefers-color-scheme: light\)/i);
   });
 
@@ -72,16 +72,16 @@ describe("SpotlightLauncher installed-uTools visual contract", () => {
       /\.ihub-spotlight__result-row:hover[^{}]*\.ihub-spotlight__result-row\.is-keyboard-selected\s*\{/s,
     );
     expectOneRule(styles, ".ihub-spotlight__tile:hover:not(.is-keyboard-selected)", [
-      /background(?:-color)?:\s*var\(--ihub-utools-hover\)/,
+      /background(?:-color)?:\s*var\(--ihub-apple-hover\)/,
     ]);
     expectOneRule(styles, ".ihub-spotlight__tile.is-keyboard-selected", [
-      /background(?:-color)?:\s*var\(--ihub-utools-selected\)/,
+      /background(?:-color)?:\s*var\(--ihub-apple-selected\)/,
     ]);
     expectOneRule(styles, ".ihub-spotlight__result-row:hover:not(.is-keyboard-selected)", [
-      /background(?:-color)?:\s*var\(--ihub-utools-hover\)/,
+      /background(?:-color)?:\s*var\(--ihub-apple-hover\)/,
     ]);
     expectOneRule(styles, ".ihub-spotlight__result-row.is-keyboard-selected", [
-      /background(?:-color)?:\s*var\(--ihub-utools-selected\)/,
+      /background(?:-color)?:\s*var\(--ihub-apple-selected\)/,
     ]);
   });
 

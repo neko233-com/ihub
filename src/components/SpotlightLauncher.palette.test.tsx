@@ -34,8 +34,8 @@ function renderedSearchIcon(item: {
   };
 }
 
-describe("SpotlightLauncher uTools palette", () => {
-  it("uses the bright uTools palette regardless of the system color scheme", () => {
+describe("SpotlightLauncher Apple high-saturation palette", () => {
+  it("uses the Apple semantic palette regardless of the system color scheme", () => {
     const markup = renderToStaticMarkup(
       <SpotlightLauncher
         onClose={() => undefined}
@@ -43,12 +43,12 @@ describe("SpotlightLauncher uTools palette", () => {
       />,
     );
 
-    expect(markup).toContain("--ihub-utools-surface: #f4f4f4");
-    expect(markup).toContain("--ihub-utools-selected: #d7d7d7");
-    expect(markup).toContain("--ihub-utools-hover: rgba(0, 0, 0, .04)");
-    expect(markup).toContain("background: var(--ihub-utools-surface)");
+    expect(markup).toContain("--ihub-apple-surface: #f5f5f7");
+    expect(markup).toContain("--ihub-apple-selected: rgba(10, 132, 255, .18)");
+    expect(markup).toContain("--ihub-apple-hover: rgba(94, 92, 230, .10)");
+    expect(markup).toContain("var(--ihub-apple-surface);");
     expect(markup).toContain("color-scheme: light");
-    expect(markup).not.toContain("--ihub-utools-surface: #303133");
+    expect(markup).not.toContain("--ihub-apple-surface: #f4f4f4");
     expect(markup).not.toContain("@media (prefers-color-scheme: light)");
   });
 
