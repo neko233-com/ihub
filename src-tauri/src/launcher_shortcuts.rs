@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     host_log,
     indexer::{LauncherShortcutSource, ResolvedSystemIconSource, SearchIndex},
+    system_open::{LocalOpenKind, PreparedLocalOpen},
 };
 
 const SHORTCUTS_FILE_NAME: &str = "launcher-shortcuts-v1.json";
@@ -28,6 +29,21 @@ const MAX_SHORTCUTS_FILE_BYTES: usize = 128 * 1024;
 const MAX_SOURCE_ID_BYTES: usize = 8 * 1024;
 const MAX_LABEL_BYTES: usize = 512;
 const MAX_METADATA_BYTES: usize = 1024;
+
+/// Resolves an immediate renderer selection back through the current native
+/// index, then revalidates its live object and authorization scope. The
+/// renderer contributes only the current result ID, never an openable path.
+pub(crate) fn resolve_current_search_result_open_target(
+    search_result_id: &str,
+    index: &SearchIndex,
+) -> Result<PreparedLocalOpen, String> {
+    let source = index
+        .resolve_current_search_result_source(search_result_id)
+        .ok_or_else(|| {
+            "该搜索结果已过期、不在当前授权索引中，或不支持直接打开。请重新搜索。".to_owned()
+        })?;
+    prepare_live_source_for(&source, index, LiveSourcePurpose::ImmediateSearchResult)
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -136,11 +152,11 @@ impl LauncherShortcutStore {
                 if source.kind != shortcut.kind {
                     return None;
                 }
-                let path = validate_live_source(&source, index).ok()?;
+                let prepared = prepare_live_source(&source, index).ok()?;
                 Some(ResolvedSystemIconSource {
                     response_id: shortcut.id.clone(),
-                    path,
                     kind: shortcut.kind.clone(),
+                    prepared,
                 })
             })
             .collect()
@@ -168,7 +184,7 @@ impl LauncherShortcutStore {
         let source = index
             .resolve_launcher_shortcut_source(source_id)
             .ok_or_else(|| "该搜索结果已不在当前索引中，或不支持固定到启动页。".to_owned())?;
-        let _canonical_path = validate_live_source(&source, index)?;
+        let _prepared = prepare_live_source(&source, index)?;
 
         let mut state = self.lock_state();
         if let Some(existing) = state
@@ -203,11 +219,11 @@ impl LauncherShortcutStore {
     /// Returns a revalidated target path for the exact opaque shortcut. This
     /// method never takes a renderer-provided path and intentionally leaves a
     /// stale record intact so the person can decide whether to unpin it.
-    pub fn resolve_open_path(
+    pub fn resolve_open_target(
         &self,
         shortcut_id: &str,
         index: &SearchIndex,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PreparedLocalOpen, String> {
         if shortcut_id.len() > 128 {
             return Err("启动器快捷项标识无效。".to_owned());
         }
@@ -226,7 +242,7 @@ impl LauncherShortcutStore {
         if source.kind != shortcut.kind {
             return Err("固定目标的类型已变化；为安全起见不会打开它。请重新固定。".to_owned());
         }
-        validate_live_source(&source, index)
+        prepare_live_source(&source, index)
     }
 
     /// Removes only the host-owned registry record. It never deletes or
@@ -320,7 +336,7 @@ fn shortcut_view(
     let available = index
         .resolve_launcher_shortcut_source(&shortcut.source_id)
         .filter(|source| source.kind == shortcut.kind)
-        .and_then(|source| validate_live_source(&source, index).ok())
+        .and_then(|source| prepare_live_source(&source, index).ok())
         .is_some();
     let status = if available { "ready" } else { "unavailable" }.to_owned();
     LauncherShortcutView {
@@ -332,63 +348,60 @@ fn shortcut_view(
     }
 }
 
-fn validate_live_source(
+#[derive(Clone, Copy)]
+enum LiveSourcePurpose {
+    ImmediateSearchResult,
+    PersistentShortcut,
+}
+
+fn prepare_live_source(
     source: &LauncherShortcutSource,
     index: &SearchIndex,
-) -> Result<PathBuf, String> {
-    let direct_metadata = fs::symlink_metadata(&source.path)
-        .map_err(|error| format!("固定目标当前不可用：{error}"))?;
-    if direct_metadata.file_type().is_symlink() {
-        return Err("固定目标现在是符号链接或别名；为安全起见不会跟随它。".to_owned());
-    }
-    let canonical = source
-        .path
-        .canonicalize()
-        .map_err(|error| format!("无法重新验证固定目标：{error}"))?;
-    let canonical_metadata =
-        fs::symlink_metadata(&canonical).map_err(|error| format!("无法读取固定目标：{error}"))?;
-    if canonical_metadata.file_type().is_symlink() {
-        return Err("固定目标解析为符号链接或别名；为安全起见不会打开它。".to_owned());
-    }
+) -> Result<PreparedLocalOpen, String> {
+    prepare_live_source_for(source, index, LiveSourcePurpose::PersistentShortcut)
+}
 
-    let expected_kind = match source.kind.as_str() {
-        "file" if canonical_metadata.is_file() => true,
-        "folder" if canonical_metadata.is_dir() => true,
-        "application" if supported_application_shape(&canonical, &canonical_metadata) => true,
+fn prepare_live_source_for(
+    source: &LauncherShortcutSource,
+    index: &SearchIndex,
+    purpose: LiveSourcePurpose,
+) -> Result<PreparedLocalOpen, String> {
+    let expected_kind = local_open_kind_for_source(source)?;
+    let prepared = crate::system_open::prepare_local_open(&source.path, Some(expected_kind))
+        .map_err(|error| format!("无法以受保护方式重新验证打开目标：{error}"))?;
+    let supported_shape = match source.kind.as_str() {
+        "file" | "folder" => true,
+        "application" => match purpose {
+            LiveSourcePurpose::ImmediateSearchResult => {
+                supported_immediate_application_shape(prepared.path(), prepared.kind())
+            }
+            LiveSourcePurpose::PersistentShortcut => {
+                supported_application_shape(prepared.path(), prepared.kind())
+            }
+        },
         _ => false,
     };
-    if !expected_kind {
+    if !supported_shape {
         return Err("固定目标的文件类型已变化或不再受支持；请重新固定。".to_owned());
     }
-    if !is_supported_local_target(&canonical) {
-        return Err("固定目标不在受支持的本地卷上；为安全起见不会打开它。".to_owned());
-    }
-    if !index.launcher_shortcut_path_is_authorized(source, &canonical) {
+    let path_is_authorized = match purpose {
+        LiveSourcePurpose::ImmediateSearchResult => {
+            index.current_search_result_path_is_authorized(source, prepared.path())
+        }
+        LiveSourcePurpose::PersistentShortcut => {
+            index.launcher_shortcut_path_is_authorized(source, prepared.path())
+        }
+    };
+    if !path_is_authorized {
         return Err("固定目标不再位于当前授权范围内；为安全起见不会打开它。".to_owned());
     }
-    Ok(canonical)
+    Ok(prepared)
 }
 
-fn is_supported_local_target(path: &Path) -> bool {
+fn supported_application_shape(path: &Path, kind: LocalOpenKind) -> bool {
     #[cfg(target_os = "windows")]
     {
-        // `canonicalize` normally returns a drive-qualified path. A UNC path
-        // is a remote namespace and must not become a persistent launcher
-        // action, even if someone supplied it through a custom index root.
-        !path.to_string_lossy().starts_with("\\\\")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        true
-    }
-}
-
-fn supported_application_shape(path: &Path, metadata: &fs::Metadata) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        metadata.is_file()
+        kind == LocalOpenKind::File
             && path
                 .extension()
                 .and_then(|extension| extension.to_str())
@@ -397,7 +410,7 @@ fn supported_application_shape(path: &Path, metadata: &fs::Metadata) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        metadata.is_dir()
+        kind == LocalOpenKind::Folder
             && path
                 .extension()
                 .and_then(|extension| extension.to_str())
@@ -406,8 +419,51 @@ fn supported_application_shape(path: &Path, metadata: &fs::Metadata) -> bool {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (path, metadata);
+        let _ = (path, kind);
         false
+    }
+}
+
+fn supported_immediate_application_shape(path: &Path, kind: LocalOpenKind) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        kind == LocalOpenKind::File
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "lnk" | "url" | "appref-ms" | "exe"
+                    )
+                })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        supported_application_shape(path, kind)
+    }
+}
+
+fn local_open_kind_for_source(source: &LauncherShortcutSource) -> Result<LocalOpenKind, String> {
+    match source.kind.as_str() {
+        "file" => Ok(LocalOpenKind::File),
+        "folder" => Ok(LocalOpenKind::Folder),
+        "application" => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(LocalOpenKind::File)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                Ok(LocalOpenKind::Folder)
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                Err("当前平台不支持直接打开该应用。".to_owned())
+            }
+        }
+        _ => Err("打开目标的文件类型不受支持。".to_owned()),
     }
 }
 
@@ -517,6 +573,11 @@ fn recover_interrupted_replace(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
     use super::*;
 
     fn temporary_store_path() -> PathBuf {
@@ -524,6 +585,22 @@ mod tests {
             "ihub-launcher-shortcuts-test-{}.json",
             Uuid::new_v4()
         ))
+    }
+
+    fn temporary_search_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ihub-search-open-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn wait_for_search_index_ready(index: &SearchIndex) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while index.status().phase != "ready" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            index.status().phase,
+            "ready",
+            "the bounded test root should finish indexing",
+        );
     }
 
     fn shortcut(id: &str, source_id: &str) -> PersistedLauncherShortcut {
@@ -583,5 +660,144 @@ mod tests {
         assert!(load_state(&path).unwrap().shortcuts.is_empty());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn immediate_search_open_requires_an_exact_current_index_result() {
+        let first_root = temporary_search_root("first");
+        let second_root = temporary_search_root("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let target = first_root.join("open-me.txt");
+        fs::write(&target, b"current result").unwrap();
+        fs::write(second_root.join("other.txt"), b"replacement scope").unwrap();
+
+        let index = SearchIndex::new();
+        index
+            .set_roots(vec![first_root.to_string_lossy().to_string()])
+            .unwrap();
+        wait_for_search_index_ready(&index);
+        let result = index
+            .search("open-me", Some(10))
+            .into_iter()
+            .find(|result| result.name == "open-me.txt")
+            .expect("the current root should publish the test file");
+
+        let resolved = resolve_current_search_result_open_target(&result.id, &index).unwrap();
+        assert_eq!(resolved.path(), target.canonicalize().unwrap());
+        assert_eq!(resolved.kind(), LocalOpenKind::File);
+        assert!(
+            resolve_current_search_result_open_target("unknown-result-id", &index).is_err(),
+            "a renderer cannot invent an indexed target",
+        );
+
+        index
+            .set_roots(vec![second_root.to_string_lossy().to_string()])
+            .unwrap();
+        wait_for_search_index_ready(&index);
+        assert!(
+            resolve_current_search_result_open_target(&result.id, &index).is_err(),
+            "a result from the previous authorization scope must expire",
+        );
+
+        let _ = fs::remove_dir_all(first_root);
+        let _ = fs::remove_dir_all(second_root);
+    }
+
+    #[test]
+    fn live_search_target_must_remain_inside_the_active_root() {
+        let authorized_root = temporary_search_root("authorized");
+        let outside_root = temporary_search_root("outside");
+        fs::create_dir_all(&authorized_root).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        let outside_file = outside_root.join("outside.txt");
+        fs::write(&outside_file, b"not authorized").unwrap();
+
+        let index = SearchIndex::new();
+        index
+            .set_roots(vec![authorized_root.to_string_lossy().to_string()])
+            .unwrap();
+        let source = LauncherShortcutSource {
+            id: "outside".to_owned(),
+            path: outside_file,
+            name: "outside.txt".to_owned(),
+            kind: "file".to_owned(),
+            metadata: "File".to_owned(),
+        };
+        assert!(prepare_live_source(&source, &index).is_err());
+        assert!(
+            prepare_live_source_for(&source, &index, LiveSourcePurpose::ImmediateSearchResult)
+                .is_err(),
+            "an immediate result must not relax the active content-root boundary",
+        );
+
+        let _ = fs::remove_dir_all(authorized_root);
+        let _ = fs::remove_dir_all(outside_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_immediate_application_shapes_accept_links_while_pins_remain_exe_only() {
+        let root = temporary_search_root("windows-application-shapes");
+        fs::create_dir_all(&root).unwrap();
+
+        for (name, can_pin) in [
+            ("Shortcut.lnk", false),
+            ("Website.url", false),
+            ("Deployment.appref-ms", false),
+            ("Direct.exe", true),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, b"launch item").unwrap();
+            assert!(
+                supported_immediate_application_shape(&path, LocalOpenKind::File),
+                "{name} must remain immediately openable",
+            );
+            assert_eq!(
+                supported_application_shape(&path, LocalOpenKind::File),
+                can_pin,
+                "{name} must keep the persistent pin shape",
+            );
+        }
+
+        let unsupported = root.join("Readme.txt");
+        fs::write(&unsupported, b"not an application").unwrap();
+        assert!(!supported_immediate_application_shape(
+            &unsupported,
+            LocalOpenKind::File,
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_search_target_does_not_follow_a_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let authorized_root = temporary_search_root("symlink-authorized");
+        let outside_root = temporary_search_root("symlink-outside");
+        fs::create_dir_all(&authorized_root).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        let outside_file = outside_root.join("outside.txt");
+        fs::write(&outside_file, b"not authorized").unwrap();
+        let link = authorized_root.join("link.txt");
+        symlink(&outside_file, &link).unwrap();
+
+        let index = SearchIndex::new();
+        index
+            .set_roots(vec![authorized_root.to_string_lossy().to_string()])
+            .unwrap();
+        let source = LauncherShortcutSource {
+            id: "symlink".to_owned(),
+            path: link,
+            name: "link.txt".to_owned(),
+            kind: "file".to_owned(),
+            metadata: "File".to_owned(),
+        };
+        assert!(prepare_live_source(&source, &index).is_err());
+
+        let _ = fs::remove_dir_all(authorized_root);
+        let _ = fs::remove_dir_all(outside_root);
     }
 }

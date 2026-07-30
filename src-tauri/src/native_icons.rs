@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use crate::system_open::PreparedLocalOpen;
+
 const ICON_EDGE: u32 = 48;
 const WORK_QUEUE_CAPACITY: usize = 16;
 const POSITIVE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -160,6 +162,10 @@ struct IconRequest {
     path: PathBuf,
     kind: String,
     reply: SyncSender<Option<String>>,
+    /// Keeps the exact authorized filesystem object bound until the worker
+    /// has finished every metadata and Shell lookup, even if the renderer's
+    /// bounded wait has already timed out.
+    _prepared: Option<PreparedLocalOpen>,
 }
 
 #[derive(Default)]
@@ -226,8 +232,27 @@ impl NativeIconService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_request(&self, path: &Path, kind: &str) -> Option<NativeIconPending> {
-        if !valid_icon_input(path, kind) || self.worker_state.stalled.load(Ordering::Acquire) {
+        self.try_request_inner(path.to_path_buf(), kind, None)
+    }
+
+    pub(crate) fn try_request_prepared(
+        &self,
+        prepared: PreparedLocalOpen,
+        kind: &str,
+    ) -> Option<NativeIconPending> {
+        let path = prepared.path().to_path_buf();
+        self.try_request_inner(path, kind, Some(prepared))
+    }
+
+    fn try_request_inner(
+        &self,
+        path: PathBuf,
+        kind: &str,
+        prepared: Option<PreparedLocalOpen>,
+    ) -> Option<NativeIconPending> {
+        if !valid_icon_input(&path, kind) || self.worker_state.stalled.load(Ordering::Acquire) {
             return None;
         }
         let sender = self.sender.as_ref()?;
@@ -239,9 +264,10 @@ impl NativeIconService {
         let (reply, receiver) = mpsc::sync_channel(1);
         let request = IconRequest {
             id,
-            path: path.to_path_buf(),
+            path,
             kind: kind.to_owned(),
             reply,
+            _prepared: prepared,
         };
         match sender.try_send(request) {
             Ok(()) => Some(NativeIconPending {
@@ -267,8 +293,27 @@ impl Default for NativeIconService {
 fn valid_icon_input(path: &Path, kind: &str) -> bool {
     matches!(kind, "file" | "folder" | "application")
         && path.is_absolute()
+        && icon_input_is_local(path)
         && !path.as_os_str().is_empty()
         && path_code_units(path) <= MAX_PATH_CODE_UNITS
+}
+
+#[cfg(target_os = "windows")]
+fn icon_input_is_local(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let local_drive = matches!(
+        components.next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    local_drive && matches!(components.next(), Some(Component::RootDir))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn icon_input_is_local(_path: &Path) -> bool {
+    true
 }
 
 #[cfg(target_os = "windows")]
@@ -325,7 +370,7 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
     };
     let mut cache = IconCache::bounded();
     while let Ok(request) = receiver.recv() {
-        let metadata = fs::metadata(&request.path).ok();
+        let metadata = fs::symlink_metadata(&request.path).ok();
         let key = cache_key(
             request.path.clone(),
             request.kind.clone(),
@@ -336,7 +381,9 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
             cached
         } else {
             let valid_type = metadata.as_ref().is_some_and(|value| {
-                if request.kind == "folder" {
+                if windows_backend::metadata_is_reparse(value) {
+                    false
+                } else if request.kind == "folder" {
                     value.is_dir()
                 } else {
                     value.is_file()
@@ -594,30 +641,47 @@ mod windows_backend {
         // from their launch target (for example, a PowerShell launcher with the
         // product's own .ico). Honor that native source and resource index
         // first, then use the target program glyph without a shortcut overlay.
-        // The original .lnk remains the bounded fallback for unusual links.
-        let shortcut_sources = shortcut_icon_sources(path, &wide_path);
-        let internet_shortcut_icon = internet_shortcut_icon_source(path, &wide_path);
+        //
+        // Never pass the original .lnk/.url back to generic Shell extraction:
+        // an explicitly remote target/icon is intentionally rejected below,
+        // and a fallback on the original shortcut would let Shell resolve that
+        // rejected network location anyway.
         let extract =
             |source: &[u16]| shell_item_image(source).or_else(|| shell_icon_fallback(source));
-        let image = shortcut_sources
-            .as_ref()
-            .and_then(|sources| sources.custom_icon.as_ref())
-            .and_then(|(icon_path, icon_index)| indexed_icon_image(icon_path, *icon_index))
-            .or_else(|| {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        let image = match extension.as_deref() {
+            Some("lnk") => {
+                let shortcut_sources = shortcut_icon_sources(path, &wide_path)?;
                 shortcut_sources
-                    .as_ref()
-                    .and_then(|sources| sources.target.as_deref())
-                    .and_then(nul_terminated_wide)
-                    .as_deref()
-                    .and_then(extract)
-            })
-            .or_else(|| {
-                internet_shortcut_icon
+                    .custom_icon
                     .as_ref()
                     .and_then(|(icon_path, icon_index)| indexed_icon_image(icon_path, *icon_index))
-            })
-            .or_else(|| extract(&wide_path))?;
+                    .or_else(|| {
+                        shortcut_sources
+                            .target
+                            .as_deref()
+                            .and_then(nul_terminated_wide)
+                            .as_deref()
+                            .and_then(extract)
+                    })?
+            }
+            Some("url") => {
+                let (icon_path, icon_index) = internet_shortcut_icon_source(path, &wide_path)?;
+                indexed_icon_image(&icon_path, icon_index)?
+            }
+            _ if original_shell_fallback_is_allowed(path) => extract(&wide_path)?,
+            _ => return None,
+        };
         encode_png_data_url(image.0, image.1, image.2)
+    }
+
+    fn original_shell_fallback_is_allowed(path: &Path) -> bool {
+        !path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("lnk") || extension.eq_ignore_ascii_case("url")
+        })
     }
 
     fn nul_terminated_wide(path: &Path) -> Option<Vec<u16>> {
@@ -765,8 +829,66 @@ mod windows_backend {
         {
             return None;
         }
-        let metadata = std::fs::symlink_metadata(&path).ok()?;
-        (metadata.is_file() && !metadata.file_type().is_symlink()).then_some(path)
+        if path_has_reparse_component(&path) {
+            return None;
+        }
+        let canonical = path.canonicalize().ok()?;
+        let mut canonical_components = canonical.components();
+        let canonical_local_drive = matches!(
+            canonical_components.next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        );
+        if !canonical_local_drive
+            || !matches!(canonical_components.next(), Some(Component::RootDir))
+            || canonical.as_os_str().encode_wide().count() > MAX_PATH_CODE_UNITS
+            || path_has_reparse_component(&canonical)
+        {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(&canonical).ok()?;
+        (metadata.is_file() && !metadata_is_reparse(&metadata))
+            .then(|| shell_compatible_path(&canonical))
+    }
+
+    fn shell_compatible_path(path: &Path) -> PathBuf {
+        const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.starts_with(&VERBATIM_PREFIX) {
+            PathBuf::from(OsString::from_wide(&wide[VERBATIM_PREFIX.len()..]))
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    fn path_has_reparse_component(path: &Path) -> bool {
+        let display = path.to_string_lossy();
+        let inspected = display
+            .strip_prefix(r"\\?\")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+        let mut current = PathBuf::new();
+        for component in inspected.components() {
+            current.push(component.as_os_str());
+            if !current.is_absolute() {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+                return true;
+            };
+            if metadata_is_reparse(&metadata) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(super) fn metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
 
     fn indexed_icon_image(path: &Path, icon_index: i32) -> Option<(Vec<u8>, u32, u32)> {
@@ -1064,6 +1186,11 @@ mod windows_backend {
     #[cfg(test)]
     pub(super) fn test_internet_shortcut_icon(path: &Path) -> Option<(PathBuf, i32)> {
         internet_shortcut_icon_source(path, &nul_terminated_wide(path)?)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_original_shell_fallback_is_allowed(path: &Path) -> bool {
+        original_shell_fallback_is_allowed(path)
     }
 }
 
@@ -1573,10 +1700,13 @@ mod tests {
             std::fs::canonicalize(resolved).expect("resolved target"),
             std::fs::canonicalize(&target).expect("expected target")
         );
-        assert_eq!(
-            windows_backend::icon_data_url(&shortcut.0),
-            windows_backend::icon_data_url(&target)
-        );
+        let shortcut_icon =
+            windows_backend::icon_data_url(&shortcut.0).expect("local shortcut target icon");
+        let target_icon = windows_backend::icon_data_url(&target).expect("local target icon");
+        assert_eq!(shortcut_icon, target_icon);
+        assert!(!windows_backend::test_original_shell_fallback_is_allowed(
+            &shortcut.0
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -1653,6 +1783,83 @@ mod tests {
         assert_eq!(
             windows_backend::icon_data_url(&shortcut.0),
             windows_backend::test_indexed_icon_data_url(&custom_icon, 0)
+        );
+        assert!(!windows_backend::test_original_shell_fallback_is_allowed(
+            &shortcut.0
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn remote_shortcut_target_is_rejected_without_original_shell_fallback() {
+        struct TempShortcut(PathBuf);
+
+        impl Drop for TempShortcut {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let _apartment =
+            windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+        let shortcut = TempShortcut(
+            std::env::temp_dir().join(format!("ihub-remote-target-{}.lnk", uuid::Uuid::new_v4())),
+        );
+        windows_backend::test_create_shortcut(
+            &shortcut.0,
+            Path::new(r"\\example.invalid\share\remote.exe"),
+            None,
+        )
+        .expect("create remote-target shortcut without resolving it");
+
+        assert!(windows_backend::test_shortcut_target_path(&shortcut.0).is_none());
+        assert!(!windows_backend::test_original_shell_fallback_is_allowed(
+            &shortcut.0
+        ));
+        assert!(
+            windows_backend::icon_data_url(&shortcut.0).is_none(),
+            "a rejected remote target must not fall back to Shell parsing the .lnk"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn remote_internet_shortcut_icon_is_rejected_without_original_shell_fallback() {
+        struct TempInternetShortcut(PathBuf);
+
+        impl Drop for TempInternetShortcut {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let _apartment =
+            windows_backend::StaApartment::initialize().expect("Windows STA apartment");
+        let shortcut = TempInternetShortcut(
+            std::env::temp_dir().join(format!("ihub-remote-icon-{}.url", uuid::Uuid::new_v4())),
+        );
+        let source = concat!(
+            "[InternetShortcut]\r\n",
+            "URL=https://example.invalid/\r\n",
+            "IconFile=\\\\example.invalid\\share\\remote.ico\r\n",
+            "IconIndex=0\r\n"
+        );
+        let mut encoded = vec![0xff, 0xfe];
+        encoded.extend(
+            source
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        std::fs::write(&shortcut.0, encoded).expect("write remote-icon Internet Shortcut");
+
+        assert!(windows_backend::test_internet_shortcut_icon(&shortcut.0).is_none());
+        assert!(!windows_backend::test_original_shell_fallback_is_allowed(
+            &shortcut.0
+        ));
+        assert!(
+            windows_backend::icon_data_url(&shortcut.0).is_none(),
+            "a rejected remote IconFile must not fall back to Shell parsing the .url"
         );
     }
 

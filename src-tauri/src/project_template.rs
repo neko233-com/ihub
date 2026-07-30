@@ -75,6 +75,7 @@ pub fn create_plugin_project(
             "The Rust worker sample is optional; enable it only after building a real target binary and declaring that exact artifact in plugin.json."
                 .to_owned(),
         ],
+        open_id: None,
     })
 }
 

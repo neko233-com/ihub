@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LiveColorPicker } from "./LiveColorPicker";
+import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
 import { RegionCaptureEditor } from "./RegionCaptureEditor";
 import {
@@ -43,6 +44,7 @@ import {
 } from "../lib/clipboard-history-v2";
 import { evaluateCalculatorExpression } from "../lib/calculator";
 import { command, isDesktop } from "../lib/desktop";
+import { displayLocalPath } from "../lib/path-display";
 import { decodeQrImageFile } from "../lib/qr-image-decode";
 import { activeRecordingElapsedMs, remainingActiveRecordingMs } from "../lib/recording-timing";
 import {
@@ -85,6 +87,8 @@ import type {
   ClipboardImage,
   IndexStatus,
   PluginInfo,
+  SearchResult,
+  SelectedDirectoryGrant,
 } from "../lib/types";
 
 export type ToolboxTab =
@@ -111,6 +115,7 @@ export interface ToolboxLaunchContext {
   requestId: number;
   jsonInput?: string;
   renameDirectory?: string;
+  renameDirectoryOpenId?: string;
   calculatorInput?: string;
   timeInput?: string;
 }
@@ -120,8 +125,13 @@ interface ToolboxDrawerProps {
   indexStatus: IndexStatus;
   isRefreshingIndex: boolean;
   onClose: () => void;
+  onOpenSearchResult: (result: SearchResult) => Promise<void> | void;
   onRefreshIndex: () => void;
-  onSetIndexRoots: (roots: string[]) => Promise<void> | void;
+  onSetIndexRoots: (
+    roots: string[],
+    directoryOpenIds: string[],
+  ) => Promise<void> | void;
+  onStartWindowDrag?: () => void;
   onTabChange: (tab: ToolboxTab) => void;
   onToast: (message: string) => void;
   onPluginsChanged: (plugins: PluginInfo[]) => void;
@@ -171,6 +181,7 @@ interface PluginProjectResult {
   projectPath: string;
   pluginId: string;
   nextSteps: string[];
+  openId: string;
 }
 
 interface QuickNote {
@@ -183,7 +194,7 @@ interface QuickNote {
 type ConversionBase = 2 | 8 | 10 | 16;
 type TextEncoding = "hex" | "base64";
 type TextConversionDirection = "encode" | "decode";
-type DirectoryPickerTarget = "rename" | "project" | "local-plugin" | "index-root";
+type DirectoryPickerTarget = "rename" | "project" | "local-plugin";
 
 interface NumberConversionResult {
   valid: boolean;
@@ -737,8 +748,10 @@ export function ToolboxDrawer({
   indexStatus,
   isRefreshingIndex,
   onClose,
+  onOpenSearchResult,
   onRefreshIndex,
   onSetIndexRoots,
+  onStartWindowDrag,
   onTabChange,
   onToast,
   onPluginsChanged,
@@ -835,6 +848,7 @@ export function ToolboxDrawer({
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const [recordingBytes, setRecordingBytes] = useState(0);
   const [renameDirectory, setRenameDirectory] = useState("");
+  const [renameDirectoryOpenId, setRenameDirectoryOpenId] = useState<string | null>(null);
   const [renameFind, setRenameFind] = useState("");
   const [renameReplace, setRenameReplace] = useState("");
   const [renameUseRegex, setRenameUseRegex] = useState(false);
@@ -844,17 +858,18 @@ export function ToolboxDrawer({
   const [isPreviewingRename, setIsPreviewingRename] = useState(false);
   const [isApplyingRename, setIsApplyingRename] = useState(false);
   const [projectParentDirectory, setProjectParentDirectory] = useState("");
+  const [projectParentDirectoryOpenId, setProjectParentDirectoryOpenId] =
+    useState<string | null>(null);
   const [projectId, setProjectId] = useState("ihub-plugin-my-feature");
   const [projectResult, setProjectResult] = useState<PluginProjectResult | null>(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isOpeningProject, setIsOpeningProject] = useState(false);
   const [localPluginDirectory, setLocalPluginDirectory] = useState("");
+  const [localPluginDirectoryOpenId, setLocalPluginDirectoryOpenId] =
+    useState<string | null>(null);
   const [isLinkingLocalPlugin, setIsLinkingLocalPlugin] = useState(false);
   const [unlinkingPluginId, setUnlinkingPluginId] = useState<string | null>(null);
   const [directoryPickerTarget, setDirectoryPickerTarget] = useState<DirectoryPickerTarget | null>(null);
-  const [indexRootDraft, setIndexRootDraft] = useState("");
-  const [editedIndexRoots, setEditedIndexRoots] = useState<string[]>(indexStatus.roots);
-  const [isSavingIndexRoots, setIsSavingIndexRoots] = useState(false);
 
   const replaceScreenshotPreview = useCallback((previewUrl: string) => {
     revokeScreenshotObjectUrl(screenshotPreviewUrlRef.current);
@@ -1269,6 +1284,7 @@ export function ToolboxDrawer({
     if (activeTab === "rename" && launchContext.renameDirectory !== undefined) {
       handledLaunchContextRequestRef.current = launchContext.requestId;
       setRenameDirectory(launchContext.renameDirectory);
+      setRenameDirectoryOpenId(launchContext.renameDirectoryOpenId ?? null);
       setRenamePreview(null);
     }
   }, [activeTab, launchContext, open]);
@@ -1327,12 +1343,6 @@ export function ToolboxDrawer({
       // Storage can be disabled by the underlying WebView. The current calculation remains usable.
     }
   }, [calculatorHistory]);
-
-  useEffect(() => {
-    if (open && activeTab === "search" && !isSavingIndexRoots) {
-      setEditedIndexRoots(indexStatus.roots);
-    }
-  }, [activeTab, indexStatus.roots, isSavingIndexRoots, open]);
 
   const copyText = async (value: string, label: string) => {
     try {
@@ -2380,8 +2390,8 @@ export function ToolboxDrawer({
   };
 
   const previewRename = async () => {
-    if (!renameDirectory.trim()) {
-      onToast("请输入需要批量重命名的文件夹绝对路径。");
+    if (!renameDirectoryOpenId) {
+      onToast("请通过系统选择器重新选择需要批量重命名的文件夹。");
       return;
     }
     if (!renameFind) {
@@ -2414,7 +2424,7 @@ export function ToolboxDrawer({
     setIsPreviewingRename(true);
     try {
       const preview = await command<BatchRenamePreview>("preview_batch_rename", {
-        directory: renameDirectory.trim(),
+        directoryOpenId: renameDirectoryOpenId,
         find: renameFind,
         replace: renameReplace,
         useRegex: renameUseRegex,
@@ -2434,7 +2444,12 @@ export function ToolboxDrawer({
   };
 
   const applyRename = async () => {
-    if (!renamePreview?.canApply || !renamePreview.items.length || !isDesktop()) {
+    if (
+      !renameDirectoryOpenId
+      || !renamePreview?.canApply
+      || !renamePreview.items.length
+      || !isDesktop()
+    ) {
       return;
     }
     const approved = window.confirm(
@@ -2447,7 +2462,7 @@ export function ToolboxDrawer({
     setIsApplyingRename(true);
     try {
       const result = await command<BatchRenameResult>("apply_batch_rename", {
-        directory: renamePreview.directory,
+        directoryOpenId: renameDirectoryOpenId,
         items: renamePreview.items,
       });
       setRenamePreview(null);
@@ -2460,10 +2475,9 @@ export function ToolboxDrawer({
   };
 
   const createPluginProject = async () => {
-    const parentDirectory = projectParentDirectory.trim();
     const normalizedId = projectId.trim();
-    if (!parentDirectory) {
-      onToast("请输入项目父目录的绝对路径。");
+    if (!projectParentDirectoryOpenId) {
+      onToast("请通过系统选择器重新选择插件项目父目录。");
       return;
     }
     if (!isPluginId(normalizedId)) {
@@ -2478,7 +2492,7 @@ export function ToolboxDrawer({
     setIsCreatingProject(true);
     try {
       const result = await command<PluginProjectResult>("create_plugin_project", {
-        parentDirectory,
+        parentDirectoryOpenId: projectParentDirectoryOpenId,
         pluginId: normalizedId,
       });
       setProjectResult(result);
@@ -2486,6 +2500,7 @@ export function ToolboxDrawer({
       // separately user-confirmed link action, but never build/install/run
       // anything on the developer's behalf.
       setLocalPluginDirectory(result.projectPath);
+      setLocalPluginDirectoryOpenId(result.openId);
       onToast("插件项目模板已创建；下方已填入链接目录。请先审阅并执行 pnpm build。");
     } catch (error) {
       setProjectResult(null);
@@ -2496,8 +2511,8 @@ export function ToolboxDrawer({
   };
 
   const openCreatedProject = async () => {
-    const projectPath = projectResult?.projectPath;
-    if (!projectPath) {
+    const openId = projectResult?.openId;
+    if (!openId) {
       return;
     }
     if (!isDesktop()) {
@@ -2507,10 +2522,9 @@ export function ToolboxDrawer({
 
     setIsOpeningProject(true);
     try {
-      // `projectPath` comes from the just-completed native template command,
-      // rather than an arbitrary typed path. The system opener is reached
-      // only from this explicit user click and does not run project scripts.
-      await command<void>("open_path", { path: projectPath });
+      // The native template command returns a short-lived opaque open ID bound
+      // to the exact directory it created. Typed paths never reach the opener.
+      await command<void>("open_granted_path", { openId });
       onToast("已在系统文件管理器中打开项目目录。");
     } catch (error) {
       onToast(error instanceof Error ? error.message : "无法打开项目目录。");
@@ -2525,9 +2539,8 @@ export function ToolboxDrawer({
   };
 
   const linkLocalPlugin = async () => {
-    const directory = localPluginDirectory.trim();
-    if (!directory) {
-      onToast("请输入本地插件项目的绝对路径。");
+    if (!localPluginDirectoryOpenId) {
+      onToast("请通过系统选择器重新选择本地插件项目目录。");
       return;
     }
     if (!isDesktop()) {
@@ -2537,9 +2550,12 @@ export function ToolboxDrawer({
 
     setIsLinkingLocalPlugin(true);
     try {
-      const plugin = await command<PluginInfo>("link_plugin_from_local", { directory });
+      const plugin = await command<PluginInfo>("link_plugin_from_local", {
+        directoryOpenId: localPluginDirectoryOpenId,
+      });
       await refreshPlugins();
       setLocalPluginDirectory("");
+      setLocalPluginDirectoryOpenId(null);
       onToast(`已链接 ${plugin.name}。构建后关闭再重新打开插件界面即可读取最新文件。`);
     } catch (error) {
       onToast(error instanceof Error ? error.message : "无法链接本地插件项目。");
@@ -2573,20 +2589,21 @@ export function ToolboxDrawer({
 
     setDirectoryPickerTarget(target);
     try {
-      const directory = await command<string | null>("select_directory");
-      if (!directory) {
+      const selection = await command<SelectedDirectoryGrant | null>("select_directory");
+      if (!selection) {
         return;
       }
       if (target === "rename") {
-        setRenameDirectory(directory);
+        setRenameDirectory(selection.path);
+        setRenameDirectoryOpenId(selection.openId);
         setRenamePreview(null);
       } else if (target === "project") {
-        setProjectParentDirectory(directory);
+        setProjectParentDirectory(selection.path);
+        setProjectParentDirectoryOpenId(selection.openId);
         setProjectResult(null);
       } else if (target === "local-plugin") {
-        setLocalPluginDirectory(directory);
-      } else {
-        setIndexRootDraft(directory);
+        setLocalPluginDirectory(selection.path);
+        setLocalPluginDirectoryOpenId(selection.openId);
       }
     } catch (error) {
       onToast(error instanceof Error ? error.message : "无法打开系统文件夹选择器。");
@@ -2595,200 +2612,8 @@ export function ToolboxDrawer({
     }
   };
 
-  const addIndexRoot = () => {
-    const root = indexRootDraft.trim();
-    if (!root) {
-      onToast("请输入要索引的绝对目录。");
-      return;
-    }
-    if (editedIndexRoots.some((current) => current.trim().toLocaleLowerCase() === root.toLocaleLowerCase())) {
-      onToast("这个目录已经在索引范围中。");
-      return;
-    }
-    setEditedIndexRoots((current) => [...current, root]);
-    setIndexRootDraft("");
-  };
-
-  const removeIndexRoot = (root: string) => {
-    setEditedIndexRoots((current) => current.filter((entry) => entry !== root));
-  };
-
-  const saveIndexRoots = async (roots = editedIndexRoots) => {
-    if (!isDesktop()) {
-      onToast("浏览器预览不会修改本地索引目录。");
-      return;
-    }
-    setIsSavingIndexRoots(true);
-    try {
-      await onSetIndexRoots(roots);
-      setIndexRootDraft("");
-      onToast(
-        roots.length
-          ? "已保存索引目录并开始重新扫描。"
-          : "已恢复默认索引目录并开始重新扫描。",
-      );
-    } catch (error) {
-      onToast(error instanceof Error ? error.message : "无法保存索引目录。");
-    } finally {
-      setIsSavingIndexRoots(false);
-    }
-  };
-
   const clearRenamePreview = () => setRenamePreview(null);
   const developmentPlugins = plugins.filter((plugin) => plugin.isDevelopmentLink);
-  const rootSummary = indexStatus.roots.length
-    ? indexStatus.roots.join(" · ")
-    : "尚未读取到索引位置";
-  const localWatchStatus = indexStatus.watchStatus ?? "not-started";
-  const localWatchFeedback = (() => {
-    switch (localWatchStatus) {
-      case "watching":
-        return {
-          tone: "is-success",
-          text: "文件监听已启用：小范围变更会增量同步，溢出时才安全重扫。",
-        };
-      case "starting":
-        return { tone: "is-warning", text: "正在启动本机文件监听…" };
-      case "degraded":
-        return {
-          tone: "is-warning",
-          text: `文件监听部分降级：${indexStatus.watchMessage ?? "部分目录需要手动重新扫描。"}`,
-        };
-      case "unavailable":
-        return {
-          tone: "is-error",
-          text: `连续刷新不可用：${indexStatus.watchMessage ?? "可使用“保存并重扫”手动刷新。"}`,
-        };
-      case "inactive":
-        return { tone: "is-warning", text: "当前没有可建立监听的索引目录。" };
-      default:
-        return {
-          tone: "is-warning",
-          text: isDesktop()
-            ? "本机文件监听尚未完成启动；可先使用手动重扫。"
-            : "浏览器预览不运行本机文件监听。",
-        };
-    }
-  })();
-  const contentIndexStatus = indexStatus.contentStatus ?? "idle";
-  const contentIndexFeedback = (() => {
-    const indexedFiles = indexStatus.contentIndexedFiles ?? 0;
-    const indexedBytes = indexStatus.contentIndexedBytes ?? 0;
-    switch (contentIndexStatus) {
-      case "ready":
-        return {
-          tone: "is-success",
-          text: indexStatus.contentMessage
-            ?? `正文内存索引已就绪：${new Intl.NumberFormat().format(indexedFiles)} 个文本文件，${formatByteSize(indexedBytes)}。`,
-        };
-      case "indexing":
-        return {
-          tone: "is-warning",
-          text: indexStatus.contentMessage ?? "正在建立受限正文索引；普通文件名搜索不受影响。",
-        };
-      case "stale":
-        return {
-          tone: "is-warning",
-          text: indexStatus.contentMessage ?? "正文索引正在等待当前范围的重建。",
-        };
-      default:
-        return {
-          tone: "is-warning",
-          text: isDesktop()
-            ? "正文索引将在路径扫描完成后于内存中建立。"
-            : "浏览器预览不运行本机正文索引。",
-        };
-    }
-  })();
-  const usnStatus = indexStatus.usnStatus ?? "not-started";
-  const usnIndexFeedback = (() => {
-    const eligible = indexStatus.usnEligibleVolumes ?? 0;
-    const continuous = indexStatus.usnCheckpointedVolumes ?? 0;
-    switch (usnStatus) {
-      case "available":
-        return {
-          tone: "is-success",
-          text: indexStatus.usnMessage
-            ?? `已验证 ${eligible} 个 NTFS USN 卷，${continuous} 个检查点连续；当前仍由授权目录扫描提供路径结果。`,
-        };
-      case "probing":
-        return {
-          tone: "is-warning",
-          text: "正在验证授权 NTFS 卷的 USN Journal 水位；普通搜索和文件监听不受影响。",
-        };
-      case "degraded":
-      case "fallback":
-        return {
-          tone: "is-warning",
-          text: indexStatus.usnMessage
-            ?? "部分 NTFS USN 卷不可用，已安全回退到授权目录扫描和文件监听。",
-        };
-      case "unsupported":
-        return {
-          tone: "is-warning",
-          text: indexStatus.usnMessage
-            ?? "当前平台不使用 NTFS USN；继续使用本机目录扫描和文件监听。",
-        };
-      case "inactive":
-        return {
-          tone: "is-warning",
-          text: indexStatus.usnMessage
-            ?? "当前索引范围没有可探测的本地 NTFS 卷。",
-        };
-      default:
-        return {
-          tone: "is-warning",
-          text: isDesktop()
-            ? "Windows NTFS USN 加速状态将在下一次索引范围重建后探测。"
-            : "浏览器预览不会探测 Windows NTFS USN。",
-        };
-    }
-  })();
-  const mftStatus = indexStatus.mftStatus ?? "not-started";
-  const mftIndexFeedback = (() => {
-    const records = indexStatus.mftEnumeratedRecords ?? 0;
-    const replayed = indexStatus.mftReplayedUsnRecords ?? 0;
-    const paths = indexStatus.mftIndexedPaths ?? 0;
-    switch (mftStatus) {
-      case "available":
-        return {
-          tone: "is-success",
-          text: indexStatus.mftMessage
-            ?? `已只读枚举 ${records} 条 MFT 元数据，在本次初始化窗口内处理 ${replayed} 条 USN 记录，并投影 ${paths} 条路径；符合 P1e 连续性条件时可在下次启动安全回放有限变更，否则会回退全量扫描。`,
-        };
-      case "scanning":
-        return {
-          tone: "is-warning",
-          text: "正在判断显式授权的盘符根目录是否可使用只读 MFT 初始化；窄目录不会扩大为全卷读取。",
-        };
-      case "degraded":
-      case "fallback":
-        return {
-          tone: "is-warning",
-          text: indexStatus.mftMessage
-            ?? "MFT 初始化未完整覆盖当前范围，已安全回退到授权目录扫描和文件监听。",
-        };
-      case "inactive":
-        return {
-          tone: "is-warning",
-          text: indexStatus.mftMessage
-            ?? "当前范围不是显式授权的盘符根目录；为保护范围不读取整卷 MFT。",
-        };
-      case "unsupported":
-        return {
-          tone: "is-warning",
-          text: indexStatus.mftMessage
-            ?? "当前平台不使用 NTFS MFT 初始化；继续使用目录扫描和文件监听。",
-        };
-      default:
-        return {
-          tone: "is-warning",
-          text: isDesktop()
-            ? "NTFS MFT 初始化状态将在下一次索引范围重建后更新。"
-            : "浏览器预览不会读取 Windows NTFS MFT。",
-        };
-    }
-  })();
 
   return (
     <AnimatePresence>
@@ -2804,15 +2629,28 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby="toolbox-title"
+            aria-labelledby={activeTab === "search" ? "local-search-title" : "toolbox-title"}
             aria-modal="true"
-            className="toolbox-drawer"
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
             role="dialog"
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
           >
+            {activeTab === "search" ? (
+              <LocalSearchWorkspace
+                indexStatus={indexStatus}
+                isRefreshingIndex={isRefreshingIndex}
+                onClose={closeToolbox}
+                onOpenResult={onOpenSearchResult}
+                onRefreshIndex={onRefreshIndex}
+                onSetIndexRoots={onSetIndexRoots}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : (
+              <>
             <div className="drawer-header toolbox-drawer__header">
               <div>
                 <p className="eyebrow">BUILT-IN WORKBENCH</p>
@@ -2846,159 +2684,6 @@ export function ToolboxDrawer({
             </div>
 
             <div className="toolbox-content">
-              {activeTab === "search" ? (
-                <section aria-labelledby="toolbox-search-title" id="toolbox-panel-search" role="tabpanel">
-                  <div className="toolbox-section-heading">
-                    <span className="toolbox-section-heading__icon"><FolderSearch size={17} /></span>
-                    <div>
-                      <h3 id="toolbox-search-title">超快本地搜索</h3>
-                      <p>文件搜索始终在主命令框中完成；索引在后台刷新，不阻塞输入。</p>
-                    </div>
-                  </div>
-                  <div className="toolbox-statline">
-                    <span>INDEXED</span>
-                    <strong>{new Intl.NumberFormat().format(indexStatus.indexedFiles)} 个项目</strong>
-                  </div>
-                  <div className="toolbox-statline">
-                    <span>CONTENT</span>
-                    <strong>{new Intl.NumberFormat().format(indexStatus.contentIndexedFiles ?? 0)} 个内存文本</strong>
-                  </div>
-                  <div className="toolbox-statline">
-                    <span>NTFS USN</span>
-                    <strong>{new Intl.NumberFormat().format(indexStatus.usnEligibleVolumes ?? 0)} 个已验证卷</strong>
-                  </div>
-                  <div className="toolbox-statline">
-                    <span>NTFS MFT</span>
-                    <strong>{new Intl.NumberFormat().format(indexStatus.mftIndexedPaths ?? 0)} 条路径投影</strong>
-                  </div>
-                  <div className="toolbox-statline">
-                    <span>NTFS Δ</span>
-                    <strong>{new Intl.NumberFormat().format(indexStatus.mftReplayedUsnRecords ?? 0)} 条初始化窗口记录</strong>
-                  </div>
-                  <div className="toolbox-path" title={rootSummary}>{rootSummary}</div>
-                  {indexStatus.lastIndexedAt ? (
-                    <p className="toolbox-note">
-                      上次索引同步：{new Date(indexStatus.lastIndexedAt).toLocaleString()}
-                    </p>
-                  ) : null}
-                  <p aria-live="polite" className={`toolbox-feedback ${localWatchFeedback.tone}`}>
-                    <RefreshCw size={14} />
-                    {localWatchFeedback.text}
-                  </p>
-                  <p aria-live="polite" className={`toolbox-feedback ${contentIndexFeedback.tone}`}>
-                    <Search size={14} />
-                    {contentIndexFeedback.text}
-                  </p>
-                  <p aria-live="polite" className={`toolbox-feedback ${usnIndexFeedback.tone}`}>
-                    <RefreshCw size={14} />
-                    {usnIndexFeedback.text}
-                  </p>
-                  <p aria-live="polite" className={`toolbox-feedback ${mftIndexFeedback.tone}`}>
-                    <FolderSearch size={14} />
-                    {mftIndexFeedback.text}
-                  </p>
-                  {indexStatus.phase === "error" ? (
-                    <p className="toolbox-feedback is-error" role="alert">
-                      <CircleAlert size={14} />
-                      已保存的索引目录暂不可用；为保护范围，iHub 不会回退扫描默认目录。请更新目录后保存并重扫。
-                    </p>
-                  ) : null}
-                  <div className="index-root-editor">
-                    <div className="toolbox-field">
-                      <span id="index-root-label">索引目录（绝对路径）</span>
-                      <div className="toolbox-directory-input">
-                        <input
-                          aria-labelledby="index-root-label"
-                          disabled={isSavingIndexRoots}
-                          id="index-root-input"
-                          onChange={(event) => setIndexRootDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              addIndexRoot();
-                            }
-                          }}
-                          placeholder={"例如 D:\\Work 或 /Users/me/Projects"}
-                          value={indexRootDraft}
-                        />
-                        <button
-                          aria-label="从系统选择索引目录"
-                          disabled={isSavingIndexRoots || directoryPickerTarget !== null}
-                          onClick={() => void chooseDirectory("index-root")}
-                          title="从系统选择目录"
-                          type="button"
-                        >
-                          {directoryPickerTarget === "index-root" ? <LoaderCircle className="spin" size={14} /> : <FolderSearch size={14} />}
-                          选择
-                        </button>
-                      </div>
-                    </div>
-                    <div className="toolbox-action-row">
-                      <button
-                        className="toolbox-secondary-action"
-                        disabled={isSavingIndexRoots}
-                        onClick={addIndexRoot}
-                        type="button"
-                      >
-                        <Plus size={15} />
-                        添加目录
-                      </button>
-                      <button
-                        className="toolbox-primary-action"
-                        disabled={isSavingIndexRoots}
-                        onClick={() => void saveIndexRoots()}
-                        type="button"
-                      >
-                        {isSavingIndexRoots ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
-                        保存并重扫
-                      </button>
-                      <button
-                        className="toolbox-icon-action"
-                        disabled={isSavingIndexRoots}
-                        onClick={() => void saveIndexRoots([])}
-                        title="恢复默认目录"
-                        type="button"
-                      >
-                        <RefreshCw size={15} />
-                      </button>
-                    </div>
-                    {editedIndexRoots.length ? (
-                      <ul aria-label="将被索引的目录" className="index-root-list">
-                        {editedIndexRoots.map((root) => (
-                          <li className="index-root-row" key={root}>
-                            <code title={root}>{root}</code>
-                            <button
-                              aria-label={`移除索引目录 ${root}`}
-                              disabled={isSavingIndexRoots}
-                              onClick={() => removeIndexRoot(root)}
-                              title="移除目录"
-                              type="button"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="index-root-empty">保存后将恢复 Desktop、Documents、Downloads 等默认目录。</p>
-                    )}
-                  </div>
-                  <button
-                    className="toolbox-secondary-action"
-                    disabled={isRefreshingIndex}
-                    onClick={onRefreshIndex}
-                    type="button"
-                  >
-                    {isRefreshingIndex ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
-                    刷新本地索引
-                  </button>
-                  <p className="toolbox-note">
-                    主搜索框支持 <code>path:</code>、<code>ext:md</code>、<code>kind:file</code>、<code>modified:today</code>、<code>size:&gt;100mb</code> 和 <code>content:"关键词"</code>；刷新时仍可使用上一次完整路径快照。
-                  </p>
-                  <p className="toolbox-note">正文只索引受授权目录中的小型 UTF-8/UTF-16 文本和源码文件，限额保留在本次运行内存，不写入路径快照；Windows 的 P1e-a 只会在你明确把直接 NTFS 盘符根目录（如 <code>D:\</code>）加入范围、索引状态位于授权根外、保存完整 MFT 绑定且能证明 USN Journal 连续时，跨重启只读回放有限变更。窄目录不会扩大为全卷读取；任一条件不成立就安全回退到授权目录扫描和文件监听，不宣称完整 Everything 级一致性。</p>
-                </section>
-              ) : null}
-
               {activeTab === "color" ? (
                 <section aria-labelledby="toolbox-color-title" id="toolbox-panel-color" role="tabpanel">
                   <div className="toolbox-section-heading">
@@ -4403,12 +4088,12 @@ export function ToolboxDrawer({
                     </div>
                   </div>
                   <div className="toolbox-field">
-                    <span id="rename-directory-label">文件夹（绝对路径）</span>
+                    <span id="rename-directory-label">文件夹（系统选择）</span>
                     <div className="toolbox-directory-input">
                       <input
                         aria-labelledby="rename-directory-label"
-                        onChange={(event) => { setRenameDirectory(event.target.value); clearRenamePreview(); }}
-                        placeholder="D:\\Photos\\to-sort"
+                        placeholder="请使用系统文件夹选择器"
+                        readOnly
                         value={renameDirectory}
                       />
                       <button
@@ -4478,7 +4163,7 @@ export function ToolboxDrawer({
                   <div className="toolbox-action-row">
                     <button
                       className="accent-button toolbox-primary-action"
-                      disabled={isPreviewingRename}
+                      disabled={isPreviewingRename || !renameDirectoryOpenId}
                       onClick={() => void previewRename()}
                       type="button"
                     >
@@ -4502,14 +4187,14 @@ export function ToolboxDrawer({
                       {renamePreview.errors.map((error) => (
                         <p className="toolbox-feedback is-error" key={error}>
                           <CircleAlert size={14} />
-                          {error}
+                          {displayLocalPath(error)}
                         </p>
                       ))}
                       {renamePreview.items.slice(0, 10).map((item) => (
                         <div className="rename-preview__item" key={`${item.from}-${item.to}`}>
-                          <span title={item.from}>{item.from}</span>
+                          <span title={displayLocalPath(item.from)}>{displayLocalPath(item.from)}</span>
                           <ArrowRight size={13} />
-                          <strong title={item.to}>{item.to}</strong>
+                          <strong title={displayLocalPath(item.to)}>{displayLocalPath(item.to)}</strong>
                         </div>
                       ))}
                       {renamePreview.items.length > 10 ? (
@@ -4533,12 +4218,12 @@ export function ToolboxDrawer({
                     </div>
                   </div>
                   <div className="toolbox-field">
-                    <span id="project-parent-directory-label">项目父目录（绝对路径）</span>
+                    <span id="project-parent-directory-label">项目父目录（系统选择）</span>
                     <div className="toolbox-directory-input">
                       <input
                         aria-labelledby="project-parent-directory-label"
-                        onChange={(event) => { setProjectParentDirectory(event.target.value); setProjectResult(null); }}
-                        placeholder="D:\\Code\\ihub-plugins"
+                        placeholder="请使用系统文件夹选择器"
+                        readOnly
                         value={projectParentDirectory}
                       />
                       <button
@@ -4575,7 +4260,7 @@ export function ToolboxDrawer({
                   </div>
                   <button
                     className="accent-button toolbox-primary-action"
-                    disabled={isCreatingProject}
+                    disabled={isCreatingProject || !projectParentDirectoryOpenId}
                     onClick={() => void createPluginProject()}
                     type="button"
                   >
@@ -4611,12 +4296,12 @@ export function ToolboxDrawer({
                     </div>
                     <p>不复制项目、不安装依赖、不执行脚本或二进制。iHub 只记录这个路径，并在重新打开插件前端时读取最新构建文件。</p>
                     <div className="toolbox-field">
-                      <span id="local-plugin-directory-label">本地插件目录（绝对路径）</span>
+                      <span id="local-plugin-directory-label">本地插件目录（系统选择）</span>
                       <div className="toolbox-directory-input">
                         <input
                           aria-labelledby="local-plugin-directory-label"
-                          onChange={(event) => setLocalPluginDirectory(event.target.value)}
-                          placeholder="D:\\Code\\ihub-plugins\\ihub-plugin-my-feature"
+                          placeholder="请使用系统文件夹选择器"
+                          readOnly
                           value={localPluginDirectory}
                         />
                         <button
@@ -4634,7 +4319,7 @@ export function ToolboxDrawer({
                     <p className="toolbox-note">推荐顺序：先在项目目录自行运行 <code>pnpm install</code>，再运行 <code>pnpm build</code>（包含静态预检）；确认 <code>dist/index.html</code> 已生成后再链接。链接不会代替或触发这些命令。</p>
                     <button
                       className="toolbox-secondary-action local-plugin-linker__action"
-                      disabled={isLinkingLocalPlugin || !localPluginDirectory.trim()}
+                      disabled={isLinkingLocalPlugin || !localPluginDirectoryOpenId}
                       onClick={() => void linkLocalPlugin()}
                       type="button"
                     >
@@ -4647,7 +4332,7 @@ export function ToolboxDrawer({
                           <div className="local-plugin-link" key={plugin.id}>
                             <div>
                               <strong>{plugin.name}</strong>
-                              <code>{plugin.localPath ?? plugin.source}</code>
+                              <code>{displayLocalPath(plugin.localPath ?? plugin.source ?? "")}</code>
                             </div>
                             <button
                               disabled={unlinkingPluginId === plugin.id}
@@ -4666,6 +4351,8 @@ export function ToolboxDrawer({
                 </section>
               ) : null}
             </div>
+              </>
+            )}
           </motion.aside>
         </>
       ) : null}

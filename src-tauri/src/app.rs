@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, SyncSender},
@@ -32,9 +32,13 @@ use crate::{
     },
     detached_plugin_window::DetachedPluginWindowRegistry,
     host_log::{self, HostLogSnapshot},
-    indexer::{default_root_strings, SearchIndex},
+    indexer::{
+        default_root_strings, paths_refer_to_same_location, renderer_display_path, SearchIndex,
+    },
     launcher_hotkey::{normalize_launcher_hotkey, LauncherHotkeyStore, DEFAULT_LAUNCHER_HOTKEY},
-    launcher_shortcuts::{LauncherShortcutStore, LauncherShortcutView},
+    launcher_shortcuts::{
+        resolve_current_search_result_open_target, LauncherShortcutStore, LauncherShortcutView,
+    },
     models::{
         AppHealth, AutostartStatus, ClipboardFile, ClipboardImage, IndexStatus,
         LauncherHotkeyStatus, OfficialWorkspacePluginProject, PluginAutomaticUpdateReport,
@@ -53,6 +57,7 @@ use crate::{
     plugins::PluginManager,
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
+    system_open::{LocalOpenKind, LocalPathIdentity, PreparedLocalOpen},
 };
 
 const LAUNCHER_INITIAL_BLUR_GRACE: Duration = Duration::from_millis(700);
@@ -73,6 +78,10 @@ const MAX_SYSTEM_ICON_SEARCH_ID_BYTES: usize = 8 * 1024;
 const MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES: usize = 128;
 const MAX_SYSTEM_ICON_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_SUPER_PANEL_TEXT_BYTES: usize = 4 * 1024;
+const TEMPORARY_PATH_OPEN_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_TEMPORARY_PATH_OPEN_GRANTS: usize = 96;
+const MAX_TEMPORARY_PATH_OPEN_ID_BYTES: usize = 96;
+const MAX_FIRST_PARTY_INDEX_ROOTS: usize = 32;
 const IHUB_HELP_URL: &str = "https://github.com/neko233-com/ihub#readme";
 const IHUB_FEEDBACK_URL: &str = "https://github.com/neko233-com/ihub/issues";
 
@@ -260,6 +269,255 @@ fn clamp_i64_to_i32(value: i64) -> i32 {
     value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporaryPathOpenKind {
+    File,
+    Folder,
+}
+
+impl TemporaryPathOpenKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Folder => "folder",
+        }
+    }
+
+    fn local_open_kind(self) -> LocalOpenKind {
+        match self {
+            Self::File => LocalOpenKind::File,
+            Self::Folder => LocalOpenKind::Folder,
+        }
+    }
+
+    fn from_local_open_kind(kind: LocalOpenKind) -> Self {
+        match kind {
+            LocalOpenKind::File => Self::File,
+            LocalOpenKind::Folder => Self::Folder,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TemporaryPathOpenGrant {
+    canonical_path: PathBuf,
+    kind: TemporaryPathOpenKind,
+    identity: LocalPathIdentity,
+    issued_at: Instant,
+}
+
+#[derive(Debug)]
+struct IssuedTemporaryPathOpen {
+    open_id: String,
+    canonical_path: PathBuf,
+    kind: TemporaryPathOpenKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedDirectoryGrant {
+    path: String,
+    open_id: String,
+}
+
+#[derive(Debug)]
+struct AuthorizedIndexRootUpdate {
+    roots: Vec<String>,
+    guards: Vec<PreparedLocalOpen>,
+}
+
+#[derive(Debug, Default)]
+struct TemporaryPathOpenStore {
+    grants: Mutex<HashMap<String, TemporaryPathOpenGrant>>,
+}
+
+impl TemporaryPathOpenStore {
+    fn issue(&self, path: &Path) -> Result<IssuedTemporaryPathOpen, String> {
+        self.issue_at(path, Instant::now())
+    }
+
+    fn issue_at(&self, path: &Path, issued_at: Instant) -> Result<IssuedTemporaryPathOpen, String> {
+        let prepared = crate::system_open::prepare_local_open(path, None)?;
+        let canonical_path = prepared.path().to_path_buf();
+        let kind = TemporaryPathOpenKind::from_local_open_kind(prepared.kind());
+        let identity = prepared.identity();
+        let open_id = next_capability_id("open");
+        let mut grants = self
+            .grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_expired_temporary_path_open_grants(&mut grants, issued_at);
+        grants.insert(
+            open_id.clone(),
+            TemporaryPathOpenGrant {
+                canonical_path: canonical_path.clone(),
+                kind,
+                identity,
+                issued_at,
+            },
+        );
+        trim_oldest_records(&mut grants, MAX_TEMPORARY_PATH_OPEN_GRANTS, |grant| {
+            grant.issued_at
+        });
+        Ok(IssuedTemporaryPathOpen {
+            open_id,
+            canonical_path,
+            kind,
+        })
+    }
+
+    #[cfg(test)]
+    fn resolve(&self, open_id: &str) -> Result<PathBuf, String> {
+        self.resolve_at(open_id, Instant::now())
+    }
+
+    fn prepare_open(&self, open_id: &str) -> Result<PreparedLocalOpen, String> {
+        self.prepare_kind_at(open_id, None, Instant::now())
+    }
+
+    #[cfg(test)]
+    fn resolve_at(&self, open_id: &str, now: Instant) -> Result<PathBuf, String> {
+        self.resolve_kind_at(open_id, None, now)
+    }
+
+    fn prepare_folder(&self, open_id: &str) -> Result<PreparedLocalOpen, String> {
+        self.prepare_kind_at(open_id, Some(TemporaryPathOpenKind::Folder), Instant::now())
+    }
+
+    #[cfg(test)]
+    fn resolve_kind_at(
+        &self,
+        open_id: &str,
+        expected_kind: Option<TemporaryPathOpenKind>,
+        now: Instant,
+    ) -> Result<PathBuf, String> {
+        self.prepare_kind_at(open_id, expected_kind, now)
+            .map(|prepared| prepared.path().to_path_buf())
+    }
+
+    fn prepare_kind_at(
+        &self,
+        open_id: &str,
+        expected_kind: Option<TemporaryPathOpenKind>,
+        now: Instant,
+    ) -> Result<PreparedLocalOpen, String> {
+        if !temporary_path_open_id_is_valid(open_id) {
+            return Err(
+                "This open authorization is unknown or expired. Select the item again.".to_owned(),
+            );
+        }
+        let grant = {
+            let mut grants = self
+                .grants
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            remove_expired_temporary_path_open_grants(&mut grants, now);
+            grants.get(open_id).cloned().ok_or_else(|| {
+                "This open authorization is unknown or expired. Select the item again.".to_owned()
+            })?
+        };
+        if let Some(expected_kind) = expected_kind {
+            if expected_kind != grant.kind {
+                return Err(format!(
+                    "This authorization is not for a {}. Select the folder again.",
+                    expected_kind.as_str()
+                ));
+            }
+        }
+        let prepared = crate::system_open::prepare_local_open(
+            &grant.canonical_path,
+            Some(grant.kind.local_open_kind()),
+        )?;
+        if prepared.path() != grant.canonical_path {
+            return Err(
+                "The selected filesystem target changed after authorization; it was not opened."
+                    .to_owned(),
+            );
+        }
+        if prepared.identity() != grant.identity {
+            return Err(
+                "The selected filesystem target was replaced after authorization; it was not opened."
+                    .to_owned(),
+            );
+        }
+        Ok(prepared)
+    }
+}
+
+fn authorize_index_root_update(
+    current_roots: &[PathBuf],
+    requested_roots: &[String],
+    directory_open_ids: &[String],
+    temporary_path_opens: &TemporaryPathOpenStore,
+) -> Result<AuthorizedIndexRootUpdate, String> {
+    if requested_roots.len() > MAX_FIRST_PARTY_INDEX_ROOTS
+        || directory_open_ids.len() > MAX_FIRST_PARTY_INDEX_ROOTS
+    {
+        return Err(format!(
+            "Choose at most {MAX_FIRST_PARTY_INDEX_ROOTS} local index folders."
+        ));
+    }
+    if requested_roots.is_empty() {
+        return Ok(AuthorizedIndexRootUpdate {
+            roots: Vec::new(),
+            guards: Vec::new(),
+        });
+    }
+
+    let mut selected_candidates = directory_open_ids
+        .iter()
+        .map(|open_id| temporary_path_opens.prepare_folder(open_id).map(Some))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut normalized_roots = Vec::with_capacity(requested_roots.len());
+    let mut guards: Vec<PreparedLocalOpen> = Vec::with_capacity(requested_roots.len());
+    for root in requested_roots {
+        if root.is_empty() || root.trim() != root {
+            return Err(
+                "Index folders must use the exact path returned by the system folder picker."
+                    .to_owned(),
+            );
+        }
+        let requested = Path::new(root);
+        if !requested.is_absolute() {
+            return Err(
+                "Index folders must use the exact path returned by the system folder picker."
+                    .to_owned(),
+            );
+        }
+        if normalized_roots
+            .iter()
+            .any(|existing| paths_refer_to_same_location(Path::new(existing), requested))
+        {
+            return Err("The same index folder cannot be added more than once.".to_owned());
+        }
+        let prepared = if let Some(current) = current_roots
+            .iter()
+            .find(|current| paths_refer_to_same_location(current, requested))
+        {
+            crate::system_open::prepare_local_open(current, Some(LocalOpenKind::Folder))?
+        } else if let Some(candidate_index) = selected_candidates.iter().position(|candidate| {
+            candidate
+                .as_ref()
+                .is_some_and(|prepared| paths_refer_to_same_location(requested, prepared.path()))
+        }) {
+            selected_candidates[candidate_index]
+                .take()
+                .expect("the matching prepared root remains available")
+        } else {
+            return Err(format!(
+                "Index folder '{root}' is not an existing host root or a current system-folder selection. Choose it again."
+            ));
+        };
+        normalized_roots.push(prepared.path().to_string_lossy().into_owned());
+        guards.push(prepared);
+    }
+    Ok(AuthorizedIndexRootUpdate {
+        roots: normalized_roots,
+        guards,
+    })
+}
+
 pub struct AppState {
     pub index: SearchIndex,
     pub plugins: PluginManager,
@@ -283,6 +541,10 @@ pub struct AppState {
     plugin_shortcut_change: Mutex<()>,
     plugin_shortcuts: Mutex<PluginShortcutRegistry>,
     super_panel: Arc<SuperPanelState>,
+    /// First-party surfaces can open only filesystem objects selected or
+    /// created by the native host. The WebView receives an opaque, bounded,
+    /// short-lived ID instead of a reusable arbitrary-path command.
+    temporary_path_opens: Arc<TemporaryPathOpenStore>,
 }
 
 #[derive(Debug, Serialize)]
@@ -328,6 +590,7 @@ impl AppState {
             plugin_shortcut_change: Mutex::new(()),
             plugin_shortcuts: Mutex::new(PluginShortcutRegistry::default()),
             super_panel,
+            temporary_path_opens: Arc::new(TemporaryPathOpenStore::default()),
         }
     }
 
@@ -502,6 +765,7 @@ impl Default for PluginHostState {
 struct FilesystemGrant {
     plugin_id: String,
     directory: String,
+    identity: LocalPathIdentity,
     issued_at: Instant,
 }
 
@@ -1153,8 +1417,9 @@ pub async fn get_system_icons(
         let pending = sources
             .into_iter()
             .filter_map(|source| {
+                let kind = source.kind;
                 service
-                    .try_request(&source.path, &source.kind)
+                    .try_request_prepared(source.prepared, &kind)
                     .map(|request| (source.response_id, request))
             })
             .collect::<Vec<_>>();
@@ -1185,8 +1450,16 @@ pub fn index_default_roots(state: State<'_, AppState>) -> IndexStatus {
 #[tauri::command]
 pub fn set_index_roots(
     roots: Vec<String>,
+    directory_open_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<IndexStatus, String> {
+    let current_roots = state.index.active_root_paths();
+    let authorized = authorize_index_root_update(
+        &current_roots,
+        &roots,
+        &directory_open_ids,
+        &state.temporary_path_opens,
+    )?;
     host_log::info(
         "index",
         format!(
@@ -1194,7 +1467,13 @@ pub fn set_index_roots(
             roots.len()
         ),
     );
-    state.index.set_roots(roots)
+    let AuthorizedIndexRootUpdate {
+        roots: normalized_roots,
+        guards,
+    } = authorized;
+    let result = state.index.set_roots(normalized_roots);
+    drop(guards);
+    result
 }
 
 #[tauri::command]
@@ -1203,14 +1482,31 @@ pub fn get_default_roots() -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn open_path(path: String) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    let path = path
-        .canonicalize()
-        .map_err(|error| format!("Path cannot be opened: {error}"))?;
-    tauri::async_runtime::spawn_blocking(move || open_path_in_system(&path))
-        .await
-        .map_err(|error| format!("Could not start the system opener task: {error}"))?
+pub async fn open_granted_path(open_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let temporary_path_opens = state.temporary_path_opens.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = temporary_path_opens.prepare_open(&open_id)?;
+        prepared.launch()
+    })
+    .await
+    .map_err(|error| format!("Could not start the authorized system opener task: {error}"))?
+}
+
+/// Opens only an exact, current native index result. Renderer-provided paths
+/// are deliberately ignored so stale or modified result objects cannot widen
+/// the active local-search authorization boundary.
+#[tauri::command]
+pub async fn open_search_result(
+    search_result_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let index = state.index.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = resolve_current_search_result_open_target(&search_result_id, &index)?;
+        prepared.launch()
+    })
+    .await
+    .map_err(|error| format!("Could not open the indexed search result: {error}"))?
 }
 
 /// Returns opaque launcher shortcut views only. The host-private source path
@@ -1250,8 +1546,8 @@ pub async fn open_launcher_shortcut(
     let shortcuts = state.launcher_shortcuts.clone();
     let index = state.index.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = shortcuts.resolve_open_path(&shortcut_id, &index)?;
-        open_path_in_system(&path)
+        let prepared = shortcuts.resolve_open_target(&shortcut_id, &index)?;
+        prepared.launch()
     })
     .await
     .map_err(|error| format!("Could not open launcher shortcut: {error}"))?
@@ -1699,16 +1995,20 @@ pub async fn update_plugin_from_git(
 /// that directory whenever the plugin frontend is opened again.
 #[tauri::command]
 pub async fn link_plugin_from_local(
-    directory: String,
+    directory_open_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PluginInfo, String> {
+    let temporary_path_opens = state.temporary_path_opens.clone();
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
     let plugin_result = tauri::async_runtime::spawn_blocking(move || {
+        let prepared = temporary_path_opens.prepare_folder(&directory_open_id)?;
+        let directory = prepared.path().to_string_lossy().into_owned();
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_source_operation(|| {
+            let _guard = &prepared;
             let plugin = plugins.link_from_local(&directory)?;
             // The local project can intentionally shadow an installed snapshot
             // under the same ID, so invalidate any prior frontend session
@@ -1942,27 +2242,105 @@ pub async fn uninstall_managed_plugin(
 
 #[tauri::command]
 pub async fn create_plugin_project(
-    parent_directory: String,
+    parent_directory_open_id: String,
     plugin_id: String,
+    state: State<'_, AppState>,
 ) -> Result<PluginProjectCreated, String> {
+    let temporary_path_opens = state.temporary_path_opens.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        create_plugin_project_template(&parent_directory, &plugin_id)
+        create_plugin_project_with_open_grant(
+            &temporary_path_opens,
+            &parent_directory_open_id,
+            &plugin_id,
+        )
     })
     .await
     .map_err(|error| format!("Plugin project creation task failed: {error}"))?
 }
 
+fn create_plugin_project_with_open_grant(
+    temporary_path_opens: &TemporaryPathOpenStore,
+    parent_directory_open_id: &str,
+    plugin_id: &str,
+) -> Result<PluginProjectCreated, String> {
+    let prepared = temporary_path_opens.prepare_folder(parent_directory_open_id)?;
+    let parent_directory = prepared.path();
+    let mut project =
+        create_plugin_project_template(&parent_directory.to_string_lossy(), plugin_id)?;
+    let issued = temporary_path_opens.issue(Path::new(&project.project_path))?;
+    if issued.kind != TemporaryPathOpenKind::Folder {
+        return Err("The newly created plugin project is not a directory.".to_owned());
+    }
+    project.open_id = Some(issued.open_id);
+    drop(prepared);
+    Ok(project)
+}
+
 /// Opens a host-owned directory chooser for first-party tools. Keeping this
 /// picker native avoids asking people to discover or paste opaque filesystem
 /// paths just to configure an index, create a plugin project, or preview a
-/// batch rename. It deliberately returns only a canonical folder path after a
-/// direct user choice; the plugin bridge uses its stricter opaque grants.
+/// batch rename. It returns a canonical display path plus an opaque, bounded
+/// folder authorization; every first-party filesystem command consumes the
+/// opaque ID and revalidates the exact native selection.
 #[tauri::command]
 pub fn select_directory(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
-    select_directory_with_native_dialog(&app, &state.host, "Choose an iHub folder")
+) -> Result<Option<SelectedDirectoryGrant>, String> {
+    let Some(directory) =
+        select_directory_with_native_dialog(&app, &state.host, "Choose an iHub folder")?
+    else {
+        return Ok(None);
+    };
+    let issued = state.temporary_path_opens.issue(Path::new(&directory))?;
+    if issued.kind != TemporaryPathOpenKind::Folder {
+        return Err("The selected filesystem target is not a directory.".to_owned());
+    }
+    Ok(Some(SelectedDirectoryGrant {
+        path: renderer_display_path(&issued.canonical_path),
+        open_id: issued.open_id,
+    }))
+}
+
+#[tauri::command]
+pub fn preview_batch_rename(
+    directory_open_id: String,
+    find: String,
+    replace: String,
+    use_regex: Option<bool>,
+    sequence_start: Option<u32>,
+    sequence_padding: Option<u8>,
+    state: State<'_, AppState>,
+) -> Result<crate::builtin_tools::BatchRenamePreview, String> {
+    let prepared = state
+        .temporary_path_opens
+        .prepare_folder(&directory_open_id)?;
+    let directory = prepared.path().to_string_lossy().into_owned();
+    let preview = crate::builtin_tools::preview_batch_rename(
+        directory,
+        find,
+        replace,
+        use_regex,
+        sequence_start,
+        sequence_padding,
+    )?;
+    drop(prepared);
+    Ok(preview)
+}
+
+#[tauri::command]
+pub fn apply_batch_rename(
+    directory_open_id: String,
+    items: Vec<crate::builtin_tools::BatchRenameItem>,
+    state: State<'_, AppState>,
+) -> Result<crate::builtin_tools::BatchRenameResult, String> {
+    let prepared = state
+        .temporary_path_opens
+        .prepare_folder(&directory_open_id)?;
+    let directory = prepared.path().to_string_lossy().into_owned();
+    let result = crate::builtin_tools::apply_batch_rename(directory, items)?;
+    drop(prepared);
+    Ok(result)
 }
 
 /// Acquires a short-lived focus lease for the browser/system picker created by
@@ -2517,12 +2895,13 @@ pub async fn open_clipboard_history_file_entry(
     file_index: usize,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = state
-        .clipboard_history
-        .revalidated_file_entry_path(&id, file_index)?;
-    tauri::async_runtime::spawn_blocking(move || open_path_in_system(&path))
-        .await
-        .map_err(|error| format!("Could not start the clipboard history opener task: {error}"))?
+    let history = state.clipboard_history.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = history.prepare_file_entry_open(&id, file_index)?;
+        prepared.launch()
+    })
+    .await
+    .map_err(|error| format!("Could not start the clipboard history opener task: {error}"))?
 }
 
 #[tauri::command]
@@ -2605,7 +2984,7 @@ pub fn consume_super_panel_context(
     if let Ok(paths) =
         crate::clipboard_access::with_clipboard(|clipboard| clipboard.get().file_list())
     {
-        let files = clipboard_files_from_paths(paths);
+        let files = clipboard_files_from_paths(&state.temporary_path_opens, paths);
         if !files.is_empty() {
             return Ok(SuperPanelContextPayload::Files { files });
         }
@@ -2644,10 +3023,13 @@ fn truncate_utf8_bytes(mut value: String, max_bytes: usize) -> String {
 /// stay in the renderer's standard paste flow; no background clipboard scan
 /// is introduced by this command.
 #[tauri::command]
-pub fn read_clipboard_files() -> Result<Vec<ClipboardFile>, String> {
+pub fn read_clipboard_files(state: State<'_, AppState>) -> Result<Vec<ClipboardFile>, String> {
     let paths = crate::clipboard_access::with_clipboard(|clipboard| clipboard.get().file_list())
         .map_err(|error| format!("The clipboard does not contain a readable file list: {error}"))?;
-    Ok(clipboard_files_from_paths(paths))
+    Ok(clipboard_files_from_paths(
+        &state.temporary_path_opens,
+        paths,
+    ))
 }
 
 /// Reads one bitmap only after the user explicitly pastes an image into the
@@ -2669,28 +3051,25 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     clipboard_image_from_rgba(image).map(Some)
 }
 
-fn clipboard_files_from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<ClipboardFile> {
+fn clipboard_files_from_paths(
+    temporary_path_opens: &TemporaryPathOpenStore,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Vec<ClipboardFile> {
     paths
         .into_iter()
         .take(MAX_CLIPBOARD_FILE_ITEMS)
         .filter_map(|path| {
-            let path = path.canonicalize().ok()?;
-            let metadata = fs::metadata(&path).ok()?;
-            let kind = if metadata.is_dir() {
-                "folder"
-            } else if metadata.is_file() {
-                "file"
-            } else {
-                return None;
-            };
-            let name = path
+            let issued = temporary_path_opens.issue(&path).ok()?;
+            let name = issued
+                .canonical_path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .filter(|name| !name.trim().is_empty())?;
             Some(ClipboardFile {
-                path: path.to_string_lossy().into_owned(),
+                path: renderer_display_path(&issued.canonical_path),
                 name,
-                kind: kind.to_owned(),
+                kind: issued.kind.as_str().to_owned(),
+                open_id: issued.open_id,
             })
         })
         .collect()
@@ -3202,7 +3581,7 @@ fn plugin_host_call_for_active_lease(
                 return Ok(json!({ "cancelled": true }));
             };
             let grant_id =
-                issue_filesystem_grant(&state.host, &request.plugin_id, directory.clone());
+                issue_filesystem_grant(&state.host, &request.plugin_id, directory.clone())?;
             Ok(json!({
                 "cancelled": false,
                 "grantId": grant_id,
@@ -3230,7 +3609,9 @@ fn plugin_host_call_for_active_lease(
         }
         "filesystem.batchRename.preview" => {
             let grant_id = required_string(&request.params, "grantId")?;
-            let directory = directory_for_grant(&state.host, &request.plugin_id, grant_id)?;
+            let prepared =
+                prepare_directory_for_grant(&state.host, &request.plugin_id, grant_id)?;
+            let directory = prepared.path().to_string_lossy().into_owned();
             let find = required_string(&request.params, "find")?.to_owned();
             let replace = required_string(&request.params, "replace")?.to_owned();
             let use_regex = optional_bool(&request.params, "useRegex")?;
@@ -3266,6 +3647,8 @@ fn plugin_host_call_for_active_lease(
         "filesystem.batchRename.apply" => {
             let grant_id = required_string(&request.params, "grantId")?;
             let preview_id = required_string(&request.params, "previewId")?;
+            let prepared =
+                prepare_directory_for_grant(&state.host, &request.plugin_id, grant_id)?;
             let preview = take_plugin_batch_rename_preview(
                 &state.host,
                 &request.plugin_id,
@@ -3274,6 +3657,7 @@ fn plugin_host_call_for_active_lease(
             )?;
             let result =
                 crate::builtin_tools::apply_batch_rename(preview.directory, preview.items)?;
+            drop(prepared);
             serde_json::to_value(result)
                 .map_err(|error| format!("Could not encode batch rename result: {error}"))
         }
@@ -3334,11 +3718,10 @@ fn plugin_host_call_for_active_lease(
                 .to_owned(),
         ),
         "shell.openPath" | "shell.open" => {
-            let path = PathBuf::from(required_string(&request.params, "path")?);
-            let path = path
-                .canonicalize()
-                .map_err(|error| format!("Path cannot be opened: {error}"))?;
-            open_path_in_system(&path)?;
+            let grant_id = required_string(&request.params, "grantId")?;
+            let prepared =
+                prepare_directory_for_grant(&state.host, &request.plugin_id, grant_id)?;
+            prepared.launch()?;
             Ok(json!({ "opened": true }))
         }
         "shell.openExternal" => {
@@ -4502,7 +4885,15 @@ fn select_upload_file_with_native_dialog(
     dialog.pick_file()
 }
 
-fn issue_filesystem_grant(host: &PluginHostState, plugin_id: &str, directory: String) -> String {
+fn issue_filesystem_grant(
+    host: &PluginHostState,
+    plugin_id: &str,
+    directory: String,
+) -> Result<String, String> {
+    let prepared =
+        crate::system_open::prepare_local_open(Path::new(&directory), Some(LocalOpenKind::Folder))?;
+    let directory = prepared.path().to_string_lossy().into_owned();
+    let identity = prepared.identity();
     let mut grants = host
         .filesystem_grants
         .lock()
@@ -4514,11 +4905,12 @@ fn issue_filesystem_grant(host: &PluginHostState, plugin_id: &str, directory: St
         FilesystemGrant {
             plugin_id: plugin_id.to_owned(),
             directory,
+            identity,
             issued_at: Instant::now(),
         },
     );
     trim_oldest_records(&mut grants, MAX_FILESYSTEM_GRANTS, |grant| grant.issued_at);
-    grant_id
+    Ok(grant_id)
 }
 
 fn issue_file_grant(
@@ -4544,23 +4936,51 @@ fn issue_file_grant(
     grant_id
 }
 
+#[cfg(test)]
 fn directory_for_grant(
     host: &PluginHostState,
     plugin_id: &str,
     grant_id: &str,
 ) -> Result<String, String> {
-    let mut grants = host
-        .filesystem_grants
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    remove_expired_filesystem_grants(&mut grants);
-    let Some(grant) = grants.get(grant_id) else {
-        return Err("This folder selection has expired. Choose the folder again.".to_owned());
+    prepare_directory_for_grant(host, plugin_id, grant_id)
+        .map(|prepared| prepared.path().to_string_lossy().into_owned())
+}
+
+fn prepare_directory_for_grant(
+    host: &PluginHostState,
+    plugin_id: &str,
+    grant_id: &str,
+) -> Result<PreparedLocalOpen, String> {
+    let grant = {
+        let mut grants = host
+            .filesystem_grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_expired_filesystem_grants(&mut grants);
+        grants.get(grant_id).cloned().ok_or_else(|| {
+            "This folder selection has expired. Choose the folder again.".to_owned()
+        })?
     };
     if grant.plugin_id != plugin_id {
         return Err("This folder selection belongs to another plugin.".to_owned());
     }
-    Ok(grant.directory.clone())
+    let prepared = crate::system_open::prepare_local_open(
+        Path::new(&grant.directory),
+        Some(LocalOpenKind::Folder),
+    )?;
+    let canonical_directory = prepared.path().to_string_lossy().into_owned();
+    if canonical_directory != grant.directory {
+        return Err(
+            "The selected folder changed after authorization. Choose the folder again.".to_owned(),
+        );
+    }
+    if prepared.identity() != grant.identity {
+        return Err(
+            "The selected folder was replaced after authorization. Choose the folder again."
+                .to_owned(),
+        );
+    }
+    Ok(prepared)
 }
 
 /// Resolves one explicit selection only for the matching plugin's native
@@ -4640,8 +5060,11 @@ fn create_plugin_project_for_grant(
     grant_id: &str,
     plugin_id: &str,
 ) -> Result<PluginProjectCreated, String> {
-    let parent_directory = directory_for_grant(host, requesting_plugin_id, grant_id)?;
-    create_plugin_project_template(&parent_directory, plugin_id)
+    let prepared = prepare_directory_for_grant(host, requesting_plugin_id, grant_id)?;
+    let parent_directory = prepared.path().to_string_lossy().into_owned();
+    let project = create_plugin_project_template(&parent_directory, plugin_id)?;
+    drop(prepared);
+    Ok(project)
 }
 
 fn remember_plugin_batch_rename_preview(
@@ -4736,6 +5159,15 @@ fn remove_expired_filesystem_grants(grants: &mut HashMap<String, FilesystemGrant
 
 fn remove_expired_file_grants(grants: &mut HashMap<String, PluginFileGrant>) {
     grants.retain(|_, grant| grant.issued_at.elapsed() <= FILESYSTEM_GRANT_TTL);
+}
+
+fn remove_expired_temporary_path_open_grants(
+    grants: &mut HashMap<String, TemporaryPathOpenGrant>,
+    now: Instant,
+) {
+    grants.retain(|_, grant| {
+        now.saturating_duration_since(grant.issued_at) <= TEMPORARY_PATH_OPEN_TTL
+    });
 }
 
 fn remove_expired_plugin_launcher_contexts(
@@ -5034,7 +5466,8 @@ pub fn run() {
             index_default_roots,
             set_index_roots,
             get_default_roots,
-            open_path,
+            open_granted_path,
+            open_search_result,
             list_launcher_shortcuts,
             pin_launcher_shortcut_from_search,
             open_launcher_shortcut,
@@ -5070,8 +5503,8 @@ pub fn run() {
             capture_native_screenshot,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
-            crate::builtin_tools::preview_batch_rename,
-            crate::builtin_tools::apply_batch_rename,
+            preview_batch_rename,
+            apply_batch_rename,
             crate::builtin_tools::write_clipboard_text,
             list_cloud_profiles,
             connect_webdav,
@@ -5775,29 +6208,12 @@ fn apply_launcher_reveal_geometry<R: tauri::Runtime>(window: &tauri::WebviewWind
     }
 }
 
-fn open_path_in_system(path: &PathBuf) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = background_command("explorer.exe");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = background_command("open");
-        command.arg(path);
-        command
-    };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut command = {
-        let mut command = background_command("xdg-open");
-        command.arg(path);
-        command
-    };
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))
+fn temporary_path_open_id_is_valid(open_id: &str) -> bool {
+    open_id.len() <= MAX_TEMPORARY_PATH_OPEN_ID_BYTES
+        && open_id
+            .strip_prefix("open-")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_some()
 }
 
 fn open_external_in_system(url: &str) -> Result<(), String> {
@@ -5936,6 +6352,7 @@ mod tests {
     use std::{
         borrow::Cow,
         fs,
+        path::Path,
         sync::mpsc,
         time::{Duration, Instant},
     };
@@ -5947,15 +6364,17 @@ mod tests {
     use crate::models::{LauncherHotkeyRegistration, LauncherHotkeyStatus, PluginSearchResult};
 
     use super::{
-        attach_plugin_launcher_context_transfer, build_plugin_launcher_context_payload,
-        canonical_selected_file, clear_plugin_runtime_state, clear_plugin_session_secrets,
-        clipboard_files_from_paths, clipboard_image_from_rgba, complete_plugin_search,
-        create_plugin_project_for_grant, cursor_color_approval_id, directory_for_grant,
+        attach_plugin_launcher_context_transfer, authorize_index_root_update,
+        build_plugin_launcher_context_payload, canonical_selected_file, clear_plugin_runtime_state,
+        clear_plugin_session_secrets, clipboard_files_from_paths, clipboard_image_from_rgba,
+        complete_plugin_search, create_plugin_project_for_grant,
+        create_plugin_project_with_open_grant, cursor_color_approval_id, directory_for_grant,
         get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
         issue_plugin_launcher_context_transfer, launcher_visibility_action,
         native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
         optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
-        plugin_search_providers_changed_payload, resolve_issued_plugin_search_selection,
+        plugin_search_providers_changed_payload, prepare_directory_for_grant,
+        renderer_display_path, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, validate_system_icon_request,
@@ -5965,10 +6384,11 @@ mod tests {
         LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PluginBatchRenamePreview,
         PluginCursorColor, PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
         PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
-        LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE,
-        LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES,
-        MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_LOGS_PER_WINDOW,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_SEARCH_SELECTION_TTL,
+        TemporaryPathOpenKind, TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL,
+        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
+        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
+        MAX_PLUGIN_LOGS_PER_WINDOW, MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW,
+        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
     #[test]
@@ -5993,6 +6413,55 @@ mod tests {
             &[],
         )
         .is_err());
+    }
+
+    #[test]
+    fn local_open_commands_launch_the_same_prepared_object_their_resolver_proved() {
+        let complete_app_source = include_str!("app.rs");
+        let test_module = complete_app_source
+            .rfind("mod tests {")
+            .expect("app source keeps a test module");
+        let app_source = complete_app_source[..test_module]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "let prepared = temporary_path_opens.prepare_open(&open_id)?; prepared.launch()",
+            "let prepared = resolve_current_search_result_open_target(&search_result_id, &index)?; prepared.launch()",
+            "let prepared = shortcuts.resolve_open_target(&shortcut_id, &index)?; prepared.launch()",
+            "let prepared = history.prepare_file_entry_open(&id, file_index)?; prepared.launch()",
+            "let prepared = prepare_directory_for_grant(&state.host, &request.plugin_id, grant_id)?; prepared.launch()",
+        ] {
+            assert!(
+                app_source.contains(required),
+                "missing prepared-open source contract: {required}"
+            );
+        }
+        for forbidden in [
+            "open_local_path(&target.path",
+            "open_local_path(Path::new(&directory)",
+            "open_path_in_system(",
+        ] {
+            assert!(
+                !app_source.contains(forbidden),
+                "open command reintroduced a bare-path handoff: {forbidden}"
+            );
+        }
+
+        let launcher_source = include_str!("launcher_shortcuts.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(launcher_source.contains(
+            "resolve_current_search_result_open_target( search_result_id: &str, index: &SearchIndex, ) -> Result<PreparedLocalOpen, String>"
+        ));
+        let clipboard_source = include_str!("clipboard_history.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(clipboard_source.contains(
+            "pub fn prepare_file_entry_open( &self, id: &str, file_index: usize, ) -> Result<PreparedLocalOpen, String>"
+        ));
     }
 
     #[test]
@@ -6637,13 +7106,24 @@ mod tests {
 
     #[test]
     fn filesystem_grants_are_plugin_scoped_and_revoked_with_lifecycle_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-plugin-folder-grant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).expect("create plugin folder-grant fixture");
+        let canonical_directory = directory
+            .canonicalize()
+            .expect("canonical plugin folder-grant fixture")
+            .to_string_lossy()
+            .into_owned();
         let host = PluginHostState::default();
         let owner = "ihub-plugin-owner";
-        let grant_id = issue_filesystem_grant(&host, owner, "C:/safe-folder".to_owned());
+        let grant_id = issue_filesystem_grant(&host, owner, canonical_directory.clone())
+            .expect("issue owner folder grant");
 
         assert_eq!(
             directory_for_grant(&host, owner, &grant_id).expect("owner grant"),
-            "C:/safe-folder"
+            canonical_directory
         );
         let stolen = directory_for_grant(&host, "ihub-plugin-other", &grant_id)
             .expect_err("a different plugin cannot reuse a directory grant");
@@ -6658,7 +7138,7 @@ mod tests {
                     plugin_id: owner.to_owned(),
                     grant_id: grant_id.clone(),
                     preview: crate::builtin_tools::BatchRenamePreview {
-                        directory: "C:/safe-folder".to_owned(),
+                        directory: canonical_directory,
                         items: Vec::new(),
                         can_apply: false,
                         errors: Vec::new(),
@@ -6674,6 +7154,60 @@ mod tests {
             .lock()
             .expect("preview lock")
             .is_empty());
+        fs::remove_dir_all(directory).expect("cleanup plugin folder-grant fixture");
+    }
+
+    #[test]
+    fn filesystem_grants_revalidate_the_exact_live_folder() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-plugin-folder-revalidation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).expect("create folder revalidation fixture");
+        let canonical_directory = directory
+            .canonicalize()
+            .expect("canonical folder revalidation fixture")
+            .to_string_lossy()
+            .into_owned();
+        let host = PluginHostState::default();
+        let grant_id = issue_filesystem_grant(&host, "ihub-plugin-owner", canonical_directory)
+            .expect("issue revalidation folder grant");
+
+        fs::remove_dir(&directory).expect("remove the originally selected folder");
+        fs::write(&directory, "changed type").expect("replace folder with a regular file");
+        assert!(directory_for_grant(&host, "ihub-plugin-owner", &grant_id)
+            .expect_err("a replaced folder grant must fail closed")
+            .contains("expected a folder"));
+
+        fs::remove_file(directory).expect("cleanup folder revalidation fixture");
+    }
+
+    #[test]
+    fn filesystem_grants_reject_same_kind_folder_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "ihub-plugin-folder-identity-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let directory = root.join("selected");
+        let replacement = root.join("replacement");
+        fs::create_dir_all(&directory).expect("create selected folder");
+        fs::create_dir(&replacement).expect("create distinct replacement folder");
+        let canonical_directory = directory
+            .canonicalize()
+            .expect("canonical selected folder")
+            .to_string_lossy()
+            .into_owned();
+        let host = PluginHostState::default();
+        let grant_id = issue_filesystem_grant(&host, "ihub-plugin-owner", canonical_directory)
+            .expect("issue identity-bound folder grant");
+
+        fs::remove_dir(&directory).expect("remove original folder");
+        fs::rename(&replacement, &directory).expect("replace with a distinct folder object");
+        let error = prepare_directory_for_grant(&host, "ihub-plugin-owner", &grant_id)
+            .expect_err("same-kind folder replacement must fail closed");
+        assert!(error.contains("replaced after authorization"), "{error}");
+
+        fs::remove_dir_all(root).expect("cleanup folder identity fixture");
     }
 
     #[test]
@@ -7055,10 +7589,15 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         fs::create_dir(&parent).expect("temporary parent should be created");
-        let parent_directory = parent.to_string_lossy().into_owned();
+        let parent_directory = parent
+            .canonicalize()
+            .expect("canonical project parent")
+            .to_string_lossy()
+            .into_owned();
         let host = PluginHostState::default();
         let owner = "ihub-plugin-developer-tools";
-        let grant_id = issue_filesystem_grant(&host, owner, parent_directory);
+        let grant_id = issue_filesystem_grant(&host, owner, parent_directory)
+            .expect("issue developer folder grant");
 
         let created =
             create_plugin_project_for_grant(&host, owner, &grant_id, "ihub-plugin-grant-demo")
@@ -7089,9 +7628,20 @@ mod tests {
 
     #[test]
     fn rename_preview_owner_mismatch_does_not_consume_the_owner_token() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-rename-preview-owner-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).expect("create rename preview directory");
+        let canonical_directory = directory
+            .canonicalize()
+            .expect("canonical rename preview directory")
+            .to_string_lossy()
+            .into_owned();
         let host = PluginHostState::default();
         let owner = "ihub-plugin-owner";
-        let grant_id = issue_filesystem_grant(&host, owner, "C:/safe-folder".to_owned());
+        let grant_id = issue_filesystem_grant(&host, owner, canonical_directory.clone())
+            .expect("issue rename preview folder grant");
         let preview_id = "rename-preview-owner";
         host.batch_rename_previews
             .lock()
@@ -7102,7 +7652,7 @@ mod tests {
                     plugin_id: owner.to_owned(),
                     grant_id: grant_id.clone(),
                     preview: crate::builtin_tools::BatchRenamePreview {
-                        directory: "C:/safe-folder".to_owned(),
+                        directory: canonical_directory,
                         items: Vec::new(),
                         can_apply: true,
                         errors: Vec::new(),
@@ -7132,6 +7682,7 @@ mod tests {
             .lock()
             .expect("preview lock")
             .is_empty());
+        fs::remove_dir_all(directory).expect("cleanup rename preview directory");
     }
 
     #[test]
@@ -7176,19 +7727,358 @@ mod tests {
         let file = directory.join("example.txt");
         fs::create_dir_all(&directory).expect("create clipboard fixture directory");
         fs::write(&file, "iHub").expect("create clipboard fixture file");
+        let open_store = TemporaryPathOpenStore::default();
 
-        let entries = clipboard_files_from_paths(vec![
-            file.clone(),
-            directory.clone(),
-            directory.join("already-gone.txt"),
-        ]);
+        let entries = clipboard_files_from_paths(
+            &open_store,
+            vec![
+                file.clone(),
+                directory.clone(),
+                directory.join("already-gone.txt"),
+            ],
+        );
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "example.txt");
         assert_eq!(entries[0].kind, "file");
         assert_eq!(entries[1].kind, "folder");
         assert!(entries[0].path.ends_with("example.txt"));
+        #[cfg(windows)]
+        assert!(!entries[0].path.starts_with(r"\\?\"));
+        assert!(!entries[0].open_id.contains("example.txt"));
+        assert_eq!(
+            open_store
+                .resolve(&entries[0].open_id)
+                .expect("a fresh file open ID should resolve"),
+            crate::system_open::prepare_local_open(
+                &file,
+                Some(crate::system_open::LocalOpenKind::File),
+            )
+            .expect("prepare expected file")
+            .path()
+        );
+        assert_eq!(
+            open_store
+                .resolve(&entries[1].open_id)
+                .expect("a fresh folder open ID should resolve"),
+            crate::system_open::prepare_local_open(
+                &directory,
+                Some(crate::system_open::LocalOpenKind::Folder),
+            )
+            .expect("prepare expected folder")
+            .path()
+        );
 
         fs::remove_dir_all(directory).expect("cleanup clipboard fixture directory");
+    }
+
+    #[test]
+    fn temporary_path_open_ids_reject_unknown_expired_and_type_changed_targets() {
+        let directory =
+            std::env::temp_dir().join(format!("ihub-open-id-test-{}", uuid::Uuid::new_v4()));
+        let target = directory.join("selected.txt");
+        fs::create_dir_all(&directory).expect("create open-ID fixture directory");
+        fs::write(&target, "iHub").expect("create open-ID fixture file");
+        let open_store = TemporaryPathOpenStore::default();
+
+        let issued = open_store
+            .issue(&target)
+            .expect("a regular local file should receive an open ID");
+        assert_eq!(issued.kind, TemporaryPathOpenKind::File);
+        assert!(!issued.open_id.contains("selected.txt"));
+        assert!(open_store
+            .resolve("open-00000000-0000-0000-0000-000000000000")
+            .is_err());
+
+        let expired_at = Instant::now()
+            .checked_sub(TEMPORARY_PATH_OPEN_TTL + Duration::from_secs(1))
+            .expect("the test clock supports a short lookback");
+        let expired = open_store
+            .issue_at(&target, expired_at)
+            .expect("the fixture can issue an already-aged record");
+        assert!(open_store
+            .resolve_at(&expired.open_id, Instant::now())
+            .expect_err("an expired ID must not resolve")
+            .contains("unknown or expired"));
+
+        fs::remove_file(&target).expect("replace the file with a directory");
+        fs::create_dir(&target).expect("create replacement directory at the same path");
+        assert!(open_store
+            .resolve(&issued.open_id)
+            .expect_err("a changed filesystem kind must invalidate the grant")
+            .contains("changed type"));
+
+        fs::remove_dir_all(directory).expect("cleanup open-ID fixture directory");
+    }
+
+    #[test]
+    fn temporary_path_open_ids_reject_same_kind_object_replacement() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-open-id-identity-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = directory.join("selected.txt");
+        let replacement = directory.join("replacement.txt");
+        fs::create_dir_all(&directory).expect("create identity fixture directory");
+        fs::write(&target, "original").expect("create original fixture file");
+        fs::write(&replacement, "replacement").expect("create distinct replacement object");
+        let open_store = TemporaryPathOpenStore::default();
+        let issued = open_store
+            .issue(&target)
+            .expect("the original object should receive an open ID");
+
+        fs::remove_file(&target).expect("remove the original object");
+        fs::rename(&replacement, &target).expect("move a distinct file into the authorized name");
+        let error = open_store
+            .resolve(&issued.open_id)
+            .expect_err("a same-kind replacement must invalidate the grant");
+        assert!(error.contains("replaced after authorization"), "{error}");
+
+        fs::remove_dir_all(directory).expect("cleanup identity fixture directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temporary_path_open_grant_keeps_its_verified_object_guarded() {
+        let directory =
+            std::env::temp_dir().join(format!("ihub-open-id-guard-test-{}", uuid::Uuid::new_v4()));
+        let target = directory.join("selected.txt");
+        fs::create_dir_all(&directory).expect("create guard fixture directory");
+        fs::write(&target, "original").expect("create guarded fixture file");
+        let open_store = TemporaryPathOpenStore::default();
+        let issued = open_store.issue(&target).expect("issue guarded open ID");
+
+        let prepared = open_store
+            .prepare_open(&issued.open_id)
+            .expect("resolve and retain the original object");
+        assert!(
+            fs::OpenOptions::new().write(true).open(&target).is_err(),
+            "the grant resolver must retain the final read/share guard"
+        );
+        drop(prepared);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .expect("dropping the prepared open releases the guard");
+
+        fs::remove_dir_all(directory).expect("cleanup guard fixture directory");
+    }
+
+    #[test]
+    fn index_root_updates_require_exact_current_or_native_folder_grants() {
+        let fixture = std::env::temp_dir().join(format!(
+            "ihub-index-root-grant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let current = fixture.join("current");
+        let selected = fixture.join("selected");
+        let unselected = fixture.join("unselected");
+        fs::create_dir_all(&current).expect("create current root fixture");
+        fs::create_dir(&selected).expect("create selected root fixture");
+        fs::create_dir(&unselected).expect("create unselected root fixture");
+        let selected_file = fixture.join("selected.txt");
+        fs::write(&selected_file, "iHub").expect("create selected file fixture");
+
+        let current_root_path = current.canonicalize().expect("canonical current root");
+        let current_root = renderer_display_path(&current_root_path);
+        let unselected_root = renderer_display_path(
+            &unselected
+                .canonicalize()
+                .expect("canonical unselected root"),
+        );
+        let open_store = TemporaryPathOpenStore::default();
+        let selected_grant = open_store
+            .issue(&selected)
+            .expect("issue selected folder grant");
+        let selected_root = renderer_display_path(&selected_grant.canonical_path);
+        let file_grant = open_store
+            .issue(&selected_file)
+            .expect("issue selected file grant");
+
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            &[],
+            &[],
+            &open_store,
+        )
+        .is_ok());
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            std::slice::from_ref(&current_root),
+            &[],
+            &open_store,
+        )
+        .is_ok());
+        assert!(
+            authorize_index_root_update(
+                &[
+                    current_root_path.clone(),
+                    fixture.join("missing-current-root")
+                ],
+                std::slice::from_ref(&current_root),
+                &[],
+                &open_store,
+            )
+            .is_ok(),
+            "removing an unavailable old root must not require preparing it",
+        );
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            &[current_root.clone(), selected_root.clone()],
+            std::slice::from_ref(&selected_grant.open_id),
+            &open_store,
+        )
+        .is_ok());
+
+        let raw_error = authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            std::slice::from_ref(&unselected_root),
+            &[],
+            &open_store,
+        )
+        .expect_err("an arbitrary renderer path must not become an index root");
+        assert!(raw_error.contains("current system-folder selection"));
+
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            std::slice::from_ref(&unselected_root),
+            std::slice::from_ref(&selected_grant.open_id),
+            &open_store,
+        )
+        .is_err());
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            std::slice::from_ref(&selected_root),
+            std::slice::from_ref(&file_grant.open_id),
+            &open_store,
+        )
+        .expect_err("a file open ID must not authorize an index folder")
+        .contains("not for a folder"));
+
+        let expired_at = Instant::now()
+            .checked_sub(TEMPORARY_PATH_OPEN_TTL + Duration::from_secs(1))
+            .expect("the test clock supports a short lookback");
+        let expired = open_store
+            .issue_at(&selected, expired_at)
+            .expect("issue an aged folder grant");
+        assert!(authorize_index_root_update(
+            std::slice::from_ref(&current_root_path),
+            std::slice::from_ref(&selected_root),
+            std::slice::from_ref(&expired.open_id),
+            &open_store,
+        )
+        .expect_err("an expired native selection must not authorize a new root")
+        .contains("unknown or expired"));
+
+        fs::remove_dir_all(fixture).expect("cleanup index-root grant fixture");
+    }
+
+    #[test]
+    fn temporary_path_open_store_is_bounded_and_evicts_the_oldest_grant() {
+        let directory =
+            std::env::temp_dir().join(format!("ihub-open-bound-test-{}", uuid::Uuid::new_v4()));
+        let target = directory.join("selected.txt");
+        fs::create_dir_all(&directory).expect("create bounded open-ID fixture directory");
+        fs::write(&target, "iHub").expect("create bounded open-ID fixture file");
+        let open_store = TemporaryPathOpenStore::default();
+        let base = Instant::now();
+        let mut issued_ids = Vec::new();
+        for ordinal in 0..=super::MAX_TEMPORARY_PATH_OPEN_GRANTS {
+            issued_ids.push(
+                open_store
+                    .issue_at(&target, base + Duration::from_nanos(ordinal as u64))
+                    .expect("issue a bounded open authorization")
+                    .open_id,
+            );
+        }
+
+        assert_eq!(
+            open_store
+                .grants
+                .lock()
+                .expect("inspect bounded open grant store")
+                .len(),
+            super::MAX_TEMPORARY_PATH_OPEN_GRANTS
+        );
+        assert!(open_store.resolve(&issued_ids[0]).is_err());
+        assert_eq!(
+            open_store
+                .resolve(issued_ids.last().expect("latest issued ID"))
+                .expect("the latest bounded grant remains valid"),
+            crate::system_open::prepare_local_open(
+                &target,
+                Some(crate::system_open::LocalOpenKind::File),
+            )
+            .expect("prepare bounded fixture")
+            .path()
+        );
+
+        fs::remove_dir_all(directory).expect("cleanup bounded open-ID fixture");
+    }
+
+    #[test]
+    fn a_created_plugin_project_receives_a_folder_open_id() {
+        let parent = std::env::temp_dir().join(format!(
+            "ihub-project-open-id-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&parent).expect("create project parent fixture");
+        let open_store = TemporaryPathOpenStore::default();
+        let parent_grant = open_store
+            .issue(&parent)
+            .expect("the selected project parent receives a folder grant");
+        let created = create_plugin_project_with_open_grant(
+            &open_store,
+            &parent_grant.open_id,
+            "ihub-plugin-open-id-test",
+        )
+        .expect("create a plugin project with a native open authorization");
+        let open_id = created
+            .open_id
+            .as_deref()
+            .expect("the first-party project result must carry an open ID");
+        assert_eq!(
+            open_store
+                .resolve(open_id)
+                .expect("resolve project open ID"),
+            crate::system_open::prepare_local_open(
+                Path::new(&created.project_path),
+                Some(crate::system_open::LocalOpenKind::Folder),
+            )
+            .expect("prepare created project")
+            .path()
+        );
+
+        fs::remove_dir_all(parent).expect("cleanup project open-ID fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_path_open_ids_reject_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let directory =
+            std::env::temp_dir().join(format!("ihub-open-link-test-{}", uuid::Uuid::new_v4()));
+        let target = directory.join("target.txt");
+        let link = directory.join("link.txt");
+        fs::create_dir_all(&directory).expect("create symlink fixture directory");
+        fs::write(&target, "iHub").expect("create symlink target");
+        symlink(&target, &link).expect("create symlink fixture");
+
+        assert!(TemporaryPathOpenStore::default()
+            .issue(&link)
+            .expect_err("a symlink must not receive an open ID")
+            .contains("Symbolic links"));
+
+        fs::remove_dir_all(directory).expect("cleanup symlink fixture directory");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn temporary_path_open_ids_reject_network_namespaces() {
+        assert!(TemporaryPathOpenStore::default()
+            .issue(Path::new(r"\\server\share\file.txt"))
+            .expect_err("a network namespace must not receive an open ID")
+            .contains("UNC"));
     }
 
     #[test]

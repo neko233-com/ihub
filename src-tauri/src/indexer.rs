@@ -17,6 +17,7 @@ use crate::{
     host_log,
     models::{IndexStatus, SearchResult},
     ntfs_usn,
+    system_open::{prepare_local_open, LocalOpenKind, PreparedLocalOpen},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
@@ -178,11 +179,11 @@ pub(crate) struct LauncherShortcutSource {
 
 /// A renderer-selected result resolved back through the current native index.
 /// The path remains host-private and is used only by the Shell icon worker.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ResolvedSystemIconSource {
     pub(crate) response_id: String,
-    pub(crate) path: PathBuf,
     pub(crate) kind: String,
+    pub(crate) prepared: PreparedLocalOpen,
 }
 
 #[derive(Debug, Clone)]
@@ -199,9 +200,64 @@ struct IndexedContent {
 struct ContentCandidate {
     id: String,
     path: PathBuf,
+    indexed_size_bytes: u64,
+    indexed_modified_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivePathKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeFileIdentity {
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(any(windows, unix)))]
+    created_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StablePathState {
+    identity: NativeFileIdentity,
+    size_bytes: u64,
+    modified_at: SystemTime,
+    kind: LivePathKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LivePathProof {
+    canonical_path: PathBuf,
+    state: StablePathState,
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizedScanRoot {
+    source_path: PathBuf,
+    canonical_path: PathBuf,
+    identity: NativeFileIdentity,
 }
 
 impl IndexedEntry {
+    fn renderer_size_bytes(&self) -> Option<u64> {
+        const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+        if self.kind == "folder"
+            || (self.kind == "application"
+                && matches!(self.extension_lower().as_deref(), Some("app" | "prefpane")))
+            || self.size_bytes > MAX_JAVASCRIPT_SAFE_INTEGER
+        {
+            return None;
+        }
+        Some(self.size_bytes)
+    }
+
     fn is_valid(&self) -> bool {
         !self.id.is_empty()
             && !self.path.is_empty()
@@ -792,7 +848,7 @@ impl SearchIndex {
         let active_roots = configured_roots.active_roots();
         let active_root_names = active_roots
             .iter()
-            .map(|path| path.to_string_lossy().to_string())
+            .map(|path| renderer_display_path(path))
             .collect::<Vec<_>>();
         let restored_v3 = (!configured_roots.is_unavailable())
             .then(|| {
@@ -911,6 +967,13 @@ impl SearchIndex {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Returns the host's canonical active roots without projecting them into
+    /// renderer-facing display strings. First-party authorization code uses
+    /// these paths to retain native object guards across a root update.
+    pub(crate) fn active_root_paths(&self) -> Vec<PathBuf> {
+        self.active_roots()
     }
 
     /// Starts a platform watcher for the already-authorized roots. The
@@ -1697,7 +1760,7 @@ impl SearchIndex {
         invalidate_content_index(&self.inner, "正在等待新的路径扫描后重建正文索引。");
         let root_names: Vec<String> = roots
             .iter()
-            .map(|path| path.to_string_lossy().to_string())
+            .map(|path| renderer_display_path(path))
             .collect();
 
         {
@@ -1997,6 +2060,33 @@ impl SearchIndex {
         top_matches.into_results_for_content(&parsed_query.content_terms)
     }
 
+    /// Resolves an exact result from the current native index without applying
+    /// the stricter persistence policy used by launcher pins. Immediate opens
+    /// still receive only this host-owned source, never a renderer path.
+    pub(crate) fn resolve_current_search_result_source(
+        &self,
+        source_id: &str,
+    ) -> Option<LauncherShortcutSource> {
+        if source_id.is_empty() || source_id.len() > 8 * 1024 {
+            return None;
+        }
+        let entries = self
+            .inner
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == source_id && entry.is_valid())?;
+        Some(LauncherShortcutSource {
+            id: entry.id.clone(),
+            path: PathBuf::from(&entry.path),
+            name: entry.name.clone(),
+            kind: entry.kind.clone(),
+            metadata: entry.metadata.clone(),
+        })
+    }
+
     /// Resolves only an exact, currently indexed, host-eligible result for a
     /// persistent launcher shortcut. This stays inside the native index so a
     /// renderer cannot create a shortcut by supplying an arbitrary path.
@@ -2041,18 +2131,39 @@ impl SearchIndex {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        let entries = self
+        // Keep the configured-root transition serialized while resolving the
+        // small bounded batch. This prevents a path selected from the old
+        // index from being approved against a newly broadened or narrowed
+        // scope halfway through the live filesystem checks.
+        let _roots_guard = self
             .inner
-            .entries
-            .read()
+            .roots_lock
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries
-            .iter()
-            .filter(|entry| requested.contains(entry.id.as_str()) && entry.is_valid())
-            .map(|entry| ResolvedSystemIconSource {
-                response_id: entry.id.clone(),
-                path: PathBuf::from(&entry.path),
-                kind: entry.kind.clone(),
+        let content_roots = authorized_scan_roots(&self.active_roots());
+        let application_roots = authorized_scan_roots(&application_discovery_root_paths());
+        let candidates = {
+            let entries = self
+                .inner
+                .entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entries
+                .iter()
+                .filter(|entry| requested.contains(entry.id.as_str()) && entry.is_valid())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        candidates
+            .into_iter()
+            .filter_map(|entry| {
+                let prepared =
+                    prepare_live_system_icon_source(&entry, &content_roots, &application_roots)?;
+                Some(ResolvedSystemIconSource {
+                    response_id: entry.id,
+                    kind: entry.kind,
+                    prepared,
+                })
             })
             .collect()
     }
@@ -2067,7 +2178,28 @@ impl SearchIndex {
         canonical_path: &Path,
     ) -> bool {
         if source.kind == "application" {
-            return application_is_launcher_shortcut_eligible(canonical_path);
+            return application_is_launcher_shortcut_eligible(canonical_path)
+                && application_path_is_within_discovery_roots(canonical_path);
+        }
+        self.active_roots()
+            .iter()
+            .any(|root| path_is_within_root(canonical_path, root))
+    }
+
+    /// Immediate opens use the same current-index and active-root boundary as
+    /// persistent shortcuts, while allowing the mutable Windows launch items
+    /// that are intentionally searchable but intentionally not pinnable.
+    pub(crate) fn current_search_result_path_is_authorized(
+        &self,
+        source: &LauncherShortcutSource,
+        canonical_path: &Path,
+    ) -> bool {
+        if source.kind == "application" {
+            // `source` was resolved by exact ID from the current host-owned
+            // application index. Rechecking its launch shape prevents a stale
+            // file replacement from broadening that discovery boundary.
+            return application_is_immediate_search_open_eligible(canonical_path)
+                && application_path_is_within_discovery_roots(canonical_path);
         }
         self.active_roots()
             .iter()
@@ -2618,10 +2750,19 @@ fn schedule_content_index_rebuild(inner: &Arc<IndexInner>, generation: u64) {
         Some("正在建立本机内存正文索引；文件名搜索不受影响。".to_owned()),
     );
 
+    // Capture the exact configured scope associated with this generation.
+    // A later root transition increments both the path generation and content
+    // revision, while this worker continues to prove every read against this
+    // immutable scan-local authorization set.
+    let roots = inner
+        .configured_roots
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .active_roots();
     let worker_inner = Arc::clone(inner);
     if let Err(error) = thread::Builder::new()
         .name("ihub-content-indexer".to_owned())
-        .spawn(move || rebuild_content_index(worker_inner, generation, revision))
+        .spawn(move || rebuild_content_index(worker_inner, generation, revision, roots))
     {
         host_log::error(
             "index",
@@ -2690,7 +2831,13 @@ fn refresh_application_entries(inner: Arc<IndexInner>, generation: u64) {
     }
 }
 
-fn rebuild_content_index(inner: Arc<IndexInner>, generation: u64, revision: u64) {
+fn rebuild_content_index(
+    inner: Arc<IndexInner>,
+    generation: u64,
+    revision: u64,
+    roots: Vec<PathBuf>,
+) {
+    let authorized_roots = authorized_scan_roots(&roots);
     let candidates = {
         let entries = inner
             .entries
@@ -2700,9 +2847,13 @@ fn rebuild_content_index(inner: Arc<IndexInner>, generation: u64, revision: u64)
             .iter()
             .filter(|entry| content_candidate_is_supported(entry))
             .take(MAX_CONTENT_INDEXED_FILES)
-            .map(|entry| ContentCandidate {
-                id: entry.id.clone(),
-                path: PathBuf::from(&entry.path),
+            .filter_map(|entry| {
+                Some(ContentCandidate {
+                    id: entry.id.clone(),
+                    path: PathBuf::from(&entry.path),
+                    indexed_size_bytes: entry.size_bytes,
+                    indexed_modified_at: entry.modified_at.clone()?,
+                })
             })
             .collect::<Vec<_>>()
     };
@@ -2715,7 +2866,7 @@ fn rebuild_content_index(inner: Arc<IndexInner>, generation: u64, revision: u64)
         {
             return;
         }
-        let Some(content) = read_indexed_content(&candidate.path) else {
+        let Some(content) = read_indexed_content(&candidate, &authorized_roots) else {
             continue;
         };
         let next_bytes = indexed_bytes.saturating_add(content.memory_bytes);
@@ -2842,13 +2993,50 @@ fn is_content_extension(extension: &str) -> bool {
     )
 }
 
-fn read_indexed_content(path: &Path) -> Option<IndexedContent> {
-    let mut file = fs::File::open(path).ok()?;
+fn read_indexed_content(
+    candidate: &ContentCandidate,
+    roots: &[AuthorizedScanRoot],
+) -> Option<IndexedContent> {
+    read_indexed_content_after_open(candidate, roots, || {})
+}
+
+fn read_indexed_content_after_open(
+    candidate: &ContentCandidate,
+    roots: &[AuthorizedScanRoot],
+    after_open: impl FnOnce(),
+) -> Option<IndexedContent> {
+    let before = prove_content_candidate(candidate, roots)?;
+    let authorized_root = matching_live_authorized_root(&before.canonical_path, roots)?;
+    let mut file = open_path_without_following(&before.canonical_path)?;
+    let opened_state = stable_opened_file_state(&file)?;
+    if opened_state != before.state {
+        return None;
+    }
+
+    // Tests use this seam to deterministically replace or mutate a file after
+    // the handle is open. Production passes a no-op and immediately repeats
+    // the same live proof before consuming any decoded text.
+    after_open();
+    let after_open = prove_content_candidate(candidate, roots)?;
+    if after_open != before
+        || !authorized_root_is_live(authorized_root)
+        || stable_opened_file_state(&file)? != before.state
+    {
+        return None;
+    }
+
     let mut bytes = Vec::with_capacity(MAX_CONTENT_BYTES_PER_FILE);
     file.by_ref()
         .take(MAX_CONTENT_BYTES_PER_FILE as u64)
         .read_to_end(&mut bytes)
         .ok()?;
+    let after_read = prove_content_candidate(candidate, roots)?;
+    if after_read != before
+        || !authorized_root_is_live(authorized_root)
+        || stable_opened_file_state(&file)? != before.state
+    {
+        return None;
+    }
     let decoded = decode_indexed_text(&bytes)?;
     let text = compact_indexed_text(&decoded);
     if text.is_empty() {
@@ -2861,6 +3049,333 @@ fn read_indexed_content(path: &Path) -> Option<IndexedContent> {
         folded,
         memory_bytes,
     })
+}
+
+fn prove_content_candidate(
+    candidate: &ContentCandidate,
+    roots: &[AuthorizedScanRoot],
+) -> Option<LivePathProof> {
+    let proof = live_path_proof(&candidate.path)?;
+    if proof.state.kind != LivePathKind::File
+        || proof.state.size_bytes != candidate.indexed_size_bytes
+        || proof.state.size_bytes == 0
+        || proof.state.size_bytes > MAX_CONTENT_SOURCE_FILE_BYTES
+        || system_time_to_iso(proof.state.modified_at) != candidate.indexed_modified_at
+        || matching_live_authorized_root(&proof.canonical_path, roots).is_none()
+    {
+        return None;
+    }
+    Some(proof)
+}
+
+fn prepare_live_system_icon_source(
+    entry: &IndexedEntry,
+    content_roots: &[AuthorizedScanRoot],
+    application_roots: &[AuthorizedScanRoot],
+) -> Option<PreparedLocalOpen> {
+    let prepared = prepare_local_open(Path::new(&entry.path), None).ok()?;
+    let kind_matches = match entry.kind.as_str() {
+        "file" => prepared.kind() == LocalOpenKind::File,
+        "folder" => prepared.kind() == LocalOpenKind::Folder,
+        "application" => {
+            application_is_immediate_search_open_eligible(prepared.path())
+                && if matches!(
+                    prepared
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .map(|extension| extension.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("app" | "prefpane")
+                ) {
+                    prepared.kind() == LocalOpenKind::Folder
+                } else {
+                    prepared.kind() == LocalOpenKind::File
+                }
+        }
+        _ => false,
+    };
+    if !kind_matches {
+        return None;
+    }
+
+    let roots = if entry.kind == "application" {
+        application_roots
+    } else {
+        content_roots
+    };
+    matching_live_authorized_root(prepared.path(), roots)?;
+    Some(prepared)
+}
+
+fn authorized_scan_roots(roots: &[PathBuf]) -> Vec<AuthorizedScanRoot> {
+    let mut authorized = roots
+        .iter()
+        .filter_map(|source_path| {
+            let proof = live_path_proof(source_path)?;
+            (proof.state.kind == LivePathKind::Directory).then_some(AuthorizedScanRoot {
+                source_path: source_path.clone(),
+                canonical_path: proof.canonical_path,
+                identity: proof.state.identity,
+            })
+        })
+        .collect::<Vec<_>>();
+    authorized.sort_unstable_by(|left, right| {
+        root_scope_key(&left.canonical_path).cmp(&root_scope_key(&right.canonical_path))
+    });
+    authorized.dedup_by(|left, right| {
+        paths_refer_to_same_location(&left.canonical_path, &right.canonical_path)
+    });
+    authorized
+}
+
+fn matching_live_authorized_root<'a>(
+    canonical_path: &Path,
+    roots: &'a [AuthorizedScanRoot],
+) -> Option<&'a AuthorizedScanRoot> {
+    roots.iter().find(|root| {
+        path_is_within_root(canonical_path, &root.canonical_path) && authorized_root_is_live(root)
+    })
+}
+
+fn authorized_root_is_live(root: &AuthorizedScanRoot) -> bool {
+    live_path_proof(&root.source_path).is_some_and(|proof| {
+        proof.state.kind == LivePathKind::Directory
+            && proof.state.identity == root.identity
+            && paths_refer_to_same_location(&proof.canonical_path, &root.canonical_path)
+    })
+}
+
+fn live_path_proof(path: &Path) -> Option<LivePathProof> {
+    if !path_is_local_absolute(path) || path_has_unsafe_link_component(path) {
+        return None;
+    }
+    let before = stable_path_state(path)?;
+    let canonical_path = path.canonicalize().ok()?;
+    if !path_is_local_absolute(&canonical_path) || path_has_unsafe_link_component(&canonical_path) {
+        return None;
+    }
+
+    // Canonicalization crosses a mutable namespace. Restat both spellings and
+    // canonicalize the original a second time so a replacement, rename, link,
+    // or reparse-point swap cannot turn the checked object into the object
+    // later handed to File::open or the Shell icon worker.
+    let after = stable_path_state(path)?;
+    let canonical_after = path.canonicalize().ok()?;
+    let canonical_state = stable_path_state(&canonical_path)?;
+    if before != after
+        || before != canonical_state
+        || !paths_refer_to_same_location(&canonical_path, &canonical_after)
+    {
+        return None;
+    }
+    Some(LivePathProof {
+        canonical_path,
+        state: before,
+    })
+}
+
+fn stable_path_state(path: &Path) -> Option<StablePathState> {
+    let path_metadata = fs::symlink_metadata(path).ok()?;
+    let path_shape = stable_metadata_shape(&path_metadata)?;
+    let opened = open_path_without_following(path)?;
+    let opened_state = stable_opened_file_state(&opened)?;
+    (path_shape
+        == (
+            opened_state.size_bytes,
+            opened_state.modified_at,
+            opened_state.kind,
+        ))
+        .then_some(opened_state)
+}
+
+fn stable_opened_file_state(file: &fs::File) -> Option<StablePathState> {
+    let metadata = file.metadata().ok()?;
+    let (size_bytes, modified_at, kind) = stable_metadata_shape(&metadata)?;
+    Some(StablePathState {
+        identity: native_file_identity(file, &metadata)?,
+        size_bytes,
+        modified_at,
+        kind,
+    })
+}
+
+fn stable_metadata_shape(metadata: &fs::Metadata) -> Option<(u64, SystemTime, LivePathKind)> {
+    if metadata_is_link_or_reparse(metadata) {
+        return None;
+    }
+    let kind = if metadata.is_file() {
+        LivePathKind::File
+    } else if metadata.is_dir() {
+        LivePathKind::Directory
+    } else {
+        return None;
+    };
+    Some((metadata.len(), metadata.modified().ok()?, kind))
+}
+
+fn open_path_without_following(path: &Path) -> Option<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .ok()
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        fs::File::open(path).ok()
+    }
+}
+
+fn native_file_identity(file: &fs::File, metadata: &fs::Metadata) -> Option<NativeFileIdentity> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+
+        let _ = metadata;
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live Windows handle for the duration of this
+        // call, and `information` is a valid writable output structure.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
+            return None;
+        }
+        let file_index =
+            ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64;
+        (file_index != 0).then_some(NativeFileIdentity {
+            volume_serial_number: information.dwVolumeSerialNumber,
+            file_index,
+        })
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let _ = file;
+        Some(NativeFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = file;
+        Some(NativeFileIdentity {
+            created_at: metadata.created().ok()?,
+        })
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn path_has_unsafe_link_component(path: &Path) -> bool {
+    #[cfg(windows)]
+    let inspected = {
+        let display = path.to_string_lossy();
+        display
+            .strip_prefix(r"\\?\")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    #[cfg(not(windows))]
+    let inspected = path.to_path_buf();
+
+    let mut current = PathBuf::new();
+    for component in inspected.components() {
+        current.push(component.as_os_str());
+        if !current.is_absolute() {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            return true;
+        };
+        if metadata_is_link_or_reparse(&metadata) {
+            return true;
+        }
+    }
+    false
+}
+
+fn path_is_local_absolute(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+
+        let mut components = path.components();
+        let local_drive = matches!(
+            components.next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        );
+        local_drive && matches!(components.next(), Some(Component::RootDir))
+    }
+    #[cfg(not(windows))]
+    {
+        path.is_absolute()
+    }
+}
+
+pub(crate) fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    root_scope_key(left) == root_scope_key(right)
+}
+
+/// Projects a host-native path into the spelling people expect to see and
+/// paste. Authorization and persistence keep their canonical paths; only IPC
+/// display values lose Windows' internal verbatim prefix.
+pub(crate) fn renderer_display_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let display = path.to_string_lossy();
+        if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(display.as_ref())
+            .to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
 }
 
 fn decode_indexed_text(bytes: &[u8]) -> Option<String> {
@@ -3764,7 +4279,7 @@ impl IndexedEntry {
         };
         SearchResult {
             id: self.id.clone(),
-            path: self.path.clone(),
+            path: renderer_display_path(Path::new(&self.path)),
             name: self.name.clone(),
             kind: self.kind.clone(),
             pin_eligible: self.is_launcher_shortcut_eligible(),
@@ -3772,6 +4287,7 @@ impl IndexedEntry {
             score,
             metadata,
             modified_at: self.modified_at.clone(),
+            size_bytes: self.renderer_size_bytes(),
         }
     }
 }
@@ -5023,7 +5539,8 @@ impl Drop for ThreadEntryBuffer {
 /// User-visible launcher items are discovered from the operating system's
 /// application entry points rather than from a hard-coded catalog. The result
 /// carries the shortcut or application-bundle path itself, so it only opens
-/// when the frontend explicitly selects it via `open_path`.
+/// when the frontend explicitly selects its current opaque ID via
+/// `open_search_result`.
 fn collect_application_entries() -> Vec<IndexedEntry> {
     #[cfg(target_os = "windows")]
     {
@@ -5063,6 +5580,57 @@ fn windows_start_menu_roots() -> Vec<ApplicationRoot> {
         });
     }
     roots
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn application_path_is_within_roots(canonical_path: &Path, roots: &[ApplicationRoot]) -> bool {
+    roots.iter().any(|root| {
+        root.path
+            .canonicalize()
+            .ok()
+            .is_some_and(|canonical_root| path_is_within_root(canonical_path, &canonical_root))
+    })
+}
+
+fn application_path_is_within_discovery_roots(canonical_path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        application_path_is_within_roots(canonical_path, &windows_start_menu_roots())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        application_path_is_within_roots(canonical_path, &macos_application_roots())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = canonical_path;
+        false
+    }
+}
+
+fn application_discovery_root_paths() -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_start_menu_roots()
+            .into_iter()
+            .map(|root| root.path)
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos_application_roots()
+            .into_iter()
+            .map(|root| root.path)
+            .collect()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Vec::new()
+    }
 }
 
 /// Recursively reads only the two Start Menu program trees. It does not
@@ -5177,8 +5745,26 @@ fn application_is_launcher_shortcut_eligible(path: &Path) -> bool {
     }
 }
 
+fn application_is_immediate_search_open_eligible(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        is_start_menu_launch_item(path)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        is_macos_app_bundle(path)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn collect_macos_application_entries() -> Vec<IndexedEntry> {
+fn macos_application_roots() -> Vec<ApplicationRoot> {
     let mut roots = vec![
         ApplicationRoot {
             path: PathBuf::from("/System/Applications"),
@@ -5207,10 +5793,14 @@ fn collect_macos_application_entries() -> Vec<IndexedEntry> {
             metadata: "偏好设置面板 · 当前用户",
         });
     }
+    roots
+}
 
+#[cfg(target_os = "macos")]
+fn collect_macos_application_entries() -> Vec<IndexedEntry> {
     let mut applications = Vec::new();
     let mut pending = VecDeque::new();
-    for root in roots {
+    for root in macos_application_roots() {
         if root.path.is_dir() {
             pending.push_back((root.path, root.metadata, 0_usize));
         }
@@ -5420,7 +6010,7 @@ pub fn default_roots() -> Vec<PathBuf> {
 pub fn default_root_strings() -> Vec<String> {
     default_roots()
         .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|path| renderer_display_path(&path))
         .collect()
 }
 
@@ -5612,6 +6202,20 @@ mod tests {
         indexed.replace(entries);
     }
 
+    fn configure_test_roots(index: &SearchIndex, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let roots = roots
+            .iter()
+            .map(|root| root.canonicalize().expect("canonical test root"))
+            .collect::<Vec<_>>();
+        *index
+            .inner
+            .configured_roots
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            RootSelection::Custom(roots.clone());
+        roots
+    }
+
     fn result_ids(results: &[SearchResult]) -> Vec<&str> {
         results.iter().map(|result| result.id.as_str()).collect()
     }
@@ -5629,20 +6233,36 @@ mod tests {
 
     #[test]
     fn system_icon_sources_resolve_only_current_bounded_result_ids() {
+        let root = unique_test_directory("system-icon-scope");
+        let outside_root = unique_test_directory("system-icon-outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+        let source_path = root.join("iHub.exe");
+        let outside_path = outside_root.join("not-authorized.exe");
+        std::fs::write(&source_path, b"local icon source").unwrap();
+        std::fs::write(&outside_path, b"outside icon source").unwrap();
+        let source_metadata = std::fs::symlink_metadata(&source_path).unwrap();
+        let outside_metadata = std::fs::symlink_metadata(&outside_path).unwrap();
+        let source_entry = indexed_entry_from_path(&source_path, &source_metadata).unwrap();
+        let outside_entry = indexed_entry_from_path(&outside_path, &outside_metadata).unwrap();
+        let source_id = source_entry.id.clone();
+        let outside_id = outside_entry.id.clone();
         let index = SearchIndex::new();
-        let source_path = "C:/Program Files/iHub/iHub.exe";
-        let mut application = entry("iHub", source_path);
-        application.kind = "application".to_owned();
-        publish_entries_with_search_signatures(&index, vec![application]);
+        configure_test_roots(&index, std::slice::from_ref(&root));
+        publish_entries_with_search_signatures(&index, vec![source_entry, outside_entry]);
 
         let sources = index.resolve_system_icon_sources(&[
-            source_path.to_owned(),
-            "C:/not-indexed.exe".to_owned(),
+            source_id.clone(),
+            outside_id,
+            "not-current".to_owned(),
         ]);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].response_id, source_path);
-        assert_eq!(sources[0].path, PathBuf::from(source_path));
-        assert_eq!(sources[0].kind, "application");
+        assert_eq!(sources[0].response_id, source_id);
+        assert_eq!(
+            renderer_display_path(sources[0].prepared.path()),
+            renderer_display_path(&source_path.canonicalize().expect("canonical icon source"))
+        );
+        assert_eq!(sources[0].kind, "file");
 
         assert!(index
             .resolve_system_icon_sources(
@@ -5651,6 +6271,37 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
             .is_empty());
+        drop(sources);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_icon_source_rejects_a_current_remote_path_without_touching_it() {
+        let index = SearchIndex::new();
+        let remote_path = r"\\example.invalid\share\remote.exe";
+        let mut remote = entry("remote.exe", remote_path);
+        remote.id = "current-remote-result".to_owned();
+        publish_entries_with_search_signatures(&index, vec![remote]);
+
+        assert!(index
+            .resolve_system_icon_sources(&["current-remote-result".to_owned()])
+            .is_empty());
+        assert!(!path_is_local_absolute(Path::new(remote_path)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renderer_paths_hide_windows_verbatim_prefixes() {
+        assert_eq!(
+            renderer_display_path(Path::new(r"\\?\C:\Users\iHub\模型.vrm")),
+            r"C:\Users\iHub\模型.vrm"
+        );
+        assert_eq!(
+            renderer_display_path(Path::new(r"\\?\UNC\server\share\audio.flac")),
+            r"\\server\share\audio.flac"
+        );
     }
 
     fn zero_change_checkpoint() -> ntfs_usn::UsnCheckpoint {
@@ -5919,6 +6570,46 @@ mod tests {
     }
 
     #[test]
+    fn renderer_file_sizes_are_exact_optional_and_camel_case() {
+        const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+        let mut zero_file = entry("empty.txt", "C:/empty.txt");
+        zero_file.size_bytes = 0;
+        let zero_result = zero_file.to_result(1.0, &[]);
+        assert_eq!(zero_result.size_bytes, Some(0));
+        let zero_json = serde_json::to_value(&zero_result).expect("serialize zero-byte result");
+        assert_eq!(zero_json.get("sizeBytes"), Some(&serde_json::json!(0)));
+        assert!(zero_json.get("size_bytes").is_none());
+
+        let mut largest_exact_file = entry("sparse.bin", "C:/sparse.bin");
+        largest_exact_file.size_bytes = MAX_JAVASCRIPT_SAFE_INTEGER;
+        assert_eq!(
+            largest_exact_file.renderer_size_bytes(),
+            Some(MAX_JAVASCRIPT_SAFE_INTEGER)
+        );
+
+        let mut unsafe_file = entry("unsafe.bin", "C:/unsafe.bin");
+        unsafe_file.size_bytes = MAX_JAVASCRIPT_SAFE_INTEGER + 1;
+        assert_eq!(unsafe_file.renderer_size_bytes(), None);
+
+        let mut folder = entry("Folder", "C:/Folder");
+        folder.kind = "folder".to_owned();
+        folder.size_bytes = 4_096;
+        let folder_result = folder.to_result(1.0, &[]);
+        assert_eq!(folder_result.size_bytes, None);
+        let folder_json = serde_json::to_value(&folder_result).expect("serialize folder result");
+        assert!(folder_json.get("sizeBytes").is_none());
+
+        for extension in ["app", "prefPane"] {
+            let path = format!("/Applications/iHub.{extension}");
+            let mut bundle = entry("iHub", &path);
+            bundle.kind = "application".to_owned();
+            bundle.size_bytes = 4_096;
+            assert_eq!(bundle.renderer_size_bytes(), None);
+        }
+    }
+
+    #[test]
     fn ascii_candidate_signatures_preserve_fuzzy_path_unicode_and_content_results() {
         let index = SearchIndex::new();
         let mut content_entry = entry("release-notes.md", "C:/Notes/release-notes.md");
@@ -6182,6 +6873,7 @@ mod tests {
         let metadata = std::fs::symlink_metadata(&path).unwrap();
         let entry = indexed_entry_from_path(&path, &metadata).unwrap();
         let index = SearchIndex::new();
+        configure_test_roots(&index, std::slice::from_ref(&root));
         publish_entries_with_search_signatures(&index, vec![entry]);
 
         schedule_content_index_rebuild(&index.inner, 0);
@@ -6204,6 +6896,115 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["meeting.md"]
         );
+    }
+
+    #[test]
+    fn content_reader_rejects_a_file_mutated_after_open() {
+        let root = unique_test_directory("content-open-toctou");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("meeting.md");
+        std::fs::write(&path, b"authorized body").unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let indexed = indexed_entry_from_path(&path, &metadata).unwrap();
+        let candidate = ContentCandidate {
+            id: indexed.id,
+            path: PathBuf::from(indexed.path),
+            indexed_size_bytes: indexed.size_bytes,
+            indexed_modified_at: indexed.modified_at.expect("indexed modified time"),
+        };
+        let roots = authorized_scan_roots(&[root.canonicalize().unwrap()]);
+        assert_eq!(roots.len(), 1);
+
+        let content = read_indexed_content_after_open(&candidate, &roots, || {
+            std::fs::write(&path, b"replacement body with a different size")
+                .expect("mutate opened content candidate");
+        });
+
+        assert!(
+            content.is_none(),
+            "an opened file whose size/time proof changes must never publish text"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn content_reader_rejects_path_replacement_after_open_by_file_identity() {
+        let root = unique_test_directory("content-identity-toctou");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("meeting.md");
+        let replacement = root.join("replacement.md");
+        std::fs::write(&path, b"original body").unwrap();
+        std::fs::write(&replacement, b"replaced body").unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let indexed = indexed_entry_from_path(&path, &metadata).unwrap();
+        let candidate = ContentCandidate {
+            id: indexed.id,
+            path: PathBuf::from(indexed.path),
+            indexed_size_bytes: indexed.size_bytes,
+            indexed_modified_at: indexed.modified_at.expect("indexed modified time"),
+        };
+        let roots = authorized_scan_roots(&[root.canonicalize().unwrap()]);
+        let original_identity = live_path_proof(&path).unwrap().state.identity;
+
+        let content = read_indexed_content_after_open(&candidate, &roots, || {
+            std::fs::remove_file(&path).expect("unlink opened content candidate");
+            std::fs::rename(&replacement, &path).expect("replace opened content candidate");
+        });
+
+        let replacement_identity = live_path_proof(&path).unwrap().state.identity;
+        assert_ne!(replacement_identity, original_identity);
+        assert!(
+            content.is_none(),
+            "a pathname rebound to a different native file identity must never publish text"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn content_reader_rejects_a_live_candidate_outside_its_scan_roots() {
+        let authorized_root = unique_test_directory("content-authorized-root");
+        let outside_root = unique_test_directory("content-outside-root");
+        std::fs::create_dir_all(&authorized_root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+        let path = outside_root.join("private.md");
+        std::fs::write(&path, b"outside body").unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let indexed = indexed_entry_from_path(&path, &metadata).unwrap();
+        let candidate = ContentCandidate {
+            id: indexed.id,
+            path: PathBuf::from(indexed.path),
+            indexed_size_bytes: indexed.size_bytes,
+            indexed_modified_at: indexed.modified_at.expect("indexed modified time"),
+        };
+        let roots = authorized_scan_roots(&[authorized_root.canonicalize().unwrap()]);
+
+        assert!(read_indexed_content(&candidate, &roots).is_none());
+        let _ = std::fs::remove_dir_all(&authorized_root);
+        let _ = std::fs::remove_dir_all(&outside_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_reader_rejects_symlinked_candidates_even_when_the_target_is_in_scope() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_directory("content-symlink");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.md");
+        let link = root.join("linked.md");
+        std::fs::write(&target, b"target body").unwrap();
+        symlink(&target, &link).unwrap();
+        let target_metadata = std::fs::metadata(&link).unwrap();
+        let candidate = ContentCandidate {
+            id: link.to_string_lossy().into_owned(),
+            path: link,
+            indexed_size_bytes: target_metadata.len(),
+            indexed_modified_at: system_time_to_iso(target_metadata.modified().unwrap()),
+        };
+        let roots = authorized_scan_roots(&[root.canonicalize().unwrap()]);
+
+        assert!(read_indexed_content(&candidate, &roots).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -7151,7 +7952,7 @@ mod tests {
 
         assert_eq!(
             restored.status().roots,
-            vec![canonical_root.to_string_lossy().to_string()]
+            vec![renderer_display_path(&canonical_root)]
         );
         assert_eq!(
             load_persisted_roots(&roots_path),
@@ -7194,10 +7995,7 @@ mod tests {
             .set_roots(vec![root.to_string_lossy().to_string()])
             .unwrap();
 
-        assert_eq!(
-            status.roots,
-            vec![canonical_root.to_string_lossy().to_string()]
-        );
+        assert_eq!(status.roots, vec![renderer_display_path(&canonical_root)]);
         assert_eq!(
             load_persisted_roots(&storage.join(ROOTS_FILE_NAME)),
             RootSelection::Custom(vec![canonical_root])
@@ -7391,6 +8189,62 @@ mod tests {
         assert!(file_is_launcher_shortcut_eligible(Path::new(
             "C:/Projects/Notes.md"
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_windows_application_links_open_immediately_but_only_executables_can_pin() {
+        let root = unique_test_directory("immediate-start-menu-open");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut entries = Vec::new();
+        let mut expectations = Vec::new();
+        for (name, can_pin) in [
+            ("Shortcut.lnk", false),
+            ("Website.url", false),
+            ("Deployment.appref-ms", false),
+            ("Direct.exe", true),
+        ] {
+            let path = root.join(name);
+            std::fs::write(&path, b"launch item").unwrap();
+            let entry = application_entry(path.clone(), "测试开始菜单");
+            expectations.push((entry.id.clone(), path, can_pin));
+            entries.push(entry);
+        }
+
+        let index = SearchIndex::new();
+        publish_entries_with_search_signatures(&index, entries);
+
+        for (source_id, path, can_pin) in expectations {
+            let immediate = index
+                .resolve_current_search_result_source(&source_id)
+                .expect("a current application result must resolve for an immediate open");
+            let canonical = path.canonicalize().unwrap();
+            assert!(
+                application_is_immediate_search_open_eligible(&canonical),
+                "{} should retain an immediate Windows application shape",
+                path.display()
+            );
+            assert!(
+                application_path_is_within_roots(
+                    &canonical,
+                    &[ApplicationRoot {
+                        path: root.clone(),
+                        metadata: "测试开始菜单",
+                    }],
+                ),
+                "{} should remain under its canonicalized application discovery root",
+                path.display(),
+            );
+            assert_eq!(immediate.path, path);
+            assert_eq!(
+                index.resolve_launcher_shortcut_source(&source_id).is_some(),
+                can_pin,
+                "{} must keep the persistent pin policy",
+                path.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -67,6 +67,40 @@ export interface SpotlightLauncherItem {
   unavailable?: boolean;
 }
 
+/**
+ * Tracks only the application slots currently waiting on one bounded native
+ * icon request. A matching generation is cleared in `finally`, so an empty,
+ * partial, or failed host response cannot leave Spotlight permanently blank.
+ */
+export interface SpotlightNativeIconPendingBatch {
+  generation: number;
+  searchResultIds: ReadonlySet<string>;
+  launcherShortcutIds: ReadonlySet<string>;
+}
+
+export function createSpotlightNativeIconPendingBatch(
+  generation: number,
+  searchResultIds: readonly string[],
+  launcherShortcutIds: readonly string[],
+): SpotlightNativeIconPendingBatch | null {
+  const searchIds = new Set(searchResultIds.filter(Boolean));
+  const shortcutIds = new Set(launcherShortcutIds.filter(Boolean));
+  return searchIds.size || shortcutIds.size
+    ? {
+        generation,
+        searchResultIds: searchIds,
+        launcherShortcutIds: shortcutIds,
+      }
+    : null;
+}
+
+export function settleSpotlightNativeIconPendingBatch(
+  current: SpotlightNativeIconPendingBatch | null,
+  generation: number,
+): SpotlightNativeIconPendingBatch | null {
+  return current?.generation === generation ? null : current;
+}
+
 /** A bitmap explicitly pasted into the launcher's search field. */
 export interface LauncherPastedImage {
   blob: Blob;
@@ -398,9 +432,8 @@ function activeGridColumnCount() {
 }
 
 const spotlightLauncherStyles = `
-  /* uTools 7.8 launcher contract. One measured geometry serves both themes;
-     dark is the default and the operating-system light scheme overrides only
-     semantic color tokens. */
+  /* uTools 7.8 launcher contract. Keep the measured geometry, but make the
+     bright uTools palette the single, predictable visual mode. */
   .ihub-spotlight-scrim {
     appearance: none;
     background: transparent;
@@ -412,30 +445,30 @@ const spotlightLauncherStyles = `
   }
 
   .ihub-spotlight {
-    --ihub-utools-surface: #303133;
-    --ihub-utools-border: #515151;
-    --ihub-utools-text: #e6e6e6;
-    --ihub-utools-input: #ddd;
-    --ihub-utools-input-empty: #f1f2f3;
-    --ihub-utools-placeholder: #aaa;
-    --ihub-utools-title: #eee;
-    --ihub-utools-label: #f6f6f6;
-    --ihub-utools-detail: #bbb;
-    --ihub-utools-action: #ababab;
-    --ihub-utools-provider: #ccc;
-    --ihub-utools-hover: rgba(255, 255, 255, .05);
-    --ihub-utools-selected: #575757;
-    --ihub-utools-match: #f18325;
-    --ihub-utools-scroll-track: #303133;
-    --ihub-utools-scroll-thumb: #666;
-    --ihub-utools-avatar-glow-near: rgba(100, 255, 255, .8);
-    --ihub-utools-avatar-glow-far: rgba(0, 100, 255, .5);
+    --ihub-utools-surface: #f4f4f4;
+    --ihub-utools-border: #cecece;
+    --ihub-utools-text: #212121;
+    --ihub-utools-input: #4d4d4d;
+    --ihub-utools-input-empty: #333;
+    --ihub-utools-placeholder: #7a7a7a;
+    --ihub-utools-title: #101010;
+    --ihub-utools-label: #212121;
+    --ihub-utools-detail: rgba(0, 0, 0, .5);
+    --ihub-utools-action: #666;
+    --ihub-utools-provider: #666;
+    --ihub-utools-hover: rgba(0, 0, 0, .04);
+    --ihub-utools-selected: #d7d7d7;
+    --ihub-utools-match: #c96a16;
+    --ihub-utools-scroll-track: #f4f4f4;
+    --ihub-utools-scroll-thumb: #c9c9c9;
+    --ihub-utools-avatar-glow-near: rgba(100, 255, 255, .6);
+    --ihub-utools-avatar-glow-far: rgba(0, 100, 255, .3);
     background: var(--ihub-utools-surface);
     border: 1px solid var(--ihub-utools-border);
     border-radius: 0;
     box-shadow: none;
     color: var(--ihub-utools-text);
-    color-scheme: dark;
+    color-scheme: light;
     font-family: system-ui, "PingFang SC", "Helvetica Neue", "Microsoft Yahei", sans-serif;
     height: 100dvh;
     inset: 0;
@@ -1094,29 +1127,6 @@ const spotlightLauncherStyles = `
     display: none;
   }
 
-  @media (prefers-color-scheme: light) {
-    .ihub-spotlight {
-      --ihub-utools-surface: #f4f4f4;
-      --ihub-utools-border: #cecece;
-      --ihub-utools-text: #212121;
-      --ihub-utools-input: #666;
-      --ihub-utools-input-empty: #333;
-      --ihub-utools-placeholder: #7a7a7a;
-      --ihub-utools-title: #101010;
-      --ihub-utools-label: #212121;
-      --ihub-utools-detail: rgba(0, 0, 0, .5);
-      --ihub-utools-action: #666;
-      --ihub-utools-provider: #666;
-      --ihub-utools-hover: rgba(0, 0, 0, .04);
-      --ihub-utools-selected: #d7d7d7;
-      --ihub-utools-scroll-track: #f4f4f4;
-      --ihub-utools-scroll-thumb: #e2e2e2;
-      --ihub-utools-avatar-glow-near: rgba(100, 255, 255, .6);
-      --ihub-utools-avatar-glow-far: rgba(0, 100, 255, .3);
-      color-scheme: light;
-    }
-  }
-
   @media (max-width: 760px) {
     .ihub-spotlight__grid {
       grid-template-columns: repeat(7, 86px);
@@ -1278,8 +1288,8 @@ export function SpotlightLauncher({
       },
       ...(trimmedQuery ? [{
         id: "marketplace" as const,
-        label: "市场精选",
-        emptyLabel: "没有可显示的市场入口。",
+        label: "可用工具",
+        emptyLabel: "没有可显示的内置工具入口。",
         items: launcherHomePreview("marketplace", filteredMarketplaceItems),
         totalCount: filteredMarketplaceItems.length,
       }] : []),

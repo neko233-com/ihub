@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::models::ClipboardImage;
+use crate::{
+    models::ClipboardImage,
+    system_open::{LocalOpenKind, PreparedLocalOpen},
+};
 
 const HISTORY_FILE_NAME: &str = "clipboard-history-v2.json";
 const LEGACY_HISTORY_FILE_NAME: &str = "clipboard-history-v1.json";
@@ -755,11 +758,23 @@ impl ClipboardHistory {
     /// Resolves exactly one native-private file entry. The returned path is
     /// never exposed to the renderer; callers use it immediately for an
     /// explicit system open/reveal action.
+    #[cfg(test)]
     pub fn revalidated_file_entry_path(
         &self,
         id: &str,
         file_index: usize,
     ) -> Result<PathBuf, String> {
+        self.prepare_file_entry_open(id, file_index)
+            .map(|prepared| prepared.path().to_path_buf())
+    }
+
+    /// Prepares, fingerprints, and returns one clipboard entry while the same
+    /// native handle still guards the object that a caller will launch.
+    pub fn prepare_file_entry_open(
+        &self,
+        id: &str,
+        file_index: usize,
+    ) -> Result<PreparedLocalOpen, String> {
         let item = self.stored_item(id)?;
         if item.kind != ClipboardHistoryItemKind::Files {
             return Err("This clipboard history item is not a file list.".to_owned());
@@ -767,7 +782,20 @@ impl ClipboardHistory {
         let file = item.files.get(file_index).ok_or_else(|| {
             "The selected clipboard history file entry no longer exists.".to_owned()
         })?;
-        revalidate_stored_file(file)
+        let kind = match file.kind.as_str() {
+            "file" => LocalOpenKind::File,
+            "folder" => LocalOpenKind::Folder,
+            _ => return Err("The stored clipboard file entry type is invalid.".to_owned()),
+        };
+        let prepared = crate::system_open::prepare_local_open(Path::new(&file.path), Some(kind))?;
+        let current = stored_file_from_path(prepared.path()).ok_or_else(|| {
+            format!(
+                "The original clipboard item “{}” can no longer be verified.",
+                file.name
+            )
+        })?;
+        validate_stored_file_snapshot(file, &current)?;
+        Ok(prepared)
     }
 
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<ClipboardHistorySnapshot, String> {
@@ -1367,6 +1395,14 @@ fn revalidate_stored_file(file: &StoredClipboardHistoryFile) -> Result<PathBuf, 
             file.name
         )
     })?;
+    validate_stored_file_snapshot(file, &current)?;
+    Ok(canonical)
+}
+
+fn validate_stored_file_snapshot(
+    file: &StoredClipboardHistoryFile,
+    current: &StoredClipboardHistoryFile,
+) -> Result<(), String> {
     if current.path != file.path || current.name != file.name || current.kind != file.kind {
         return Err(format!(
             "The original clipboard item “{}” changed location or type.",
@@ -1382,7 +1418,7 @@ fn revalidate_stored_file(file: &StoredClipboardHistoryFile) -> Result<PathBuf, 
             file.name
         ));
     }
-    Ok(canonical)
+    Ok(())
 }
 
 fn safe_image_file_name(file_name: &str) -> Result<(), String> {
@@ -1490,6 +1526,8 @@ mod tests {
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use crate::system_open::LocalOpenKind;
 
     use super::{
         stored_files_from_paths, ClipboardHistory, ClipboardHistoryItemKind, ClipboardPollSample,
@@ -1862,7 +1900,20 @@ mod tests {
         assert!(!public_json.contains("private-file-content"));
         let public_path = file.to_string_lossy();
         assert!(!public_json.contains(public_path.as_ref()));
-        assert!(history.revalidated_file_entry_path(&item.id, 0).is_ok());
+        assert_eq!(
+            history
+                .prepare_file_entry_open(&item.id, 0)
+                .expect("file target")
+                .kind(),
+            LocalOpenKind::File
+        );
+        assert_eq!(
+            history
+                .prepare_file_entry_open(&item.id, 1)
+                .expect("folder target")
+                .kind(),
+            LocalOpenKind::Folder
+        );
 
         fs::write(&file, "changed").expect("mutate source file");
         assert!(history.revalidated_file_entry_path(&item.id, 0).is_err());

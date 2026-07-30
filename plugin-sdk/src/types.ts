@@ -386,7 +386,8 @@ export interface PluginClipboard {
 
 export interface PluginShell {
   openExternal(url: string): Promise<void>;
-  openPath(path: string): Promise<void>;
+  /** Opens only the exact live folder selected through `filesystem.selectDirectory`. */
+  openPath(grantId: string): Promise<void>;
 }
 
 /** An opaque host-owned lease that temporarily suspends launcher auto-hide. */
@@ -654,8 +655,8 @@ export interface IHubUToolsCompatibilityApi {
   showNotification(body: string): void;
   /** Requires `shell.openExternal` in plugin.json. */
   shellOpenExternal(url: string): void;
-  /** Requires `shell.openPath` in plugin.json. */
-  shellOpenPath(path: string): void;
+  /** Requires `shell.openPath` and an opaque folder grant from the native picker. */
+  shellOpenPath(grantId: string): void;
   /** Requires `cursorColor` and the trusted iHub confirmation overlay. */
   screenColorPick(callback: (color: CursorColorSample) => void): void;
   getWindowType(): "main";

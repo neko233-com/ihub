@@ -49,23 +49,17 @@ describe("SpotlightLauncher installed-uTools visual contract", () => {
     expect(mainWindow).not.toHaveProperty("theme");
   });
 
-  it("declares the measured light and dark launcher tokens", () => {
+  it("declares the measured bright launcher tokens", () => {
     const styles = launcherStyles();
-    const lightMediaIndex = styles.indexOf("@media (prefers-color-scheme: light)");
 
-    expect(styles).toMatch(/--ihub-utools-surface:\s*#303133/i);
-    expect(styles).toMatch(/--ihub-utools-border:\s*#515151/i);
-    expect(styles).toMatch(/--ihub-utools-text:\s*#e6e6e6/i);
-    expect(styles).toMatch(/--ihub-utools-hover:\s*rgba\(255,\s*255,\s*255,\s*0?\.05\)/i);
-    expect(styles).toMatch(/--ihub-utools-selected:\s*#575757/i);
-
-    expect(lightMediaIndex).toBeGreaterThan(-1);
-    const lightStyles = styles.slice(lightMediaIndex);
-    expect(lightStyles).toMatch(/--ihub-utools-surface:\s*#f4f4f4/i);
-    expect(lightStyles).toMatch(/--ihub-utools-border:\s*#cecece/i);
-    expect(lightStyles).toMatch(/--ihub-utools-text:\s*#212121/i);
-    expect(lightStyles).toMatch(/--ihub-utools-hover:\s*rgba\(0,\s*0,\s*0,\s*0?\.04\)/i);
-    expect(lightStyles).toMatch(/--ihub-utools-selected:\s*#d7d7d7/i);
+    expect(styles).toMatch(/--ihub-utools-surface:\s*#f4f4f4/i);
+    expect(styles).toMatch(/--ihub-utools-border:\s*#cecece/i);
+    expect(styles).toMatch(/--ihub-utools-text:\s*#212121/i);
+    expect(styles).toMatch(/--ihub-utools-hover:\s*rgba\(0,\s*0,\s*0,\s*0?\.04\)/i);
+    expect(styles).toMatch(/--ihub-utools-selected:\s*#d7d7d7/i);
+    expect(styles).toMatch(/color-scheme:\s*light/i);
+    expect(styles).not.toMatch(/--ihub-utools-surface:\s*#303133/i);
+    expect(styles).not.toMatch(/@media \(prefers-color-scheme: light\)/i);
   });
 
   it("keeps hover feedback distinct from keyboard selection", () => {

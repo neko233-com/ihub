@@ -96,7 +96,6 @@ pub fn query_json(input: String, selector: String) -> JsonQueryResult {
     query_json_text(&input, &selector)
 }
 
-#[tauri::command]
 pub fn preview_batch_rename(
     directory: String,
     find: String,
@@ -209,7 +208,6 @@ pub fn preview_batch_rename(
     Ok(preview)
 }
 
-#[tauri::command]
 pub fn apply_batch_rename(
     directory: String,
     items: Vec<BatchRenameItem>,

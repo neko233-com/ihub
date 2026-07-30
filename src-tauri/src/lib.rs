@@ -22,6 +22,7 @@ mod plugin_shortcuts;
 mod plugins;
 mod project_template;
 mod super_panel;
+pub mod system_open;
 mod window_management;
 
 pub use app::run;

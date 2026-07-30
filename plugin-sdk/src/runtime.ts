@@ -340,7 +340,7 @@ class Runtime implements Disposable {
       },
       shell: {
         openExternal: (url) => this.call("shell.openExternal", { url }),
-        openPath: (path) => this.call("shell.openPath", { path }),
+        openPath: (grantId) => this.call("shell.openPath", { grantId }),
       },
       screenCapture: {
         acquireFocusLease: () => this.call<ScreenCaptureFocusLease>("screenCapture.acquireFocusLease"),

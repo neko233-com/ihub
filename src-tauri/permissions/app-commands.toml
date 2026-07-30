@@ -4,7 +4,7 @@
 
 [[permission]]
 identifier = "main-app-commands"
-description = "All first-party iHub commands used by the trusted main launcher window."
+description = "First-party iHub commands for the trusted main launcher; local-directory mutations remain bound to short-lived native folder grants."
 commands.allow = [
   "get_index_status",
   "search_entries",
@@ -12,7 +12,8 @@ commands.allow = [
   "index_default_roots",
   "set_index_roots",
   "get_default_roots",
-  "open_path",
+  "open_granted_path",
+  "open_search_result",
   "list_launcher_shortcuts",
   "pin_launcher_shortcut_from_search",
   "open_launcher_shortcut",

@@ -182,7 +182,7 @@ test("bootstrap installs only the bounded uTools and Rubick compatibility projec
     assert.equal(fakeWindow.utools.copyText("copy"), true);
     fakeWindow.utools.showNotification("done");
     fakeWindow.utools.shellOpenExternal("https://example.com");
-    fakeWindow.utools.shellOpenPath("user-selected.txt");
+    fakeWindow.utools.shellOpenPath("folder-native-selection");
     let sampledColor;
     fakeWindow.utools.screenColorPick((color) => {
       sampledColor = color;
@@ -205,7 +205,10 @@ test("bootstrap installs only the bounded uTools and Rubick compatibility projec
     assert.ok(calls.some((request) => request.method === "clipboard.writeText"));
     assert.ok(calls.some((request) => request.method === "notifications.show"));
     assert.ok(calls.some((request) => request.method === "shell.openExternal"));
-    assert.ok(calls.some((request) => request.method === "shell.openPath"));
+    assert.deepEqual(
+      calls.find((request) => request.method === "shell.openPath")?.params,
+      { grantId: "folder-native-selection" },
+    );
     assert.ok(calls.some((request) => request.method === "cursorColor.sampleOnce"));
     assert.deepEqual(errors, []);
 

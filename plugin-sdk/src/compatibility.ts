@@ -97,11 +97,11 @@ export function installUToolsCompatibility(
       }
       schedule(context.shell.openExternal(url));
     },
-    shellOpenPath(path: string): void {
-      if (typeof path !== "string") {
+    shellOpenPath(grantId: string): void {
+      if (typeof grantId !== "string") {
         return;
       }
-      schedule(context.shell.openPath(path));
+      schedule(context.shell.openPath(grantId));
     },
     screenColorPick(callback: (color: { hex: string; rgb: string }) => void): void {
       if (typeof callback !== "function") {

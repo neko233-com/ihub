@@ -74,6 +74,10 @@ pub struct SearchResult {
     pub score: f64,
     pub metadata: String,
     pub modified_at: Option<String>,
+    /// Index-time file length. Directories and values outside JavaScript's
+    /// exact integer range are intentionally omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 /// A filesystem object explicitly copied by the user and read from the
@@ -86,6 +90,9 @@ pub struct ClipboardFile {
     pub path: String,
     pub name: String,
     pub kind: String,
+    /// Short-lived, host-owned authorization for opening this exact live
+    /// filesystem object. It is not a path and cannot be forged by a WebView.
+    pub open_id: String,
 }
 
 /// A bounded bitmap explicitly pasted by the user. The data URL exists only
@@ -423,6 +430,10 @@ pub struct PluginProjectCreated {
     pub project_path: String,
     pub plugin_id: String,
     pub next_steps: Vec<String>,
+    /// Present only when the first-party host has issued a short-lived open
+    /// authorization for the newly created project directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

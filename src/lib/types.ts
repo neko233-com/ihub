@@ -12,6 +12,10 @@ export interface SearchResult {
   score: number;
   metadata?: string;
   modifiedAt?: string;
+  /** Index-time file length, present only when it is exact in JavaScript. */
+  sizeBytes?: number;
+  /** Short-lived host authorization for an explicitly pasted filesystem item. */
+  openId?: string;
   pluginId?: string;
   commandId?: string;
   /** A host-owned expression carried only into the built-in calculator UI. */
@@ -72,6 +76,13 @@ export interface IndexStatus {
   /** Bounded text-index progress or privacy/status detail. */
   contentMessage?: string;
   message?: string;
+}
+
+/** One exact folder chosen through the native host picker. The path is for
+ * display only; filesystem commands must send the short-lived openId. */
+export interface SelectedDirectoryGrant {
+  path: string;
+  openId: string;
 }
 
 export interface PluginInfo {
@@ -441,6 +452,8 @@ export interface ClipboardFile {
   path: string;
   name: string;
   kind: "file" | "folder";
+  /** Opaque, bounded native authorization; never a renderer-selected path. */
+  openId: string;
 }
 
 /** A bounded PNG returned only for an explicit launcher image paste. */

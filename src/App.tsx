@@ -40,9 +40,12 @@ import {
 } from "react";
 import {
   builtinPinnedItems,
+  createSpotlightNativeIconPendingBatch,
   defaultMarketplaceItems,
+  settleSpotlightNativeIconPendingBatch,
   SpotlightLauncher,
   type LauncherPastedImage,
+  type SpotlightNativeIconPendingBatch,
   type SpotlightLauncherItem,
 } from "./components/SpotlightLauncher";
 import {
@@ -400,6 +403,7 @@ function filterPreviewResults(query: string) {
 function spotlightItemForSearchResult(
   result: SearchResult,
   nativeIconSrc?: string,
+  awaitingNativeIcon = false,
 ): SpotlightLauncherItem {
   const normalizedNativeIconSrc = safeNativeIconSrc(nativeIconSrc);
   const isCalculatorResult = typeof result.calculatorExpression === "string";
@@ -458,7 +462,10 @@ function spotlightItemForSearchResult(
     badge,
     icon,
     iconSrc: normalizedNativeIconSrc,
-    nativeIconPending: result.kind === "application" && !normalizedNativeIconSrc,
+    nativeIconPending:
+      result.kind === "application"
+      && !normalizedNativeIconSrc
+      && awaitingNativeIcon,
     tone,
     canPinFromSearch: result.pinEligible === true,
     pinnedShortcutId: result.pinnedShortcutId,
@@ -508,6 +515,7 @@ function shortcutIdFromLauncherItemId(itemId: string): string | null {
 function spotlightItemForLauncherShortcut(
   shortcut: LauncherShortcutView,
   nativeIconSrc?: string,
+  awaitingNativeIcon = false,
 ): SpotlightLauncherItem {
   const unavailable = shortcut.status !== "ready";
   const item = spotlightItemForSearchResult({
@@ -518,7 +526,7 @@ function spotlightItemForLauncherShortcut(
     metadata: !unavailable
       ? shortcut.metadata
       : [shortcut.metadata, "目标当前不可用"].filter(Boolean).join(" · "),
-  }, nativeIconSrc);
+  }, nativeIconSrc, awaitingNativeIcon);
   return {
     ...item,
     badge: unavailable ? "不可用" : item.badge,
@@ -1022,6 +1030,8 @@ export function App() {
     isDesktop()
       ? {}
       : mergeNativeIconCache({}, browserPreviewSystemIcons, mockResults));
+  const [searchIconPendingBatch, setSearchIconPendingBatch] =
+    useState<SpotlightNativeIconPendingBatch | null>(null);
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
@@ -1062,6 +1072,8 @@ export function App() {
   );
   const [recentApplications, setRecentApplications] = useState<SearchResult[]>(readStoredRecentApplications);
   const [homeIconCache, setHomeIconCache] = useState<SystemIconMap>({});
+  const [homeIconPendingBatch, setHomeIconPendingBatch] =
+    useState<SpotlightNativeIconPendingBatch | null>(null);
   const [showRecent, setShowRecent] = useState(() => readStoredBoolean(launcherShowRecentStorageKey, true));
   const [spaceActivates, setSpaceActivates] = useState(() => readStoredBoolean(launcherSpaceActivatesStorageKey, true));
   const [autoInstallSignedUpdates, setAutoInstallSignedUpdates] = useState(() =>
@@ -1242,11 +1254,14 @@ export function App() {
       return;
     }
     const window = getCurrentWindow();
-    const height = surface === "plugin-center"
+    const localSearchOpen = surface === "toolbox" && toolboxTab === "search";
+    const height = localSearchOpen
       ? 602
-      : surface === "launcher" || surface === "hidden"
-        ? 380
-        : 504;
+      : surface === "plugin-center"
+        ? 602
+        : surface === "launcher" || surface === "hidden"
+          ? 380
+          : 504;
     // Reopening is centered by the native resident shell. While the surface
     // remains visible, resizing a secondary panel must preserve a user's
     // deliberate drag position instead of snapping it back to the monitor.
@@ -1269,7 +1284,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [surface]);
+  }, [surface, toolboxTab]);
 
   const contentResults = useMemo(
     () => findLauncherContentResults(query, quickNotes, clipboardHistory),
@@ -1299,8 +1314,9 @@ export function App() {
       nativeIconForResult(searchIconCache, result)
         ?? nativeIconForResult(homeIconCache, result)
         ?? pluginSearchResultArtworkSrc(result, plugins),
+      searchIconPendingBatch?.searchResultIds.has(result.id) === true,
     )),
-    [homeIconCache, plugins, results, searchIconCache],
+    [homeIconCache, plugins, results, searchIconCache, searchIconPendingBatch],
   );
   const pastedFileItems = useMemo<SpotlightLauncherItem[]>(
     () => pastedFileResults.map((result) => spotlightItemForSearchResult(result)),
@@ -1343,8 +1359,9 @@ export function App() {
       spotlightItemForLauncherShortcut(
         shortcut,
         nativeIconForLauncherShortcut(homeIconCache, shortcut.id),
+        homeIconPendingBatch?.launcherShortcutIds.has(shortcut.id) === true,
       )),
-    [homeIconCache, launcherShortcuts],
+    [homeIconCache, homeIconPendingBatch, launcherShortcuts],
   );
   const recentApplicationItems = useMemo(
     () => recentApplications.map((result) =>
@@ -1352,8 +1369,9 @@ export function App() {
         result,
         nativeIconForResult(homeIconCache, result)
           ?? nativeIconForResult(searchIconCache, result),
+        homeIconPendingBatch?.searchResultIds.has(result.id) === true,
       )),
-    [homeIconCache, recentApplications, searchIconCache],
+    [homeIconCache, homeIconPendingBatch, recentApplications, searchIconCache],
   );
   const pluginCommandItems = useMemo(() => plugins.flatMap((plugin) => {
       if (plugin.enabled === false || !Array.isArray(plugin.commands)) {
@@ -1774,17 +1792,18 @@ export function App() {
       const files = await command<ClipboardFile[]>("read_clipboard_files");
       const seen = new Set<string>();
       const next = files.flatMap((file, index) => {
-        if (!file.path || !file.name || seen.has(file.path)) {
+        if (!file.path || !file.name || !file.openId || seen.has(file.path)) {
           return [];
         }
         seen.add(file.path);
         return [{
-          id: `clipboard-file:${file.path}`,
+          id: `clipboard-file:${file.openId}`,
           name: file.name,
           path: file.path,
           kind: file.kind === "folder" ? "folder" as const : "file" as const,
           score: 1_000 - index,
           metadata: `已粘贴 · ${file.path}`,
+          openId: file.openId,
         }];
       });
       if (!next.length) {
@@ -2271,17 +2290,18 @@ export function App() {
     if (context.kind === "files") {
       const seen = new Set<string>();
       const next = context.files.flatMap((file, index) => {
-        if (!file.path || !file.name || seen.has(file.path)) {
+        if (!file.path || !file.name || !file.openId || seen.has(file.path)) {
           return [];
         }
         seen.add(file.path);
         return [{
-          id: `super-panel-file:${file.path}`,
+          id: `super-panel-file:${file.openId}`,
           name: file.name,
           path: file.path,
           kind: file.kind === "folder" ? "folder" as const : "file" as const,
           score: 1_000 - index,
           metadata: `超级面板 · ${file.path}`,
+          openId: file.openId,
         }];
       });
       setPastedImage(null);
@@ -2381,6 +2401,7 @@ export function App() {
     if (!isDesktop()) {
       if (requestId === searchRequestRef.current) {
         setSearchResults(filterPreviewResults(nextQuery));
+        setSearchIconPendingBatch(null);
         setQuickNotes(nextQuickNotes);
         // Do not invent clipboard history in the browser preview.
         setClipboardHistory(null);
@@ -2406,6 +2427,13 @@ export function App() {
     if (searchResponse.status === "fulfilled") {
       const nativeResults = searchResponse.value;
       setSearchResults(nativeResults);
+      setSearchIconPendingBatch(createSpotlightNativeIconPendingBatch(
+        requestId,
+        nativeResults
+          .filter((result) => result.kind === "application")
+          .map((result) => result.id),
+        [],
+      ));
       const searchResultIds = nativeResults
         .filter((result) => (
           result.kind === "application"
@@ -2423,11 +2451,17 @@ export function App() {
             }
           })
           .catch(() => {
-            // A transparent reserved slot is preferable to a false app glyph.
+            // `finally` settles the matching batch so missing artwork falls
+            // back to a neutral app glyph without scheduling another request.
+          })
+          .finally(() => {
+            setSearchIconPendingBatch((current) =>
+              settleSpotlightNativeIconPendingBatch(current, requestId));
           });
       }
     } else {
       setSearchResults([]);
+      setSearchIconPendingBatch(null);
       showToast(
         searchResponse.reason instanceof Error
           ? searchResponse.reason.message
@@ -2452,6 +2486,7 @@ export function App() {
     }
     if (surface !== "launcher" || !normalizedQuery) {
       setSearchResults([]);
+      setSearchIconPendingBatch(null);
       setPluginSearchResults([]);
       setRequestedSearchRuntimePluginIds((current) => (current.length === 0 ? current : []));
       if (!isDesktop()) {
@@ -2499,6 +2534,7 @@ export function App() {
     const generation = homeIconRequestRef.current + 1;
     homeIconRequestRef.current = generation;
     if (!isDesktop()) {
+      setHomeIconPendingBatch(null);
       return;
     }
     const searchResultIds = recentApplications
@@ -2507,6 +2543,19 @@ export function App() {
     const launcherShortcutIds = launcherShortcuts
       .filter((shortcut) => shortcut.status === "ready")
       .map((shortcut) => shortcut.id);
+    setHomeIconPendingBatch(createSpotlightNativeIconPendingBatch(
+      generation,
+      recentApplications
+        .filter((result) => result.kind === "application")
+        .map((result) => result.id),
+      launcherShortcuts
+        .filter(
+          (shortcut) =>
+            shortcut.status === "ready"
+            && shortcut.kind === "application",
+        )
+        .map((shortcut) => shortcut.id),
+    ));
     if (searchResultIds.length === 0 && launcherShortcutIds.length === 0) {
       return;
     }
@@ -2525,6 +2574,10 @@ export function App() {
       })
       .catch(() => {
         // Keep already-rendered artwork stable when an optional refresh fails.
+      })
+      .finally(() => {
+        setHomeIconPendingBatch((current) =>
+          settleSpotlightNativeIconPendingBatch(current, generation));
       });
   }, [launcherShortcuts, recentApplications]);
 
@@ -2711,14 +2764,20 @@ export function App() {
     }
   };
 
-  const setIndexRoots = async (roots: string[]) => {
+  const setIndexRoots = async (
+    roots: string[],
+    directoryOpenIds: string[],
+  ) => {
     if (!isDesktop()) {
       throw new Error("浏览器预览不会修改本地索引目录。");
     }
 
     setIsRefreshing(true);
     try {
-      const nextStatus = await command<IndexStatus>("set_index_roots", { roots });
+      const nextStatus = await command<IndexStatus>("set_index_roots", {
+        roots,
+        directoryOpenIds,
+      });
       setStatus(nextStatus);
     } finally {
       setIsRefreshing(false);
@@ -3377,7 +3436,16 @@ export function App() {
 
     try {
       if ((result.kind === "file" || result.kind === "folder" || result.kind === "application") && result.path) {
-        await command<void>("open_path", { path: result.path });
+        if (result.openId) {
+          await command<void>("open_granted_path", { openId: result.openId });
+        } else {
+          // Native index results are opened by opaque/current ID. Rust looks
+          // the target up again and revalidates its canonical path, object
+          // type, active root, and application discovery boundary.
+          await command<void>("open_search_result", {
+            searchResultId: result.id,
+          });
+        }
         recordSuccessfulAction();
         await dismissLauncher();
       } else if (
@@ -3562,10 +3630,20 @@ export function App() {
       showToast("该上下文操作当前没有可用的内置工具入口。");
       return;
     }
+    const renameDirectory = action.target.renameDirectory;
+    const renameSource = renameDirectory === undefined
+      ? undefined
+      : pastedFileResults.find((result) =>
+          result.kind === "folder"
+          && result.path === renameDirectory
+          && Boolean(result.openId));
     const launchContext = action.target.jsonInput !== undefined
       ? { jsonInput: action.target.jsonInput }
-      : action.target.renameDirectory !== undefined
-        ? { renameDirectory: action.target.renameDirectory }
+      : renameDirectory !== undefined
+        ? {
+            renameDirectory,
+            renameDirectoryOpenId: renameSource?.openId,
+          }
         : undefined;
     openToolbox(tab, launchContext);
   };
@@ -4148,8 +4226,10 @@ export function App() {
             isRefreshingIndex={isRefreshing}
             launchContext={toolboxLaunchContext}
             onClose={returnToLauncher}
+            onOpenSearchResult={activateResult}
             onRefreshIndex={() => void refreshIndex()}
             onSetIndexRoots={setIndexRoots}
+            onStartWindowDrag={startLauncherWindowDrag}
             onTabChange={setToolboxTab}
             onToast={showToast}
             onPluginsChanged={setPlugins}
