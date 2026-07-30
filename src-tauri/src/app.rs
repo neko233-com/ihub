@@ -6496,6 +6496,20 @@ mod tests {
     }
 
     #[test]
+    fn tray_setup_explicitly_uses_the_packaged_window_icon() {
+        // The runtime cannot create a Windows App instance in this unit-test
+        // harness, so preserve the source-level icon contract together with
+        // cargo's type check.
+        let source = include_str!("app.rs");
+        let setup = source
+            .split("fn setup_tray(app: &tauri::App)")
+            .nth(1)
+            .expect("tray setup function");
+        assert!(setup.contains(".default_window_icon()"));
+        assert!(setup.contains(".icon(tray_icon)"));
+    }
+
+    #[test]
     fn normalizes_known_host_targets_for_the_official_catalog() {
         assert_eq!(
             normalized_host_target("windows", "x86_64"),
