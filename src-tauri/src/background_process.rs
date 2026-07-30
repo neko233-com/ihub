@@ -22,7 +22,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// On macOS and Linux this is intentionally a plain `Command`: iHub never
 /// delegates background work through a terminal-host application.
 pub(crate) fn background_command<S: AsRef<OsStr>>(program: S) -> Command {
+    #[cfg(windows)]
     let mut command = Command::new(program);
+    #[cfg(not(windows))]
+    let command = Command::new(program);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command

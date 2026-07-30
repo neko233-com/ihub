@@ -1084,10 +1084,12 @@ mod macos_backend {
     };
 
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    #[cfg(test)]
+    use image::GenericImageView;
     use image::{
         codecs::png::PngEncoder,
         imageops::{self, FilterType},
-        ColorType, GenericImageView, ImageEncoder, ImageFormat, ImageReader, RgbaImage,
+        ColorType, ImageEncoder, ImageFormat, ImageReader, RgbaImage,
     };
 
     use super::{ICON_EDGE, MAX_ICON_DATA_URL_BYTES};

@@ -671,11 +671,13 @@ fn verified_regular_file_length_or_missing(path: &Path) -> io::Result<Option<u64
 mod tests {
     use std::{
         fs::{self, OpenOptions},
-        io::{self, Write},
+        io::Write,
         sync::Arc,
         thread,
     };
 
+    #[cfg(windows)]
+    use std::io;
     #[cfg(windows)]
     use std::os::windows::fs::symlink_dir;
     use uuid::Uuid;
