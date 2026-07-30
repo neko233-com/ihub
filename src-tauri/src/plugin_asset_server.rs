@@ -948,7 +948,7 @@ mod tests {
         // fragments into an artificial slow client. Only a peer-close race is
         // retried; every response must still be a complete 200 before the CSP
         // assertion can pass.
-        for attempt in 1..=REQUEST_ATTEMPTS {
+        'request: for attempt in 1..=REQUEST_ATTEMPTS {
             let mut stream =
                 TcpStream::connect((host, port)).expect("asset listener should accept a request");
             stream
@@ -962,15 +962,51 @@ mod tests {
                 panic!("test request attempt {attempt} should be written: {error}");
             }
             let mut response = Vec::new();
-            if let Err(error) = stream.read_to_end(&mut response) {
-                if peer_closed(&error) && response.is_empty() && attempt < REQUEST_ATTEMPTS {
-                    thread::sleep(super::ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
-                panic!(
-                    "asset response attempt {attempt} should be readable after {} response bytes: {error}",
-                    response.len()
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let remaining = super::MAX_HTTP_HEADER_BYTES - response.len();
+                assert!(
+                    remaining > 0,
+                    "asset response headers should fit within the server header limit"
                 );
+                let read_limit = remaining.min(buffer.len());
+                match stream.read(&mut buffer[..read_limit]) {
+                    Ok(0) if response.is_empty() && attempt < REQUEST_ATTEMPTS => {
+                        thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                        continue 'request;
+                    }
+                    Ok(0) => {
+                        panic!(
+                            "asset response attempt {attempt} ended after {} bytes before a complete header",
+                            response.len()
+                        );
+                    }
+                    Ok(read) => {
+                        response.extend_from_slice(&buffer[..read]);
+                        if let Some(header_end) = response
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|index| index + 4)
+                        {
+                            response.truncate(header_end);
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if peer_closed(&error)
+                            && response.is_empty()
+                            && attempt < REQUEST_ATTEMPTS =>
+                    {
+                        thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                        continue 'request;
+                    }
+                    Err(error) => {
+                        panic!(
+                            "asset response attempt {attempt} should be readable after {} header bytes: {error}",
+                            response.len()
+                        );
+                    }
+                }
             }
             let response = String::from_utf8(response).expect("asset response should be UTF-8");
             assert!(
