@@ -159,7 +159,10 @@ impl IconCache {
 
 struct IconRequest {
     id: u64,
+    /// Canonical, handle-derived identity used for metadata and cache keys.
     path: PathBuf,
+    /// Platform parsing name used only by Shell/AppKit artwork APIs.
+    shell_path: PathBuf,
     kind: String,
     reply: SyncSender<Option<String>>,
     /// Keeps the exact authorized filesystem object bound until the worker
@@ -234,7 +237,7 @@ impl NativeIconService {
 
     #[cfg(test)]
     pub(crate) fn try_request(&self, path: &Path, kind: &str) -> Option<NativeIconPending> {
-        self.try_request_inner(path.to_path_buf(), kind, None)
+        self.try_request_inner(path.to_path_buf(), path.to_path_buf(), kind, None)
     }
 
     pub(crate) fn try_request_prepared(
@@ -242,17 +245,28 @@ impl NativeIconService {
         prepared: PreparedLocalOpen,
         kind: &str,
     ) -> Option<NativeIconPending> {
-        let path = prepared.path().to_path_buf();
-        self.try_request_inner(path, kind, Some(prepared))
+        // GetFinalPathNameByHandleW intentionally gives PreparedLocalOpen a
+        // verbatim `\\?\` path. Windows Shell parsing APIs are inconsistent
+        // with that spelling for ordinary files and folders, even though
+        // CreateFileW accepts it. Keep the proof handle in the request, but
+        // project the exact same guarded object back to a Shell-compatible
+        // DOS path before extracting its artwork.
+        let canonical_path = prepared.path().to_path_buf();
+        let shell_path = shell_compatible_request_path(prepared.path());
+        self.try_request_inner(canonical_path, shell_path, kind, Some(prepared))
     }
 
     fn try_request_inner(
         &self,
         path: PathBuf,
+        shell_path: PathBuf,
         kind: &str,
         prepared: Option<PreparedLocalOpen>,
     ) -> Option<NativeIconPending> {
-        if !valid_icon_input(&path, kind) || self.worker_state.stalled.load(Ordering::Acquire) {
+        if !valid_icon_input(&path, kind)
+            || !valid_icon_input(&shell_path, kind)
+            || self.worker_state.stalled.load(Ordering::Acquire)
+        {
             return None;
         }
         let sender = self.sender.as_ref()?;
@@ -265,6 +279,7 @@ impl NativeIconService {
         let request = IconRequest {
             id,
             path,
+            shell_path,
             kind: kind.to_owned(),
             reply,
             _prepared: prepared,
@@ -288,6 +303,38 @@ impl Default for NativeIconService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn shell_compatible_request_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::{
+            ffi::OsString,
+            os::windows::ffi::{OsStrExt, OsStringExt},
+        };
+
+        const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        const VERBATIM_UNC_PREFIX: [u16; 8] = [
+            b'\\' as u16,
+            b'\\' as u16,
+            b'?' as u16,
+            b'\\' as u16,
+            b'U' as u16,
+            b'N' as u16,
+            b'C' as u16,
+            b'\\' as u16,
+        ];
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.starts_with(&VERBATIM_UNC_PREFIX) {
+            let mut projected = vec![b'\\' as u16, b'\\' as u16];
+            projected.extend_from_slice(&wide[VERBATIM_UNC_PREFIX.len()..]);
+            return PathBuf::from(OsString::from_wide(&projected));
+        }
+        if wide.starts_with(&VERBATIM_PREFIX) {
+            return PathBuf::from(OsString::from_wide(&wide[VERBATIM_PREFIX.len()..]));
+        }
+    }
+    path.to_path_buf()
 }
 
 fn valid_icon_input(path: &Path, kind: &str) -> bool {
@@ -369,7 +416,7 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
         return;
     };
     let mut cache = IconCache::bounded();
-    while let Ok(request) = receiver.recv() {
+    while let Ok(mut request) = receiver.recv() {
         let metadata = fs::symlink_metadata(&request.path).ok();
         let key = cache_key(
             request.path.clone(),
@@ -390,12 +437,16 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
                 }
             });
             let extracted = valid_type
-                .then(|| windows_backend::icon_data_url(&request.path))
+                .then(|| windows_backend::icon_data_url(&request.shell_path))
                 .flatten();
             cache.insert(key, extracted.clone(), now);
             extracted
         };
 
+        // The extraction and cache publication are complete. Release the
+        // strict filesystem guards before waking the caller so a successful
+        // response also means normal rename/delete operations can resume.
+        drop(request._prepared.take());
         worker_state
             .last_completed_id
             .store(request.id, Ordering::Release);
@@ -407,7 +458,7 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
 #[cfg(target_os = "macos")]
 fn macos_icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) {
     let mut cache = IconCache::bounded();
-    while let Ok(request) = receiver.recv() {
+    while let Ok(mut request) = receiver.recv() {
         let metadata = fs::metadata(&request.path).ok();
         let key = cache_key(
             request.path.clone(),
@@ -423,12 +474,13 @@ fn macos_icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerSt
             // until their native Finder icon contract is implemented.
             let extracted = (request.kind == "application"
                 && metadata.as_ref().is_some_and(fs::Metadata::is_dir))
-            .then(|| macos_backend::application_icon_data_url(&request.path))
+            .then(|| macos_backend::application_icon_data_url(&request.shell_path))
             .flatten();
             cache.insert(key, extracted.clone(), now);
             extracted
         };
 
+        drop(request._prepared.take());
         worker_state
             .last_completed_id
             .store(request.id, Ordering::Release);
@@ -1907,5 +1959,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sta_service_extracts_icons_from_production_prepared_paths() {
+        let shell_item = std::env::current_exe().expect("current executable");
+        let prepared = crate::system_open::prepare_local_open(
+            &shell_item,
+            Some(crate::system_open::LocalOpenKind::File),
+        )
+        .expect("prepare current executable");
+        assert!(
+            prepared.path().to_string_lossy().starts_with(r"\\?\"),
+            "the regression test requires the production verbatim path spelling"
+        );
+        let projected = shell_compatible_request_path(prepared.path());
+        assert!(
+            !projected.to_string_lossy().starts_with(r"\\?\"),
+            "Shell must receive a normal DOS path while the native guard remains live"
+        );
+
+        let service = NativeIconService::new();
+        let icon = service
+            .try_request_prepared(prepared, "application")
+            .expect("STA worker accepted prepared request")
+            .wait_timeout(Duration::from_secs(5))
+            .expect("Windows Shell icon from a prepared executable");
+        assert!(icon.starts_with("data:image/png;base64,"));
+        assert!(icon.len() <= MAX_ICON_DATA_URL_BYTES);
+
+        let folder = std::env::temp_dir().join(format!(
+            "ihub-prepared-folder-icon-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&folder).expect("create prepared folder fixture");
+        let ordinary_file = folder.join("prepared-shell-icon.txt");
+        std::fs::write(&ordinary_file, b"iHub native icon regression fixture")
+            .expect("create prepared ordinary-file fixture");
+        let prepared_file = crate::system_open::prepare_local_open(
+            &ordinary_file,
+            Some(crate::system_open::LocalOpenKind::File),
+        )
+        .expect("prepare ordinary file");
+        let file_icon = service
+            .try_request_prepared(prepared_file, "file")
+            .expect("STA worker accepted prepared file request")
+            .wait_timeout(Duration::from_secs(5))
+            .expect("Windows Shell icon from a prepared ordinary file");
+        assert!(file_icon.starts_with("data:image/png;base64,"));
+        std::fs::remove_file(&ordinary_file).expect("cleanup prepared ordinary-file fixture");
+
+        let prepared_folder = crate::system_open::prepare_local_open(
+            &folder,
+            Some(crate::system_open::LocalOpenKind::Folder),
+        )
+        .expect("prepare folder");
+        let folder_icon = service
+            .try_request_prepared(prepared_folder, "folder")
+            .expect("STA worker accepted prepared folder request")
+            .wait_timeout(Duration::from_secs(5))
+            .expect("Windows Shell icon from a prepared folder");
+        assert!(folder_icon.starts_with("data:image/png;base64,"));
+        std::fs::remove_dir(&folder).expect("cleanup prepared folder fixture");
     }
 }
