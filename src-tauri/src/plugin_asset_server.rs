@@ -942,6 +942,9 @@ mod tests {
         for attempt in 1..=REQUEST_ATTEMPTS {
             let mut stream =
                 TcpStream::connect((host, port)).expect("asset listener should accept a request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test request should have a read timeout");
             if let Err(error) = stream.write_all(request.as_bytes()) {
                 let peer_closed = matches!(
                     error.kind(),
@@ -955,9 +958,6 @@ mod tests {
                 }
                 panic!("test request attempt {attempt} should be written: {error}");
             }
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("test request should have a read timeout");
             let mut response = Vec::new();
             stream
                 .read_to_end(&mut response)
