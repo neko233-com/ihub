@@ -923,25 +923,55 @@ mod tests {
     }
 
     fn fetch_lease_response(lease: &super::PluginFrontendLease) -> String {
+        const REQUEST_ATTEMPTS: usize = 3;
+
         let url = url::Url::parse(&lease.url).expect("lease URL should parse");
         let host = url.host_str().expect("lease URL should have a host");
         let port = url.port().expect("lease URL should have a port");
-        let mut stream =
-            TcpStream::connect((host, port)).expect("asset listener should accept a request");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("test request should have a read timeout");
-        write!(
-            stream,
+        let request = format!(
             "GET {} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n",
             url.path()
-        )
-        .expect("test request should be written");
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .expect("asset response should be readable");
-        String::from_utf8(response).expect("asset response should be UTF-8")
+        );
+
+        // The production server deliberately drops local clients that stall
+        // while sending headers. Build the whole request before connecting and
+        // write one buffer so a loaded CI runner cannot turn `write_fmt`
+        // fragments into an artificial slow client. Only a peer-close race is
+        // retried; every response must still be a complete 200 before the CSP
+        // assertion can pass.
+        for attempt in 1..=REQUEST_ATTEMPTS {
+            let mut stream =
+                TcpStream::connect((host, port)).expect("asset listener should accept a request");
+            if let Err(error) = stream.write_all(request.as_bytes()) {
+                let peer_closed = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                );
+                if peer_closed && attempt < REQUEST_ATTEMPTS {
+                    thread::sleep(super::ACCEPT_POLL_INTERVAL);
+                    continue;
+                }
+                panic!("test request attempt {attempt} should be written: {error}");
+            }
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test request should have a read timeout");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .expect("asset response should be readable");
+            let response = String::from_utf8(response).expect("asset response should be UTF-8");
+            assert!(
+                response.starts_with("HTTP/1.1 200 OK\r\n"),
+                "asset response should be successful, got {}",
+                response.lines().next().unwrap_or("an empty response")
+            );
+            return response;
+        }
+
+        unreachable!("the final request attempt either returns or fails explicitly");
     }
 
     #[test]
