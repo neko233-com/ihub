@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { command, isDesktop } from "../lib/desktop";
+import { displayLocalPath } from "../lib/path-display";
 import {
   createLongPressWindowDragController,
   type LongPressWindowDragController,
@@ -167,18 +168,6 @@ const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   converter: Binary,
 };
 
-const leaderboardSections: ReadonlyArray<{
-  category: PluginCatalogCategory;
-  icon: typeof Puzzle;
-  label: string;
-  tone: "warm" | "yellow" | "blue" | "mint";
-}> = [
-  { category: "productivity", icon: Check, label: "必备插件应用", tone: "warm" },
-  { category: "media", icon: Sparkles, label: "最受欢迎", tone: "yellow" },
-  { category: "developer", icon: Download, label: "最新上架", tone: "blue" },
-  { category: "text", icon: RefreshCw, label: "最近更新", tone: "mint" },
-];
-
 const pluginCenterStyles = `
   .plugin-center__scrim {
     background: rgba(0, 0, 0, .38);
@@ -244,8 +233,7 @@ const pluginCenterStyles = `
   .plugin-center__market-action,
   .plugin-center__developer-link,
   .plugin-center__profile-link,
-  .plugin-center__hub-mark,
-  .plugin-center__feature-action {
+  .plugin-center__hub-mark {
     align-items: center;
     display: flex;
   }
@@ -335,8 +323,7 @@ const pluginCenterStyles = `
 
   .plugin-center__action-menu-trigger,
   .plugin-center__close,
-  .plugin-center__import-submit,
-  .plugin-center__featured-refresh {
+  .plugin-center__import-submit {
     align-items: center;
     border: 0;
     cursor: pointer;
@@ -566,8 +553,7 @@ const pluginCenterStyles = `
   .plugin-center__installed-item.is-disabled .plugin-center__installed-icon { filter: saturate(.38); opacity: .68; }
 
   .plugin-center__installed-icon,
-  .plugin-center__market-icon,
-  .plugin-center__feature-icon {
+  .plugin-center__market-icon {
     align-items: center;
     display: inline-flex;
     flex: 0 0 auto;
@@ -737,86 +723,9 @@ const pluginCenterStyles = `
   .plugin-center__catalog-filter.is-active small { color: #515151; }
   .plugin-center__catalog-filter:focus-visible { outline: 2px solid rgba(63, 81, 181, .48); outline-offset: 1px; }
 
-  .plugin-center__feature-row { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 20px; }
-
-  .plugin-center__feature {
-    background: #fff;
-    border: 0;
-    border-radius: 7px;
-    color: #212121;
-    height: 200px;
-    overflow: hidden;
-    padding: 12px;
-    position: relative;
-  }
-
-  .plugin-center__feature.is-developer {
-    background-image: linear-gradient(90deg, rgba(6, 17, 34, .94) 0%, rgba(6, 17, 34, .8) 54%, rgba(6, 17, 34, .16) 100%), url('/market-developer-banner.png');
-    background-position: center;
-    background-size: cover;
-    color: #f4f8ff;
-  }
-  .plugin-center__feature.is-monthly {
-    background-image: linear-gradient(90deg, rgba(248, 246, 242, .1) 0%, rgba(248, 246, 242, 0) 70%), url('/market-cat-banner.png');
-    background-color: #e8e6e1;
-    background-position: center, right center;
-    background-repeat: no-repeat;
-    background-size: cover, auto 100%;
-    color: #353535;
-  }
-  .plugin-center__feature.is-palette { background: #fff; color: #212121; }
-  .plugin-center__feature.is-search { background: #fff; color: #212121; }
-  .plugin-center__feature:not(.is-developer):not(.is-monthly):not(.is-palette):not(.is-search) { background: #fff; color: #212121; }
-
-  .plugin-center__feature::after {
-    display: none;
-  }
-
-  .plugin-center__feature-copy { max-width: 62%; position: relative; z-index: 1; }
-  .plugin-center__feature-kicker { border: 1px solid currentColor; border-radius: 9px; color: currentColor; display: inline-flex; font-size: 11px; font-weight: 500; letter-spacing: 0; margin: 0; padding: 1px 6px; }
-  .plugin-center__feature h3 { font-size: 14px; font-weight: 500; letter-spacing: 0; line-height: 1.2; margin: 8px 0 5px; }
-  .plugin-center__feature p { color: #737373; font-size: 12px; line-height: 1.5; margin: 0; }
-  .plugin-center__feature.is-developer p { color: #cfe2ff; text-shadow: 0 1px 9px rgba(0, 0, 0, .4); }
-
-  .plugin-center__feature-icon {
-    background: rgba(63, 81, 181, .08);
-    border: 1px solid rgba(63, 81, 181, .18);
-    border-radius: 9px;
-    color: #3f51b5;
-    height: 32px;
-    position: absolute;
-    right: 11px;
-    top: 38px;
-    transform: rotate(-7deg);
-    width: 32px;
-    z-index: 1;
-  }
-
-  .plugin-center__feature-action {
-    background: rgba(0, 0, 0, .08);
-    border: 0;
-    border-radius: 11px;
-    bottom: 14px;
-    color: currentColor;
-    cursor: pointer;
-    font-size: 11px;
-    font-weight: 500;
-    gap: 3px;
-    left: 12px;
-    min-height: 22px;
-    padding: 0 9px;
-    position: absolute;
-    z-index: 1;
-  }
-
-  .plugin-center__feature-action:hover { background: rgba(0, 0, 0, .16); }
-  .plugin-center__feature-action:disabled { cursor: not-allowed; opacity: .56; }
-
   .plugin-center__featured-heading { align-items: center; display: flex; justify-content: space-between; margin-bottom: 12px; }
   .plugin-center__featured-heading h3 { color: #212121; font-size: 14px; font-weight: 600; letter-spacing: 0; margin: 0; }
   .plugin-center__featured-actions { align-items: center; display: flex; gap: 9px; }
-  .plugin-center__featured-refresh { background: transparent; color: #505050; font-size: 12px; gap: 5px; padding: 3px 8px; }
-  .plugin-center__featured-refresh:hover { background: rgba(0, 0, 0, .04); color: #3f51b5; }
   .plugin-center__catalog-toggle {
     align-items: center;
     background: transparent;
@@ -868,17 +777,6 @@ const pluginCenterStyles = `
   .plugin-center__market-item.is-disabled .plugin-center__market-copy small { color: #bba77c; }
   .plugin-center__market-item.is-platform-unsupported .plugin-center__market-icon { filter: saturate(.52); opacity: .76; }
   .plugin-center__market-item.is-platform-unsupported .plugin-center__market-copy small { color: #d0ae79; }
-
-  .plugin-center__leaderboard { margin-top: 20px; }
-  .plugin-center__leaderboard h3 { color: #212121; font-size: 14px; font-weight: 600; letter-spacing: 0; margin: 0 0 12px; }
-  .plugin-center__leaderboard-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .plugin-center__leaderboard-card { align-items: center; background: #fff; border: 0; border-radius: 7px; color: #212121; cursor: pointer; display: flex; font: inherit; font-size: 13px; font-weight: 500; gap: 10px; min-height: 52px; padding: 10px 18px; text-align: left; }
-  .plugin-center__leaderboard-card:hover { background: rgba(0, 0, 0, .04); }
-  .plugin-center__leaderboard-icon { align-items: center; border-radius: 50%; color: #363636; display: inline-flex; height: 28px; justify-content: center; width: 28px; }
-  .plugin-center__leaderboard-icon.is-warm { background: #f5ddc3; }
-  .plugin-center__leaderboard-icon.is-yellow { background: #fff1ba; }
-  .plugin-center__leaderboard-icon.is-blue { background: #c5e9fb; }
-  .plugin-center__leaderboard-icon.is-mint { background: #c5f0d0; }
 
   .plugin-center__market-icon {
     background: #4b555c;
@@ -1107,7 +1005,7 @@ const pluginCenterStyles = `
     .plugin-center__context-command { align-items: stretch; grid-template-columns: 1fr; }
     .plugin-center__context-command-select { width: 100%; }
     .plugin-center__context-scope { margin-left: 0; }
-    .plugin-center__feature-row, .plugin-center__market-grid { grid-template-columns: 1fr; }
+    .plugin-center__market-grid { grid-template-columns: 1fr; }
     .plugin-center__market-item:nth-child(odd) { border-right: 0; }
     .plugin-center__market-item:nth-last-child(-n + 2) { border-bottom: 1px solid #e6e6e6; }
     .plugin-center__market-item:last-child { border-bottom: 0; }
@@ -1181,50 +1079,6 @@ function catalogForInstalledPlugin(plugin: PluginInfo): PluginCatalogEntry {
 
 function entrySearchText(entry: PluginCatalogEntry) {
   return [entry.name, entry.id, entry.description, ...entry.tags].join(" ").toLocaleLowerCase();
-}
-
-function featureClass(entry: PluginCatalogEntry) {
-  // The built-in developer workspace and its installable official plugin are
-  // the same featured workflow. Styling only the built-in ID left the actual
-  // marketplace card on its dark image with dark text.
-  if (entry.builtinTool === "developer" || entry.id === "ihub-plugin-developer-tools") {
-    return "is-developer";
-  }
-  if (entry.id === "ihub-plugin-colorpick") {
-    return "is-monthly";
-  }
-  if (entry.icon === "palette") {
-    return "is-palette";
-  }
-  if (entry.icon === "search") {
-    return "is-search";
-  }
-  return "";
-}
-
-function featurePresentation(entry: PluginCatalogEntry) {
-  if (entry.builtinTool === "developer") {
-    return {
-      kicker: "推荐",
-      title: "开发者工具",
-      description: "从 TypeScript 前端到 Rust worker，在本机创建、链接并调试插件。",
-      action: "立即创建",
-    };
-  }
-  if (entry.id === "ihub-plugin-colorpick") {
-    return {
-      kicker: "推荐",
-      title: "本月精选",
-      description: "离线取色、JSON、二维码与录屏等高频工具，全部在本机完成。",
-      action: "查看精选",
-    };
-  }
-  return {
-    kicker: entry.distribution === "builtin" ? "内置工具" : "官方精选",
-    title: entry.name,
-    description: entry.description,
-    action: entry.distribution === "builtin" ? "立即打开" : "查看插件",
-  };
 }
 
 function statusLabel(
@@ -1308,9 +1162,12 @@ function unsupportedPlatformNotice(entry: PluginCatalogEntry, hostTarget?: strin
 function lifecycleTitle(plugin: PluginInfo) {
   if (plugin.isDevelopmentLink) {
     if (plugin.localLinkStatus === "stale") {
+      const localLinkError = displayLocalPath(
+        plugin.localLinkError ?? "本地开发源码已不可用。",
+      );
       return plugin.usesManagedSnapshotFallback
-        ? `${plugin.localLinkError ?? "本地开发源码已不可用。"}\n解除链接后会继续使用当前受管快照，且不会删除原源码目录。`
-        : `${plugin.localLinkError ?? "本地开发源码已不可用，且没有可运行的受管快照。"}\n解除链接后即可重新安装；iHub 不会删除原源码目录。`;
+        ? `${localLinkError}\n解除链接后会继续使用当前受管快照，且不会删除原源码目录。`
+        : `${localLinkError}\n解除链接后即可重新安装；iHub 不会删除原源码目录。`;
     }
     return plugin.enabled === false
       ? "本地开发链接已停用；项目目录仍保留在原位置。"
@@ -1480,7 +1337,6 @@ export function PluginCenter({
     () => inspectGitHubImportSource(importSource),
     [importSource],
   );
-  const [featureOffset, setFeatureOffset] = useState(0);
   const [isAllCatalogExpanded, setIsAllCatalogExpanded] = useState(false);
   const [selectedInstalledId, setSelectedInstalledId] = useState<string | null>(null);
   const [updateChecks, setUpdateChecks] = useState<Record<string, PluginUpdateDisplay>>({});
@@ -1904,33 +1760,6 @@ export function PluginCenter({
     return pluginCatalogItemsForView(selectedItems, catalogViewMode);
   }, [catalogViewMode, filter, selectedInstalledId, visibleItems]);
 
-  const featuredEntries = useMemo<PluginCatalogEntry[]>(() => {
-    const byId = new Map(pluginCatalog.map((entry) => [entry.id, entry]));
-    const curatedIds = [
-      "ihub-plugin-developer-tools",
-      "ihub-plugin-colorpick",
-      "ihub-local-search",
-      "ihub-plugin-json-tools",
-      "ihub-plugin-base-converter",
-      "ihub-plugin-batch-rename",
-      "ihub-plugin-quick-note",
-      "ihub-plugin-clipboard",
-      "ihub-screen-recorder",
-    ];
-    return curatedIds
-      .map((id) => byId.get(id))
-      .filter((entry): entry is PluginCatalogEntry => Boolean(entry));
-  }, []);
-  const featurePair = useMemo(() => {
-    if (!featuredEntries.length) {
-      return [];
-    }
-    return [
-      featuredEntries[featureOffset % featuredEntries.length],
-      featuredEntries[(featureOffset + 1) % featuredEntries.length],
-    ];
-  }, [featureOffset, featuredEntries]);
-
   const handleBuiltin = (entry: PluginCatalogEntry) => {
     if (!entry.builtinTool) {
       return;
@@ -2176,13 +2005,13 @@ export function PluginCenter({
       return;
     }
     const staleDetail = plugin.localLinkStatus === "stale"
-      ? `\n\n${plugin.localLinkError ?? "该源码链接已失效。"}`
+      ? `\n\n${displayLocalPath(plugin.localLinkError ?? "该源码链接已失效。")}`
       : "";
     const fallbackDetail = plugin.usesManagedSnapshotFallback
       ? "\n解除后仍会保留并继续使用当前受管快照。"
       : "\n解除后可重新安装该插件。";
     const approved = window.confirm(
-      `解除“${plugin.name}”的本地开发链接？${staleDetail}\n\n仅移除 iHub 的链接记录；不会删除或改动：\n${plugin.localPath ?? "开发项目目录"}${fallbackDetail}`,
+      `解除“${plugin.name}”的本地开发链接？${staleDetail}\n\n仅移除 iHub 的链接记录；不会删除或改动：\n${displayLocalPath(plugin.localPath ?? "开发项目目录")}${fallbackDetail}`,
     );
     if (!approved) {
       onToast("已取消解除本地链接。");
@@ -2241,7 +2070,9 @@ export function PluginCenter({
     const { entry, installed } = item;
     if (installed) {
       if (installed.localLinkStatus === "stale" && !installed.usesManagedSnapshotFallback) {
-        onToast(installed.localLinkError ?? `${entry.name} 的本地源码链接已失效；解除链接后即可重新安装。`);
+        onToast(displayLocalPath(
+          installed.localLinkError ?? `${entry.name} 的本地源码链接已失效；解除链接后即可重新安装。`,
+        ));
         return;
       }
       if (installed.enabled === false) {
@@ -2731,71 +2562,15 @@ export function PluginCenter({
                 <div className="plugin-center__market-header">
                   <div>
                     <h2>{filter === "installed" ? "已安装" : query ? "搜索结果" : "插件应用市场"}</h2>
-                    <p>{filter === "installed" ? "管理当前设备上可用的插件。" : "官方精选与内置工具，GitHub 插件也可直接导入。"}</p>
+                    <p>{filter === "installed" ? "管理当前设备上可用的插件。" : "浏览、筛选内置工具与可安装插件，或直接导入 GitHub 项目。"}</p>
                   </div>
                   <span className="plugin-center__market-count">{visibleItems.length} 项</span>
                 </div>
 
-                {isCatalogPreview && featurePair.length ? (
-                  <section aria-label="推荐插件">
-                    <div className="plugin-center__feature-row">
-                      {featurePair.map((entry) => {
-                        const installed = matchingPlugins.get(entry.id);
-                        const presentation = featurePresentation(entry);
-                        const platformNotice = installed ? null : unsupportedPlatformNotice(entry, hostTarget);
-                        const workspaceAvailable = Boolean(
-                          entry.workspaceProject
-                          && desktopRuntime
-                          && workspaceProjectsLoaded
-                          && !workspaceProbeError
-                          && officialWorkspaceProjects[entry.id]?.available,
-                        );
-                        const workspaceChecking = Boolean(
-                          entry.workspaceProject
-                          && desktopRuntime
-                          && !workspaceProjectsLoaded,
-                        );
-                        return (
-                          <article className={`plugin-center__feature ${featureClass(entry)}`} key={entry.id}>
-                            <div className="plugin-center__feature-copy">
-                              <p className="plugin-center__feature-kicker">{presentation.kicker}</p>
-                              <h3>{presentation.title}</h3>
-                              <p>{presentation.description}</p>
-                            </div>
-                            <button
-                              className="plugin-center__feature-action"
-                              disabled={Boolean(platformNotice) || workspaceChecking}
-                              onClick={() => handleEntryAction({ entry, installed })}
-                              title={platformNotice?.title}
-                              type="button"
-                            >
-                              {platformNotice
-                                ? "当前设备不支持"
-                                : installed
-                                  ? "已安装"
-                                  : workspaceChecking
-                                    ? "检查本机源码"
-                                    : workspaceAvailable
-                                      ? "链接源码"
-                                      : presentation.action}
-                              {!platformNotice ? <ChevronRight size={9} /> : null}
-                            </button>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  </section>
-                ) : null}
-
                 {isDefaultMarketplace ? (
                   <div className="plugin-center__featured-heading">
-                    <h3>{isCatalogPreview ? "精选" : "全部插件"}</h3>
+                    <h3>{isCatalogPreview ? "插件列表" : "全部插件"}</h3>
                     <div className="plugin-center__featured-actions">
-                      {isCatalogPreview ? (
-                        <button className="plugin-center__featured-refresh" onClick={() => setFeatureOffset((value) => value + 1)} type="button">
-                          <Sparkles size={9} /> 换一批
-                        </button>
-                      ) : null}
                       <button
                         aria-controls="plugin-center-catalog-items"
                         aria-expanded={!isCatalogPreview}
@@ -2815,7 +2590,7 @@ export function PluginCenter({
 
                 {displayedItems.length ? (
                   <section
-                    aria-label={isCatalogPreview ? "精选插件列表" : "插件列表"}
+                    aria-label="插件列表"
                     className="plugin-center__market-grid"
                     id="plugin-center-catalog-items"
                   >
@@ -2920,7 +2695,7 @@ export function PluginCenter({
                           <div className="plugin-center__market-copy">
                             <strong>{item.entry.name}</strong>
                             <p>{item.entry.description}</p>
-                            <small title={[plugin?.localLinkError, statusTitle].filter(Boolean).join("\n\n") || undefined}>
+                            <small title={[plugin?.localLinkError ? displayLocalPath(plugin.localLinkError) : null, statusTitle].filter(Boolean).join("\n\n") || undefined}>
                               {platformNotice?.status ?? statusLabel(item.entry, plugin, workspaceProject, desktopRuntime, workspaceProjectsLoaded)}{item.entry.native && !installed ? " · 原生能力" : ""}{sourceLockLabel(plugin) ? ` · 锁定 ${sourceLockLabel(plugin)}` : ""}{automaticDiscovery ? " · 官方仅自动检查" : ""}{updateLabel ? ` · ${updateLabel}` : ""}
                               {plugin?.searchProviders?.length ? ` · 已声明 ${plugin.searchProviders.length} 个搜索提供器` : ""}
                               {shortcutStatus ? ` · ${shortcutStatus.label}` : ""}
@@ -3015,7 +2790,7 @@ export function PluginCenter({
                               className={"plugin-center__market-action" + (installed && !canOpenInstalled ? " is-installed" : "") + (pending ? " is-pending" : "") + (platformNotice ? " is-platform-unsupported" : "")}
                               disabled={Boolean(platformNotice) || pending || workspaceChecking || workspaceRequiredUnavailable || isLinkingWorkspace || (installed && !canOpenInstalled) || isInstalling || isLifecycleBusy || lifecycleBusyElsewhere}
                               onClick={() => handleEntryAction(item)}
-                              title={plugin?.localLinkError ?? platformNotice?.title ?? workspaceStatusTitle ?? (pending ? "该官方插件已备案，尚未发布可安装产物。" : undefined)}
+                              title={(plugin?.localLinkError ? displayLocalPath(plugin.localLinkError) : undefined) ?? platformNotice?.title ?? workspaceStatusTitle ?? (pending ? "该官方插件已备案，尚未发布可安装产物。" : undefined)}
                               type="button"
                             >
                               {isInstalling || isLinkingWorkspace || workspaceChecking
@@ -3042,32 +2817,6 @@ export function PluginCenter({
                     换一个关键词，或使用右上角的 GitHub 导入安装你信任的项目。
                   </div>
                 )}
-                {isCatalogPreview ? (
-                  <section aria-label="排行榜" className="plugin-center__leaderboard">
-                    <h3>排行榜</h3>
-                    <div className="plugin-center__leaderboard-grid">
-                      {leaderboardSections.map((section) => {
-                        const Icon = section.icon;
-                        return (
-                          <button
-                            className="plugin-center__leaderboard-card"
-                            key={section.label}
-                            onClick={() => {
-                              setFilter(section.category);
-                              setQuery("");
-                              setSelectedInstalledId(null);
-                              setIsAllCatalogExpanded(false);
-                            }}
-                            type="button"
-                          >
-                            <span className={`plugin-center__leaderboard-icon is-${section.tone}`}><Icon size={14} /></span>
-                            {section.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-                ) : null}
                   </>
                 )}
                 </div>

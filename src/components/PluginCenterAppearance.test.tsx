@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { WINDOW_DRAG_LONG_PRESS_MS } from "../lib/window-drag-long-press";
@@ -100,5 +101,26 @@ describe("PluginCenter uTools visual contract", () => {
       /\.plugin-center__topbar \{[^}]*grid-template-columns: 220px minmax\(127px, 1fr\) auto;[^}]*min-height: 48px;/s,
     );
     expect(markup).not.toContain(".plugin-center__drag-zone::before");
+  });
+
+  it("keeps marketplace promotional surfaces and banner assets removed", () => {
+    const source = readFileSync(
+      new URL("./PluginCenter.tsx", import.meta.url),
+      "utf8",
+    );
+    const catBanner = new URL("../../public/market-cat-banner.png", import.meta.url);
+    const developerBanner = new URL(
+      "../../public/market-developer-banner.png",
+      import.meta.url,
+    );
+
+    expect(source).not.toContain("plugin-center__feature-");
+    expect(source).not.toContain("plugin-center__leaderboard");
+    expect(renderCenter()).not.toContain('aria-label="推荐插件"');
+    expect(renderCenter()).not.toContain('aria-label="排行榜"');
+    expect(source).not.toContain("market-cat-banner");
+    expect(source).not.toContain("market-developer-banner");
+    expect(existsSync(catBanner)).toBe(false);
+    expect(existsSync(developerBanner)).toBe(false);
   });
 });
