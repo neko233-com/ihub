@@ -1,6 +1,7 @@
 # JavaScript / Vite
 node_modules/
 dist/
+/.pnpm-store/
 
 # The public catalog plugins are independent Git repositories checked out at
 # these fixed development paths. The parent repository owns only
