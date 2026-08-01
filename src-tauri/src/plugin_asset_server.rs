@@ -1258,6 +1258,22 @@ const utools = Object.freeze({{
       .catch((error) => console.error("iHub compatibility image copy failed", error));
     return true;
   }},
+  copyFile(value) {{
+    const paths = typeof value === "string" ? [value] : value;
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 16) return false;
+    const encoder = new TextEncoder();
+    let totalBytes = 0;
+    const normalized = [];
+    for (const path of paths) {{
+      if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return false;
+      totalBytes += encoder.encode(path).byteLength;
+      if (totalBytes > 8192 || normalized.includes(path)) return false;
+      normalized.push(path);
+    }}
+    void call("compatibility.utools.clipboard.writeFiles", {{ paths: normalized }})
+      .catch((error) => console.error("iHub compatibility file copy failed", error));
+    return true;
+  }},
   showNotification(body, clickFeatureCode) {{
     if (typeof body !== "string") return;
     const trimmedBody = body.trim();
@@ -1462,6 +1478,8 @@ mod tests {
         assert!(script.contains("pngDataUrlForCopyImage"));
         assert!(script.contains("value instanceof Uint8Array"));
         assert!(script.contains("compatibility.utools.clipboard.writeImage"));
+        assert!(script.contains("copyFile"));
+        assert!(script.contains("compatibility.utools.clipboard.writeFiles"));
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("compatibility.utools.notification.show"));

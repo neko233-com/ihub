@@ -26,6 +26,7 @@ const pluginHostMethods = new Set([
   "commands.unregister",
   "compatibility.utools.clipboard.writeText",
   "compatibility.utools.clipboard.writeImage",
+  "compatibility.utools.clipboard.writeFiles",
   "compatibility.utools.dbStorage.remove",
   "compatibility.utools.dbStorage.set",
   "compatibility.utools.dbStorage.snapshot",

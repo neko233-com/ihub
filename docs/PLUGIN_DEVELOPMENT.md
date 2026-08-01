@@ -188,6 +188,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `copyImage(value)` 当前接受 PNG Data URL 或 PNG `Uint8Array`，同步 `true` 仍只表示本地校验通过并已排队。压缩数据最多 4 MiB，宿主在写入剪贴板前重新验证 PNG 签名、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。字符串文件路径暂不接受，后续只能通过系统选择器签发的路径授权接入，不能直接开放任意本机路径。
 
+`copyFile(value)` 接受一个路径或最多 16 个路径，且只允许当前可见活动 surface 调用。确认前只检查路径字符串的绝对形式、去重、控制字符和 8 KiB 总上限，不访问文件系统，因此拒绝确认不会成为文件存在性探针；原生警告框会逐项展示插件提交的原始目标。用户明确允许后，宿主才解析对象，并拒绝网络/设备命名空间、符号链接、缺失项和非普通文件/文件夹；通过校验的对象会保持身份防护直到写入系统剪贴板。该确认与通知、系统提示音共用每插件每 10 秒 5 次的可见提醒限流，避免插件连续弹窗。
+
 `getPath(name)` 在插件页面任何脚本执行前同步提供官方列出的 `home/appData/userData/temp/exe/desktop/documents/downloads/music/pictures/videos/logs` 投影；得到路径字符串本身不会授予读取、写入或启动该路径的能力。`getNativeId()` 返回宿主为每个插件分别生成并持久化的随机标识，同一插件重启后稳定，但不同插件无法用它关联同一台设备，也不读取硬件序列号。
 
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。

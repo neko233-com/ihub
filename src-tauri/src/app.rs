@@ -1325,6 +1325,9 @@ const MAX_PASTED_IMAGE_RAW_BYTES: usize = 48 * 1024 * 1024;
 const MAX_PASTED_IMAGE_PNG_BYTES: usize = 12 * 1024 * 1024;
 const MAX_UTOOLS_COPY_IMAGE_PNG_BYTES: usize = 4 * 1024 * 1024;
 const UTOOLS_COPY_IMAGE_DATA_URL_PREFIX: &str = "data:image/png;base64,";
+const MAX_UTOOLS_COPY_FILE_ITEMS: usize = 16;
+const MAX_UTOOLS_COPY_FILE_PATH_CHARS: usize = 1_024;
+const MAX_UTOOLS_COPY_FILE_PATH_BYTES: usize = 8 * 1024;
 /// Launcher context is intentionally shorter than a filesystem picker grant:
 /// it exists only to bridge one already-chosen action while a frontend loads.
 const LAUNCHER_CONTEXT_TTL: Duration = Duration::from_secs(60);
@@ -3416,6 +3419,79 @@ fn clipboard_image_from_rgba(image: arboard::ImageData<'static>) -> Result<Clipb
     })
 }
 
+fn validate_utools_copy_file_paths(params: &Value) -> Result<Vec<PathBuf>, String> {
+    let Some(object) = params.as_object() else {
+        return Err("uTools copyFile parameters must be an object.".to_owned());
+    };
+    if object.len() != 1 || !object.contains_key("paths") {
+        return Err("uTools copyFile accepts only one paths parameter.".to_owned());
+    }
+    let paths = object
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "uTools copyFile paths must be an array.".to_owned())?;
+    if paths.is_empty() || paths.len() > MAX_UTOOLS_COPY_FILE_ITEMS {
+        return Err(format!(
+            "uTools copyFile accepts between 1 and {MAX_UTOOLS_COPY_FILE_ITEMS} paths."
+        ));
+    }
+
+    let mut total_bytes = 0_usize;
+    let mut seen = HashSet::new();
+    let mut validated = Vec::with_capacity(paths.len());
+    for value in paths {
+        let Some(path) = value.as_str() else {
+            return Err("Every uTools copyFile path must be a string.".to_owned());
+        };
+        total_bytes = total_bytes
+            .checked_add(path.len())
+            .ok_or_else(|| "uTools copyFile path bytes overflow.".to_owned())?;
+        if path.is_empty()
+            || path.chars().count() > MAX_UTOOLS_COPY_FILE_PATH_CHARS
+            || total_bytes > MAX_UTOOLS_COPY_FILE_PATH_BYTES
+            || path.chars().any(char::is_control)
+        {
+            return Err(
+                "A uTools copyFile path is empty, too long, or contains controls.".to_owned(),
+            );
+        }
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err("Every uTools copyFile path must be absolute.".to_owned());
+        }
+        if !seen.insert(path.clone()) {
+            return Err("uTools copyFile does not accept duplicate paths.".to_owned());
+        }
+        validated.push(path);
+    }
+    Ok(validated)
+}
+
+fn confirm_utools_copy_files(
+    app: &AppHandle,
+    host: &PluginHostState,
+    plugin_id: &str,
+    paths: &[PathBuf],
+) -> bool {
+    let paths = paths
+        .iter()
+        .map(|path| format!("• {}", renderer_display_path(path)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut dialog = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("iHub · {plugin_id} 请求复制文件"))
+        .set_description(format!(
+            "插件想把以下本机项目放入系统剪贴板：\n\n{paths}\n\n是否允许？"
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _dialog_guard = NativeDialogGuard::begin(host);
+    dialog.show() == rfd::MessageDialogResult::Yes
+}
+
 fn decode_utools_clipboard_png_data_url(
     data_url: &str,
 ) -> Result<arboard::ImageData<'static>, String> {
@@ -4222,6 +4298,38 @@ fn plugin_host_call_for_active_lease(
             .map_err(|error| format!("Could not write the PNG to the system clipboard: {error}"))?;
             Ok(json!({ "written": true, "width": width, "height": height }))
         }
+        "compatibility.utools.clipboard.writeFiles" => {
+            let requested_paths = validate_utools_copy_file_paths(&request.params)?;
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Interactive uTools alerts are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            if !confirm_utools_copy_files(app, &state.host, &request.plugin_id, &requested_paths) {
+                return Ok(json!({ "written": false, "cancelled": true }));
+            }
+
+            let mut seen = HashSet::new();
+            let mut prepared = Vec::with_capacity(requested_paths.len());
+            for path in requested_paths {
+                let item = crate::system_open::prepare_local_open(&path, None)?;
+                if !seen.insert(item.path().to_owned()) {
+                    return Err("uTools copyFile targets resolve to the same local object."
+                        .to_owned());
+                }
+                prepared.push(item);
+            }
+            let paths = prepared
+                .iter()
+                .map(|item| item.path().to_owned())
+                .collect::<Vec<_>>();
+            crate::clipboard_access::with_clipboard(|clipboard| {
+                clipboard.set().file_list(&paths)
+            })
+            .map_err(|error| format!("Could not write files to the system clipboard: {error}"))?;
+            Ok(json!({ "written": true, "count": paths.len() }))
+        }
         "clipboard.history.snapshot" => serde_json::to_value(plugin_clipboard_history_snapshot(
             &state.clipboard_history,
         ))
@@ -4407,11 +4515,12 @@ fn ensure_plugin_host_request_is_allowed(
         );
     }
     if (request.method.starts_with("compatibility.utools.window.")
-        || request.method.starts_with("compatibility.utools.input."))
+        || request.method.starts_with("compatibility.utools.input.")
+        || request.method == "compatibility.utools.clipboard.writeFiles")
         && !request.surface
     {
         return Err(
-            "uTools window and input compatibility methods require the plugin's visible active surface."
+            "uTools window, input, and confirmed file-copy methods require the plugin's visible active surface."
                 .to_owned(),
         );
     }
@@ -7445,8 +7554,8 @@ mod tests {
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
         utools_dynamic_feature_command_id, utools_dynamic_feature_key, validate_external_url,
         validate_local_search_selection, validate_plugin_clipboard_text,
-        validate_system_icon_request, validate_utools_dynamic_feature,
-        validate_utools_expend_height, validate_utools_input_text,
+        validate_system_icon_request, validate_utools_copy_file_paths,
+        validate_utools_dynamic_feature, validate_utools_expend_height, validate_utools_input_text,
         validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
         DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
         LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
@@ -9407,6 +9516,35 @@ mod tests {
         assert!(decode_utools_clipboard_png_data_url(&oversized)
             .expect_err("compressed PNG bytes must be bounded before decoding")
             .contains("limited"));
+    }
+
+    #[test]
+    fn utools_copy_file_validates_strings_without_probing_the_filesystem() {
+        let missing = std::env::temp_dir().join(format!(
+            "ihub-utools-copy-file-missing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let validated = validate_utools_copy_file_paths(&json!({
+            "paths": [missing.to_string_lossy()]
+        }))
+        .expect("pre-confirmation validation must not inspect path existence");
+        assert_eq!(validated, vec![missing.clone()]);
+
+        assert!(validate_utools_copy_file_paths(&json!({
+            "paths": [missing.to_string_lossy(), missing.to_string_lossy()]
+        }))
+        .expect_err("duplicates must be rejected")
+        .contains("duplicate"));
+        assert!(
+            validate_utools_copy_file_paths(&json!({ "paths": ["relative.txt"] }))
+                .expect_err("relative paths must not reach the clipboard")
+                .contains("absolute")
+        );
+        assert!(
+            validate_utools_copy_file_paths(&json!({ "paths": ["bad\u{0}path"] }))
+                .expect_err("control characters must be rejected")
+                .contains("controls")
+        );
     }
 
     #[test]

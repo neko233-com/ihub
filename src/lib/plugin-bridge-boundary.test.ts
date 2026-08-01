@@ -26,6 +26,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "data:image/png;base64,iVBORw0KGgo=",
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeFiles", {
+      paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
