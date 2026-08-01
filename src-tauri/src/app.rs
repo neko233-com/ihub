@@ -1833,6 +1833,7 @@ pub async fn get_plugin_frontend_url(
     let host = state.host.clone();
     let app = window.app_handle().clone();
     let plugin_settings = state.plugin_settings.clone();
+    let utools_documents = state.utools_documents.clone();
     let lease_plugin_id = plugin_id.clone();
     let lease = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
@@ -1842,7 +1843,11 @@ pub async fn get_plugin_frontend_url(
                 populate_utools_runtime_system_config(&app, &plugin_settings, config)?;
             }
             let resolved_plugin_id = bundle.plugin_id.clone();
-            let lease = server.issue(bundle, purpose)?;
+            let sync_database = bundle
+                .utools_compat
+                .as_ref()
+                .map(|_| utools_documents.clone());
+            let lease = server.issue_with_utools_documents(bundle, purpose, sync_database)?;
             // A visible surface and hidden search runtime hand off ownership
             // for one plugin. A fresh lease therefore starts with no stale
             // command/provider/grant state from a prior document.

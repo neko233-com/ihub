@@ -20,10 +20,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::plugins::{PluginFrontendAssetBundle, UtoolsCompatRuntimeConfig};
+use crate::utools_db::UtoolsDocumentStore;
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_millis(250);
@@ -33,6 +36,9 @@ const ASSET_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_COMPAT_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const UTOOLS_COMPAT_SCRIPT_NAME: &str = "__ihub_utools_compat.js";
+const UTOOLS_SYNC_DB_ROUTE: &str = "__ihub_utools_db_sync";
+const UTOOLS_SYNC_DB_HEADER: &str = "x-ihub-utools-db";
+const MAX_UTOOLS_SYNC_DB_REQUEST_BYTES: usize = 15 * 1024 * 1024;
 /// Must stay distinct from `tauri.conf.json`'s `build.devUrl`. Tauri treats a
 /// URL relative to that development origin as local, which would defeat the
 /// remote-origin boundary if the OS happened to assign this port while dev is
@@ -150,18 +156,28 @@ struct ActiveLease {
 }
 
 struct ServedBundle {
+    plugin_id: String,
     asset_root: PathBuf,
     entry: PathBuf,
     blocked_asset_paths: Vec<PathBuf>,
     route_token: String,
     allows_remote_network: bool,
     utools_compat_script: Option<Vec<u8>>,
+    utools_documents: Option<UtoolsDocumentStore>,
 }
 
 #[derive(Clone, Copy)]
 enum HttpMethod {
     Get,
     Head,
+    Post,
+}
+
+struct HttpRequest {
+    method: HttpMethod,
+    target: String,
+    headers: HashMap<String, String>,
+    buffered_body: Vec<u8>,
 }
 
 impl PluginAssetServer {
@@ -295,10 +311,20 @@ impl PluginAssetServer {
     ///
     /// The random port is intentional: separate plugins must not share an HTTP
     /// origin, otherwise one iframe could impersonate another over postMessage.
+    #[cfg(test)]
     pub(crate) fn issue(
         &self,
         bundle: PluginFrontendAssetBundle,
         purpose: PluginFrontendPurpose,
+    ) -> Result<PluginFrontendLease, String> {
+        self.issue_with_utools_documents(bundle, purpose, None)
+    }
+
+    pub(crate) fn issue_with_utools_documents(
+        &self,
+        bundle: PluginFrontendAssetBundle,
+        purpose: PluginFrontendPurpose,
+        utools_documents: Option<UtoolsDocumentStore>,
     ) -> Result<PluginFrontendLease, String> {
         let listener = bind_plugin_listener()?;
         let port = listener
@@ -316,6 +342,12 @@ impl PluginAssetServer {
             allows_remote_network,
             utools_compat,
         } = bundle;
+        if utools_compat.is_some() != utools_documents.is_some() {
+            return Err(
+                "A uTools frontend lease requires its plugin-scoped synchronous database."
+                    .to_owned(),
+            );
+        }
         if self.is_transitioning(&plugin_id) {
             return Err(format!(
                 "Plugin '{plugin_id}' is being updated. Wait for the update to finish before reopening it."
@@ -341,16 +373,27 @@ impl PluginAssetServer {
             .map(render_utools_compat_script)
             .transpose()?;
         let worker_bundle = ServedBundle {
+            plugin_id: plugin_id.clone(),
             asset_root,
             entry,
             blocked_asset_paths,
             route_token,
             allows_remote_network,
             utools_compat_script,
+            utools_documents,
         };
+        let worker_inner = self.inner.clone();
         let worker = thread::Builder::new()
             .name("ihub-plugin-assets".to_owned())
-            .spawn(move || serve_loop(listener, worker_bundle, worker_shutdown, worker_heartbeat))
+            .spawn(move || {
+                serve_loop(
+                    listener,
+                    worker_bundle,
+                    worker_shutdown,
+                    worker_heartbeat,
+                    worker_inner,
+                )
+            })
             .map_err(|error| format!("Could not start the plugin asset server: {error}"))?;
 
         let mut next_lease = Some(ActiveLease {
@@ -630,6 +673,7 @@ fn serve_loop(
     bundle: ServedBundle,
     shutdown: Arc<AtomicBool>,
     last_heartbeat: Arc<Mutex<Instant>>,
+    server: Arc<PluginAssetServerInner>,
 ) {
     while !shutdown.load(Ordering::Acquire) && heartbeat_is_fresh(&last_heartbeat) {
         match listener.accept() {
@@ -639,7 +683,7 @@ fn serve_loop(
                 if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(&last_heartbeat) {
                     break;
                 }
-                handle_connection(&mut stream, &bundle, &shutdown, &last_heartbeat);
+                handle_connection(&mut stream, &bundle, &shutdown, &last_heartbeat, &server);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_POLL_INTERVAL);
@@ -658,29 +702,45 @@ fn handle_connection(
     bundle: &ServedBundle,
     shutdown: &AtomicBool,
     last_heartbeat: &Mutex<Instant>,
+    server: &PluginAssetServerInner,
 ) {
-    let Some((method, target)) = read_request(stream).ok().flatten() else {
+    let Some(request) = read_request(stream).ok().flatten() else {
         let _ = write_status(stream, "400 Bad Request");
         return;
     };
     if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
         return;
     }
-    if is_utools_compat_script_request(bundle, &target) {
+    if is_utools_sync_db_request(bundle, &request.target) {
+        let _guard = server
+            .operation
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+            return;
+        }
+        handle_utools_sync_db_request(stream, bundle, request);
+        return;
+    }
+    if matches!(request.method, HttpMethod::Post) {
+        let _ = write_status(stream, "405 Method Not Allowed");
+        return;
+    }
+    if is_utools_compat_script_request(bundle, &request.target) {
         let Some(script) = bundle.utools_compat_script.as_deref() else {
             let _ = write_status(stream, "404 Not Found");
             return;
         };
         let _ = serve_memory_asset(
             stream,
-            method,
+            request.method,
             script,
             "text/javascript; charset=utf-8",
             bundle.allows_remote_network,
         );
         return;
     }
-    let Some(path) = resolve_asset_path(bundle, &target) else {
+    let Some(path) = resolve_asset_path(bundle, &request.target) else {
         let _ = write_status(stream, "404 Not Found");
         return;
     };
@@ -689,7 +749,7 @@ fn handle_connection(
     // second HTTP status after a partial 200 response.
     let _ = serve_asset(
         stream,
-        method,
+        request.method,
         &path,
         bundle.allows_remote_network,
         bundle
@@ -708,7 +768,240 @@ fn is_utools_compat_script_request(bundle: &ServedBundle, target: &str) -> bool 
     relative == UTOOLS_COMPAT_SCRIPT_NAME
 }
 
-fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String)>> {
+fn is_utools_sync_db_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_documents.is_some()
+        && bundle.utools_compat_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_DB_ROUTE)
+}
+
+fn handle_utools_sync_db_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    request: HttpRequest,
+) {
+    let result = execute_utools_sync_db_request(stream, bundle, request);
+    let (status, payload) = match result {
+        Ok(value) => ("200 OK", value),
+        Err(error) => ("400 Bad Request", json!({ "error": error })),
+    };
+    let encoded = serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"error":"Could not encode database response."}"#.to_vec());
+    let _ = write_json_response(stream, status, &encoded, bundle.allows_remote_network);
+}
+
+fn execute_utools_sync_db_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    mut request: HttpRequest,
+) -> Result<Value, String> {
+    if !matches!(request.method, HttpMethod::Post) {
+        return Err("The synchronous uTools database endpoint accepts only POST.".to_owned());
+    }
+    if request
+        .headers
+        .get(UTOOLS_SYNC_DB_HEADER)
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Err("The synchronous uTools database request header is missing.".to_owned());
+    }
+    if request
+        .headers
+        .get("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        != Some(true)
+    {
+        return Err("The synchronous uTools database request must be JSON.".to_owned());
+    }
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value != "same-origin")
+    {
+        return Err("The synchronous uTools database request is not same-origin.".to_owned());
+    }
+    let host = request.headers.get("host").ok_or_else(|| {
+        "The synchronous uTools database request has no loopback host.".to_owned()
+    })?;
+    let valid_host = host
+        .strip_prefix("127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0);
+    if !valid_host {
+        return Err("The synchronous uTools database request host is invalid.".to_owned());
+    }
+    if request
+        .headers
+        .get("origin")
+        .is_some_and(|origin| origin != &format!("http://{host}"))
+    {
+        return Err("The synchronous uTools database request origin is invalid.".to_owned());
+    }
+    if request.headers.contains_key("transfer-encoding") {
+        return Err("Chunked synchronous uTools database requests are not accepted.".to_owned());
+    }
+    let content_length = request
+        .headers
+        .get("content-length")
+        .ok_or_else(|| "The synchronous uTools database request has no content length.".to_owned())?
+        .parse::<usize>()
+        .map_err(|_| "The synchronous uTools database content length is invalid.".to_owned())?;
+    if content_length == 0 || content_length > MAX_UTOOLS_SYNC_DB_REQUEST_BYTES {
+        return Err(format!(
+            "Synchronous uTools database requests are limited to {MAX_UTOOLS_SYNC_DB_REQUEST_BYTES} bytes."
+        ));
+    }
+    if request.buffered_body.len() > content_length {
+        return Err("The synchronous uTools database request contains trailing bytes.".to_owned());
+    }
+    let already_read = request.buffered_body.len();
+    request.buffered_body.resize(content_length, 0);
+    if already_read < content_length {
+        stream
+            .read_exact(&mut request.buffered_body[already_read..])
+            .map_err(|error| format!("Could not read the synchronous database body: {error}"))?;
+    }
+
+    let payload = serde_json::from_slice::<Value>(&request.buffered_body)
+        .map_err(|error| format!("The synchronous database request is invalid JSON: {error}"))?;
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "The synchronous database request must be an object.".to_owned())?;
+    let operation = object
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "The synchronous database request requires an operation.".to_owned())?;
+    let store = bundle
+        .utools_documents
+        .as_ref()
+        .ok_or_else(|| "The synchronous database is unavailable for this plugin.".to_owned())?;
+    let plugin_id = &bundle.plugin_id;
+
+    match operation {
+        "get" => {
+            validate_sync_db_keys(object, &["op", "id"])?;
+            Ok(store
+                .get(plugin_id, sync_db_string(object, "id")?)?
+                .unwrap_or(Value::Null))
+        }
+        "put" => {
+            validate_sync_db_keys(object, &["op", "doc"])?;
+            serde_json::to_value(
+                store.put(
+                    plugin_id,
+                    object
+                        .get("doc")
+                        .ok_or_else(|| "Synchronous db.put requires a document.".to_owned())?
+                        .clone(),
+                )?,
+            )
+            .map_err(|error| format!("Could not encode the database result: {error}"))
+        }
+        "remove" => {
+            validate_sync_db_keys(object, &["op", "target"])?;
+            serde_json::to_value(
+                store.remove(
+                    plugin_id,
+                    object
+                        .get("target")
+                        .ok_or_else(|| "Synchronous db.remove requires a target.".to_owned())?,
+                )?,
+            )
+            .map_err(|error| format!("Could not encode the database result: {error}"))
+        }
+        "bulkDocs" => {
+            validate_sync_db_keys(object, &["op", "docs"])?;
+            let documents = object
+                .get("docs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "Synchronous db.bulkDocs requires a document array.".to_owned())?
+                .clone();
+            serde_json::to_value(store.bulk_docs(plugin_id, documents)?)
+                .map_err(|error| format!("Could not encode the database results: {error}"))
+        }
+        "allDocs" => {
+            if object.len() == 1 {
+                Ok(Value::Array(store.all_docs(plugin_id, None)?))
+            } else {
+                validate_sync_db_keys(object, &["op", "selector"])?;
+                Ok(Value::Array(
+                    store.all_docs(plugin_id, object.get("selector"))?,
+                ))
+            }
+        }
+        "postAttachment" => {
+            validate_sync_db_keys(object, &["op", "id", "dataBase64", "contentType"])?;
+            let encoded = sync_db_string(object, "dataBase64")?;
+            let max_encoded = crate::utools_db::MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
+            if encoded.is_empty() || encoded.len() > max_encoded {
+                return Err("The synchronous uTools attachment exceeds 10 MiB.".to_owned());
+            }
+            let bytes = BASE64_STANDARD
+                .decode(encoded)
+                .map_err(|_| "The synchronous uTools attachment is malformed.".to_owned())?;
+            serde_json::to_value(store.post_attachment(
+                plugin_id,
+                sync_db_string(object, "id")?,
+                &bytes,
+                sync_db_string(object, "contentType")?,
+            )?)
+            .map_err(|error| format!("Could not encode the attachment result: {error}"))
+        }
+        "getAttachment" => {
+            validate_sync_db_keys(object, &["op", "id"])?;
+            Ok(store
+                .get_attachment(plugin_id, sync_db_string(object, "id")?)?
+                .map(|bytes| json!({ "dataBase64": BASE64_STANDARD.encode(bytes) }))
+                .unwrap_or(Value::Null))
+        }
+        "getAttachmentType" => {
+            validate_sync_db_keys(object, &["op", "id"])?;
+            Ok(store
+                .get_attachment_type(plugin_id, sync_db_string(object, "id")?)?
+                .map(Value::String)
+                .unwrap_or(Value::Null))
+        }
+        _ => Err("The synchronous uTools database operation is unsupported.".to_owned()),
+    }
+}
+
+fn validate_sync_db_keys(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Result<(), String> {
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err("The synchronous uTools database request shape is invalid.".to_owned());
+    }
+    Ok(())
+}
+
+fn sync_db_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("The synchronous uTools database field '{key}' must be a string."))
+}
+
+fn write_json_response(
+    stream: &mut TcpStream,
+    status: &str,
+    body: &[u8],
+    allows_remote_network: bool,
+) -> io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        plugin_csp(allows_remote_network),
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(body)
+}
+
+fn read_request(stream: &mut TcpStream) -> io::Result<Option<HttpRequest>> {
     let mut header = Vec::with_capacity(1024);
     let mut buffer = [0_u8; 1024];
     loop {
@@ -717,7 +1010,9 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String
             return Ok(None);
         }
         header.extend_from_slice(&buffer[..read]);
-        if header.len() > MAX_HTTP_HEADER_BYTES {
+        if header.len() > MAX_HTTP_HEADER_BYTES
+            && !header.windows(4).any(|window| window == b"\r\n\r\n")
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "HTTP header is too large",
@@ -728,6 +1023,18 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String
         }
     }
 
+    let header_end = header
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP header end"))?;
+    if header_end > MAX_HTTP_HEADER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP header is too large",
+        ));
+    }
+    let buffered_body = header.split_off(header_end);
     let header = std::str::from_utf8(&header)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "HTTP header is not UTF-8"))?;
     let request_line = header
@@ -738,6 +1045,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String
     let method = match parts.next() {
         Some("GET") => HttpMethod::Get,
         Some("HEAD") => HttpMethod::Head,
+        Some("POST") => HttpMethod::Post,
         _ => return Ok(None),
     };
     let target = parts
@@ -750,7 +1058,33 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String
             "invalid HTTP request line",
         ));
     }
-    Ok(Some((method, target.to_owned())))
+    let mut headers = HashMap::new();
+    for line in header.split("\r\n").skip(1).filter(|line| !line.is_empty()) {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid HTTP header",
+            ));
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || headers.insert(name, value.trim().to_owned()).is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or duplicate HTTP header",
+            ));
+        }
+    }
+    Ok(Some(HttpRequest {
+        method,
+        target: target.to_owned(),
+        headers,
+        buffered_body,
+    }))
 }
 
 fn resolve_asset_path(bundle: &ServedBundle, target: &str) -> Option<PathBuf> {
@@ -941,6 +1275,7 @@ const requestChannel = "ihub-plugin-bridge/v1";
 const copyImageMaxPngBytes = 4194304;
 const copyImageMaxDataUrlChars = 5592430;
 const attachmentMaxBytes = 10485760;
+const syncDbRoute = "__ihub_utools_db_sync";
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -990,6 +1325,25 @@ function attachmentBytes(value) {{
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
 }}
+function syncDbCall(op, payload) {{
+  const request = new XMLHttpRequest();
+  request.open("POST", syncDbRoute, false);
+  request.setRequestHeader("Content-Type", "application/json");
+  request.setRequestHeader("X-IHub-Utools-DB", "1");
+  request.send(JSON.stringify({{ op, ...payload }}));
+  let result;
+  try {{ result = JSON.parse(request.responseText); }}
+  catch {{ throw new Error("iHub returned an invalid synchronous database response."); }}
+  if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous database request failed.");
+  return result;
+}}
+function projectedDbRemoveTarget(target) {{
+  if (typeof target === "string") return target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) throw new TypeError("uTools db.remove accepts a document ID or document object.");
+  const projected = {{ _id: target._id }};
+  if (target._rev !== undefined) projected._rev = target._rev;
+  return projected;
+}}
 function invoke(callbacks, value) {{
   for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
 }}
@@ -1009,11 +1363,8 @@ const dbPromises = Object.freeze({{
   get(id) {{ return call("compatibility.utools.db.get", {{ id }}); }},
   put(doc) {{ return call("compatibility.utools.db.put", {{ doc }}); }},
   remove(target) {{
-    if (typeof target === "string") return call("compatibility.utools.db.remove", {{ target }});
-    if (!target || typeof target !== "object" || Array.isArray(target)) return Promise.reject(new TypeError("uTools db.remove accepts a document ID or document object."));
-    const projected = {{ _id: target._id }};
-    if (target._rev !== undefined) projected._rev = target._rev;
-    return call("compatibility.utools.db.remove", {{ target: projected }});
+    try {{ return call("compatibility.utools.db.remove", {{ target: projectedDbRemoveTarget(target) }}); }}
+    catch (error) {{ return Promise.reject(error); }}
   }},
   bulkDocs(docs) {{ return call("compatibility.utools.db.bulkDocs", {{ docs }}); }},
   allDocs(selector) {{
@@ -1037,6 +1388,27 @@ const dbPromises = Object.freeze({{
 }});
 const db = Object.freeze({{
   promises: dbPromises,
+  get(id) {{ return syncDbCall("get", {{ id }}); }},
+  put(doc) {{ return syncDbCall("put", {{ doc }}); }},
+  remove(target) {{ return syncDbCall("remove", {{ target: projectedDbRemoveTarget(target) }}); }},
+  bulkDocs(docs) {{ return syncDbCall("bulkDocs", {{ docs }}); }},
+  allDocs(selector) {{
+    return selector === undefined
+      ? syncDbCall("allDocs", {{}})
+      : syncDbCall("allDocs", {{ selector }});
+  }},
+  postAttachment(id, attachment, contentType) {{
+    const dataBase64 = attachmentBase64(attachment);
+    if (typeof id !== "string" || !dataBase64 || typeof contentType !== "string" || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(contentType) || contentType.length > 255) {{
+      throw new TypeError("uTools postAttachment accepts one bounded ID, Uint8Array, and MIME type.");
+    }}
+    return syncDbCall("postAttachment", {{ id, dataBase64, contentType }});
+  }},
+  getAttachment(id) {{
+    const result = syncDbCall("getAttachment", {{ id }});
+    return result === null ? null : attachmentBytes(result && result.dataBase64);
+  }},
+  getAttachmentType(id) {{ return syncDbCall("getAttachmentType", {{ id }}); }},
   replicateStateFromCloud() {{ return null; }}
 }});
 function dbStorageKey(key) {{
@@ -1474,6 +1846,7 @@ mod tests {
         LOCKED_PLUGIN_CSP, NETWORKED_PLUGIN_CSP,
     };
     use crate::plugins::{UtoolsCompatCommand, UtoolsCompatRuntimeConfig};
+    use crate::utools_db::UtoolsDocumentStore;
 
     fn temporary_bundle(
         plugin_id: &str,
@@ -1502,6 +1875,62 @@ mod tests {
                 utools_compat: None,
             },
         )
+    }
+
+    fn utools_runtime_config(plugin_id: &str) -> UtoolsCompatRuntimeConfig {
+        UtoolsCompatRuntimeConfig {
+            app_version: "0.1.0".to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            commands: Vec::new(),
+            native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
+            paths: Default::default(),
+        }
+    }
+
+    fn send_sync_database_request(
+        lease: &super::PluginFrontendLease,
+        payload: &serde_json::Value,
+        include_capability_header: bool,
+    ) -> (String, serde_json::Value) {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease host");
+        let port = url.port().expect("lease port");
+        let target = format!("{}{}", url.path(), super::UTOOLS_SYNC_DB_ROUTE);
+        let body = serde_json::to_vec(payload).expect("request JSON");
+        let capability_header = if include_capability_header {
+            "X-IHub-Utools-DB: 1\r\n"
+        } else {
+            ""
+        };
+        let request = format!(
+            "POST {target} HTTP/1.1\r\nHost: {host}:{port}\r\nOrigin: http://{host}:{port}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n{capability_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = TcpStream::connect((host, port)).expect("sync endpoint should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("sync response timeout");
+        stream
+            .write_all(request.as_bytes())
+            .expect("request header");
+        stream.write_all(&body).expect("request body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete sync response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("complete response header");
+        let status = std::str::from_utf8(&response[..header_end])
+            .expect("UTF-8 response header")
+            .lines()
+            .next()
+            .expect("response status")
+            .to_owned();
+        let payload = serde_json::from_slice(&response[header_end..]).expect("response JSON");
+        (status, payload)
     }
 
     #[test]
@@ -1558,6 +1987,9 @@ mod tests {
         assert!(script.contains("compatibility.utools.db.getAttachment"));
         assert!(script.contains("getAttachmentType"));
         assert!(script.contains("replicateStateFromCloud"));
+        assert!(script.contains("function syncDbCall"));
+        assert!(script.contains("request.open(\"POST\", syncDbRoute, false)"));
+        assert!(script.contains("X-IHub-Utools-DB"));
         assert!(script.contains("getFeatures"));
         assert!(script.contains("setFeature"));
         assert!(script.contains("removeFeature"));
@@ -1639,12 +2071,14 @@ mod tests {
         fs::write(&preload, "require('fs')").expect("preload should be written");
         let asset_root = root.canonicalize().expect("asset root should canonicalize");
         let bundle = ServedBundle {
+            plugin_id: "utools-preload-test".to_owned(),
             asset_root: asset_root.clone(),
             entry: entry.canonicalize().expect("entry should canonicalize"),
             blocked_asset_paths: vec![preload.canonicalize().expect("preload should canonicalize")],
             route_token: "route-token".to_owned(),
             allows_remote_network: false,
             utools_compat_script: None,
+            utools_documents: None,
         };
         assert!(resolve_asset_path(&bundle, "/v1/route-token/").is_some());
         assert!(
@@ -1789,6 +2223,82 @@ mod tests {
             assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn synchronous_utools_database_endpoint_is_lease_scoped_and_persistent() {
+        let server = PluginAssetServer::new();
+        let plugin_id = "utools-sync-database-test";
+        let (root, mut bundle) = temporary_bundle(plugin_id, false);
+        bundle.utools_compat = Some(utools_runtime_config(plugin_id));
+        let documents = UtoolsDocumentStore::new(root.join("app-data"));
+        let lease = server
+            .issue_with_utools_documents(
+                bundle,
+                PluginFrontendPurpose::Surface,
+                Some(documents.clone()),
+            )
+            .expect("uTools frontend lease should issue");
+
+        let (status, created) = send_sync_database_request(
+            &lease,
+            &serde_json::json!({
+                "op": "put",
+                "doc": { "_id": "sync/one", "value": 1 }
+            }),
+            true,
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(created.get("ok"), Some(&serde_json::json!(true)));
+
+        let (status, document) = send_sync_database_request(
+            &lease,
+            &serde_json::json!({ "op": "get", "id": "sync/one" }),
+            true,
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(document.get("value"), Some(&serde_json::json!(1)));
+        assert!(documents
+            .get(plugin_id, "sync/one")
+            .expect("read persistent sync document")
+            .is_some());
+
+        let (status, attached) = send_sync_database_request(
+            &lease,
+            &serde_json::json!({
+                "op": "postAttachment",
+                "id": "sync/asset",
+                "dataBase64": "c3luYyBieXRlcw==",
+                "contentType": "text/plain"
+            }),
+            true,
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(attached.get("ok"), Some(&serde_json::json!(true)));
+        let (status, attachment) = send_sync_database_request(
+            &lease,
+            &serde_json::json!({ "op": "getAttachment", "id": "sync/asset" }),
+            true,
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(
+            attachment.get("dataBase64"),
+            Some(&serde_json::json!("c3luYyBieXRlcw=="))
+        );
+
+        let (status, rejection) = send_sync_database_request(
+            &lease,
+            &serde_json::json!({ "op": "get", "id": "sync/one" }),
+            false,
+        );
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        assert!(rejection
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|error| error.contains("header")));
+
+        assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
