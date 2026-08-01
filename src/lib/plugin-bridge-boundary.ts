@@ -53,6 +53,8 @@ const pluginHostMethods = new Set([
   "compatibility.utools.features.set",
   "compatibility.utools.features.snapshot",
   "compatibility.utools.input.pasteText",
+  "compatibility.utools.input.pasteImage",
+  "compatibility.utools.input.pasteFiles",
   "compatibility.utools.input.typeString",
   "compatibility.utools.notification.show",
   "compatibility.utools.shell.beep",
@@ -263,7 +265,8 @@ export function validatePluginBridgeCall(
     id: responseId,
     request: normalizedRequest,
   };
-  const isImageCopy = method === "compatibility.utools.clipboard.writeImage";
+  const isImageCopy = method === "compatibility.utools.clipboard.writeImage"
+    || method === "compatibility.utools.input.pasteImage";
   const isDbWrite = method === "compatibility.utools.db.put"
     || method === "compatibility.utools.db.bulkDocs";
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
@@ -280,7 +283,7 @@ export function validatePluginBridgeCall(
     ) {
       return {
         ok: false,
-        error: "uTools copyImage accepts one bounded PNG data URL.",
+        error: "uTools image transfer accepts one bounded PNG data URL.",
         responseId,
       };
     }
@@ -393,6 +396,7 @@ export class PluginBridgeInFlightGate {
 
 export function isLargePluginBridgeMethod(method: string): boolean {
   return method === "compatibility.utools.clipboard.writeImage"
+    || method === "compatibility.utools.input.pasteImage"
     || method === "compatibility.utools.db.put"
     || method === "compatibility.utools.db.bulkDocs"
     || method === "compatibility.utools.db.postAttachment";

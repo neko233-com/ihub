@@ -1368,7 +1368,7 @@ const MAX_PLUGIN_CLIPBOARD_TEXT_BYTES: usize = 48 * 1024;
 const MAX_UTOOLS_TYPED_TEXT_CHARS: usize = 4_096;
 
 enum UtoolsInputAction {
-    PasteText,
+    PasteClipboard,
     TypeString(String),
 }
 
@@ -4164,9 +4164,63 @@ fn plugin_host_call_for_active_lease(
             )?;
             crate::clipboard_access::with_clipboard(|clipboard| clipboard.set_text(value))
                 .map_err(|error| format!("Could not prepare the system clipboard for paste: {error}"))?;
-            hide_main_for_utools_input(app)?;
-            schedule_utools_input(UtoolsInputAction::PasteText)?;
+            hide_and_schedule_utools_input(app, UtoolsInputAction::PasteClipboard)?;
             Ok(json!({ "accepted": true }))
+        }
+        "compatibility.utools.input.pasteImage" => {
+            let Some(params) = request.params.as_object() else {
+                return Err("uTools paste image parameters must be an object.".to_owned());
+            };
+            if params.len() != 1 || !params.contains_key("dataUrl") {
+                return Err("uTools paste image accepts only one PNG dataUrl parameter.".to_owned());
+            }
+            let image = decode_utools_clipboard_png_data_url(required_string(
+                &request.params,
+                "dataUrl",
+            )?)?;
+            let bytes = image.bytes.into_owned();
+            crate::clipboard_access::with_clipboard(|clipboard| {
+                clipboard.set_image(arboard::ImageData {
+                    width: image.width,
+                    height: image.height,
+                    bytes: std::borrow::Cow::Borrowed(bytes.as_ref()),
+                })
+            })
+            .map_err(|error| format!("Could not prepare the PNG clipboard paste: {error}"))?;
+            hide_and_schedule_utools_input(app, UtoolsInputAction::PasteClipboard)?;
+            Ok(json!({ "accepted": true }))
+        }
+        "compatibility.utools.input.pasteFiles" => {
+            let requested_paths = validate_utools_copy_file_paths(&request.params)?;
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Interactive uTools alerts are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            if !confirm_utools_copy_files(app, &state.host, &request.plugin_id, &requested_paths) {
+                return Ok(json!({ "accepted": false, "cancelled": true }));
+            }
+            let mut seen = HashSet::new();
+            let mut prepared = Vec::with_capacity(requested_paths.len());
+            for path in requested_paths {
+                let item = crate::system_open::prepare_local_open(&path, None)?;
+                if !seen.insert(item.path().to_owned()) {
+                    return Err("uTools paste file targets resolve to the same local object."
+                        .to_owned());
+                }
+                prepared.push(item);
+            }
+            let paths = prepared
+                .iter()
+                .map(|item| item.path().to_owned())
+                .collect::<Vec<_>>();
+            crate::clipboard_access::with_clipboard(|clipboard| {
+                clipboard.set().file_list(&paths)
+            })
+            .map_err(|error| format!("Could not prepare files for clipboard paste: {error}"))?;
+            hide_and_schedule_utools_input(app, UtoolsInputAction::PasteClipboard)?;
+            Ok(json!({ "accepted": true, "count": paths.len() }))
         }
         "compatibility.utools.input.typeString" => {
             let value = validate_utools_input_text(
@@ -4174,8 +4228,10 @@ fn plugin_host_call_for_active_lease(
                 MAX_PLUGIN_CLIPBOARD_TEXT_BYTES,
                 Some(MAX_UTOOLS_TYPED_TEXT_CHARS),
             )?;
-            hide_main_for_utools_input(app)?;
-            schedule_utools_input(UtoolsInputAction::TypeString(value.to_owned()))?;
+            hide_and_schedule_utools_input(
+                app,
+                UtoolsInputAction::TypeString(value.to_owned()),
+            )?;
             Ok(json!({ "accepted": true }))
         }
         "compatibility.utools.window.hideMain" => {
@@ -7219,6 +7275,20 @@ fn hide_main_for_utools_input(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Could not hide iHub before uTools input: {error}"))
 }
 
+fn hide_and_schedule_utools_input(
+    app: &AppHandle,
+    action: UtoolsInputAction,
+) -> Result<(), String> {
+    hide_main_for_utools_input(app)?;
+    if let Err(error) = schedule_utools_input(action) {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn schedule_utools_input(action: UtoolsInputAction) -> Result<(), String> {
     std::thread::Builder::new()
@@ -7273,7 +7343,7 @@ fn send_utools_windows_input(action: UtoolsInputAction) -> Result<(), String> {
     }
 
     match action {
-        UtoolsInputAction::PasteText => send(&[
+        UtoolsInputAction::PasteClipboard => send(&[
             keyboard_input(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
             keyboard_input(VK_V, 0, KEYBD_EVENT_FLAGS(0)),
             keyboard_input(VK_V, 0, KEYEVENTF_KEYUP),

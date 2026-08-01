@@ -53,6 +53,8 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.features.set", { feature: { code: "docs", cmds: ["文档"] } })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.remove", { code: "docs" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.input.pasteText", { value: "粘贴" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.input.pasteFiles", { paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"] })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.input.pasteImage", { dataUrl: "data:image/png;base64,iVBORw0KGgo=" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.input.typeString", { value: "type" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.beep", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.notification.show", { body: "done" })).ok).toBe(true);
@@ -113,6 +115,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.db.bulkDocs")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.allDocs")).toBe(false);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.postAttachment")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.input.pasteImage")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",
       dataBase64: "c2FmZQ==",

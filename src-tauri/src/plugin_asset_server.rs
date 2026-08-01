@@ -1599,6 +1599,29 @@ const utools = Object.freeze({{
       .catch((error) => console.error("iHub compatibility text paste failed", error));
     return true;
   }},
+  hideMainWindowPasteImage(value) {{
+    const dataUrl = pngDataUrlForCopyImage(value);
+    if (!dataUrl) return false;
+    void call("compatibility.utools.input.pasteImage", {{ dataUrl }})
+      .catch((error) => console.error("iHub compatibility image paste failed", error));
+    return true;
+  }},
+  hideMainWindowPasteFile(value) {{
+    const paths = typeof value === "string" ? [value] : value;
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 16) return false;
+    const encoder = new TextEncoder();
+    let totalBytes = 0;
+    const normalized = [];
+    for (const path of paths) {{
+      if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return false;
+      totalBytes += encoder.encode(path).byteLength;
+      if (totalBytes > 8192 || normalized.includes(path)) return false;
+      normalized.push(path);
+    }}
+    void call("compatibility.utools.input.pasteFiles", {{ paths: normalized }})
+      .catch((error) => console.error("iHub compatibility file paste failed", error));
+    return true;
+  }},
   hideMainWindowTypeString(value) {{
     if (typeof value !== "string" || Array.from(value).length > 4096 || value.includes("\u0000")) return false;
     void call("compatibility.utools.input.typeString", {{ value }})
@@ -2002,6 +2025,10 @@ mod tests {
         assert!(script.contains("selection.removeAllRanges()"));
         assert!(script.contains("hideMainWindowPasteText"));
         assert!(script.contains("compatibility.utools.input.pasteText"));
+        assert!(script.contains("hideMainWindowPasteImage"));
+        assert!(script.contains("compatibility.utools.input.pasteImage"));
+        assert!(script.contains("hideMainWindowPasteFile"));
+        assert!(script.contains("compatibility.utools.input.pasteFiles"));
         assert!(script.contains("hideMainWindowTypeString"));
         assert!(script.contains("compatibility.utools.input.typeString"));
         assert!(script.contains("setSubInput"));
