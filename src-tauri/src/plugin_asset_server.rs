@@ -39,7 +39,16 @@ const UTOOLS_COMPAT_SCRIPT_NAME: &str = "__ihub_utools_compat.js";
 const UTOOLS_SYNC_DB_ROUTE: &str = "__ihub_utools_db_sync";
 const UTOOLS_SYNC_DB_HEADER: &str = "x-ihub-utools-db";
 const UTOOLS_SYNC_SCREEN_ROUTE: &str = "__ihub_utools_screen_sync";
+const UTOOLS_SYNC_ICON_ROUTE: &str = "__ihub_utools_icon_sync";
+const UTOOLS_SYNC_ICON_HEADER: &str = "x-ihub-utools-icon";
 const MAX_UTOOLS_SYNC_DB_REQUEST_BYTES: usize = 15 * 1024 * 1024;
+const MAX_UTOOLS_SYNC_ICON_REQUEST_BYTES: usize = 12 * 1024;
+#[cfg(not(test))]
+const UTOOLS_SYNC_ICON_TIMEOUT: Duration = Duration::from_millis(650);
+// Parallel Windows Shell tests can starve the process-wide STA briefly on a
+// loaded runner; production keeps the much tighter synchronous UI bound.
+#[cfg(test)]
+const UTOOLS_SYNC_ICON_TIMEOUT: Duration = Duration::from_secs(5);
 /// Must stay distinct from `tauri.conf.json`'s `build.devUrl`. Tauri treats a
 /// URL relative to that development origin as local, which would defeat the
 /// remote-origin boundary if the OS happened to assign this port while dev is
@@ -723,6 +732,17 @@ fn handle_connection(
         handle_utools_sync_screen_request(stream, bundle, request);
         return;
     }
+    if is_utools_sync_icon_request(bundle, &request.target) {
+        let _guard = server
+            .operation
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+            return;
+        }
+        handle_utools_sync_icon_request(stream, bundle, request);
+        return;
+    }
     if is_utools_sync_db_request(bundle, &request.target) {
         let _guard = server
             .operation
@@ -789,6 +809,143 @@ fn is_utools_sync_db_request(bundle: &ServedBundle, target: &str) -> bool {
 fn is_utools_sync_screen_request(bundle: &ServedBundle, target: &str) -> bool {
     bundle.utools_compat_script.is_some()
         && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_SCREEN_ROUTE)
+}
+
+fn is_utools_sync_icon_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_compat_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_ICON_ROUTE)
+}
+
+fn handle_utools_sync_icon_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    request: HttpRequest,
+) {
+    let result = execute_utools_sync_icon_request(stream, request);
+    let (status, payload) = match result {
+        Ok(value) => ("200 OK", Value::String(value)),
+        Err(error) => ("400 Bad Request", json!({ "error": error })),
+    };
+    let encoded = serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"error":"Could not encode icon response."}"#.to_vec());
+    let _ = write_json_response(stream, status, &encoded, bundle.allows_remote_network);
+}
+
+fn execute_utools_sync_icon_request(
+    stream: &mut TcpStream,
+    mut request: HttpRequest,
+) -> Result<String, String> {
+    if !matches!(request.method, HttpMethod::Post) {
+        return Err("The synchronous uTools icon endpoint accepts only POST.".to_owned());
+    }
+    if request
+        .headers
+        .get(UTOOLS_SYNC_ICON_HEADER)
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Err("The synchronous uTools icon request header is missing.".to_owned());
+    }
+    if request
+        .headers
+        .get("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        != Some(true)
+    {
+        return Err("The synchronous uTools icon request must be JSON.".to_owned());
+    }
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value != "same-origin")
+    {
+        return Err("The synchronous uTools icon request is not same-origin.".to_owned());
+    }
+    let host = request
+        .headers
+        .get("host")
+        .ok_or_else(|| "The synchronous uTools icon request has no loopback host.".to_owned())?;
+    let valid_host = host
+        .strip_prefix("127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0);
+    if !valid_host {
+        return Err("The synchronous uTools icon request host is invalid.".to_owned());
+    }
+    if request
+        .headers
+        .get("origin")
+        .is_some_and(|origin| origin != &format!("http://{host}"))
+    {
+        return Err("The synchronous uTools icon request origin is invalid.".to_owned());
+    }
+    if request.headers.contains_key("transfer-encoding") {
+        return Err("Chunked synchronous uTools icon requests are not accepted.".to_owned());
+    }
+    let content_length = request
+        .headers
+        .get("content-length")
+        .ok_or_else(|| "The synchronous uTools icon request has no content length.".to_owned())?
+        .parse::<usize>()
+        .map_err(|_| "The synchronous uTools icon content length is invalid.".to_owned())?;
+    if content_length == 0 || content_length > MAX_UTOOLS_SYNC_ICON_REQUEST_BYTES {
+        return Err(format!(
+            "Synchronous uTools icon requests are limited to {MAX_UTOOLS_SYNC_ICON_REQUEST_BYTES} bytes."
+        ));
+    }
+    if request.buffered_body.len() > content_length {
+        return Err("The synchronous uTools icon request contains trailing bytes.".to_owned());
+    }
+    let already_read = request.buffered_body.len();
+    request.buffered_body.resize(content_length, 0);
+    if already_read < content_length {
+        stream
+            .read_exact(&mut request.buffered_body[already_read..])
+            .map_err(|error| format!("Could not read the synchronous icon body: {error}"))?;
+    }
+    let payload = serde_json::from_slice::<Value>(&request.buffered_body)
+        .map_err(|error| format!("The synchronous icon request is invalid JSON: {error}"))?;
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "The synchronous icon request must be an object.".to_owned())?;
+    if object.len() != 1 || !object.contains_key("path") {
+        return Err("The synchronous icon request accepts only path.".to_owned());
+    }
+    let requested = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "The synchronous icon path must be a string.".to_owned())?;
+    if requested.is_empty()
+        || requested.chars().count() > 1024
+        || requested.len() > 8192
+        || requested.chars().any(|character| character.is_control())
+    {
+        return Err("The synchronous icon path is invalid or too long.".to_owned());
+    }
+
+    let service = crate::native_icons::NativeIconService::shared();
+    let pending = if requested == "folder" {
+        service.try_request_type_hint(None, true)
+    } else if requested.len() >= 2
+        && requested.len() <= 17
+        && requested.starts_with('.')
+        && requested[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        service.try_request_type_hint(Some(requested), false)
+    } else {
+        let prepared = crate::system_open::prepare_local_open(Path::new(requested), None)?;
+        let kind = match prepared.kind() {
+            crate::system_open::LocalOpenKind::File => "file",
+            crate::system_open::LocalOpenKind::Folder => "folder",
+        };
+        service.try_request_prepared(prepared, kind)
+    };
+    Ok(pending
+        .and_then(|pending| pending.wait_timeout(UTOOLS_SYNC_ICON_TIMEOUT))
+        .unwrap_or_default())
 }
 
 fn handle_utools_sync_screen_request(
@@ -1348,6 +1505,7 @@ const copyImageMaxDataUrlChars = 5592430;
 const attachmentMaxBytes = 10485760;
 const syncDbRoute = "__ihub_utools_db_sync";
 const syncScreenRoute = "__ihub_utools_screen_sync";
+const syncIconRoute = "__ihub_utools_icon_sync";
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -1421,6 +1579,18 @@ function syncScreenSnapshot() {{
   if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous screen request failed.");
   if (!result || !Array.isArray(result.displays) || !Array.isArray(result.metrics)) throw new Error("iHub returned an invalid screen snapshot.");
   return result;
+}}
+function syncFileIcon(path) {{
+  const request = new XMLHttpRequest();
+  request.open("POST", syncIconRoute, false);
+  request.setRequestHeader("Content-Type", "application/json");
+  request.setRequestHeader("X-IHub-Utools-Icon", "1");
+  request.send(JSON.stringify({{ path }}));
+  let result;
+  try {{ result = JSON.parse(request.responseText); }}
+  catch {{ throw new Error("iHub returned an invalid synchronous icon response."); }}
+  if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous icon request failed.");
+  return typeof result === "string" ? result : "";
 }}
 function screenPoint(value, label) {{
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y)) throw new TypeError(label + " requires finite x and y coordinates.");
@@ -1961,6 +2131,26 @@ const utools = Object.freeze({{
     void call("compatibility.utools.shell.openExternal", {{ url }})
       .catch((error) => console.error("iHub compatibility external URL failed", error));
   }},
+  shellOpenPath(path) {{
+    if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return;
+    void call("compatibility.utools.shell.openPath", {{ path }})
+      .catch((error) => console.error("iHub compatibility local open failed", error));
+  }},
+  shellShowItemInFolder(path) {{
+    if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return;
+    void call("compatibility.utools.shell.showItemInFolder", {{ path }})
+      .catch((error) => console.error("iHub compatibility file reveal failed", error));
+  }},
+  shellTrashItem(path) {{
+    if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return;
+    void call("compatibility.utools.shell.trashItem", {{ path }})
+      .catch((error) => console.error("iHub compatibility recycle-bin action failed", error));
+  }},
+  getFileIcon(path) {{
+    if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || new TextEncoder().encode(path).byteLength > 8192 || /[\u0000-\u001f\u007f]/.test(path)) return "";
+    try {{ return syncFileIcon(path); }}
+    catch (error) {{ console.error("iHub compatibility file icon failed", error); return ""; }}
+  }},
   shellBeep() {{
     void call("compatibility.utools.shell.beep", {{}})
       .catch((error) => console.error("iHub compatibility system beep failed", error));
@@ -2324,6 +2514,53 @@ mod tests {
         (status, payload)
     }
 
+    fn send_sync_icon_request(
+        lease: &super::PluginFrontendLease,
+        path: &str,
+        include_capability_header: bool,
+    ) -> (String, serde_json::Value) {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease host");
+        let port = url.port().expect("lease port");
+        let target = format!("{}{}", url.path(), super::UTOOLS_SYNC_ICON_ROUTE);
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "path": path })).expect("icon request JSON");
+        let capability_header = if include_capability_header {
+            "X-IHub-Utools-Icon: 1\r\n"
+        } else {
+            ""
+        };
+        let request = format!(
+            "POST {target} HTTP/1.1\r\nHost: {host}:{port}\r\nOrigin: http://{host}:{port}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n{capability_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = TcpStream::connect((host, port)).expect("icon endpoint should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("icon response timeout");
+        stream
+            .write_all(request.as_bytes())
+            .expect("icon request header");
+        stream.write_all(&body).expect("icon request body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete icon response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("complete response header");
+        let status = std::str::from_utf8(&response[..header_end])
+            .expect("UTF-8 response header")
+            .lines()
+            .next()
+            .expect("response status")
+            .to_owned();
+        let payload = serde_json::from_slice(&response[header_end..]).expect("response JSON");
+        (status, payload)
+    }
+
     #[test]
     fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
         let config = UtoolsCompatRuntimeConfig {
@@ -2357,6 +2594,15 @@ mod tests {
         assert!(script.contains("compatibility.utools.notification.show"));
         assert!(script.contains("shellOpenExternal"));
         assert!(script.contains("compatibility.utools.shell.openExternal"));
+        assert!(script.contains("shellOpenPath"));
+        assert!(script.contains("compatibility.utools.shell.openPath"));
+        assert!(script.contains("shellShowItemInFolder"));
+        assert!(script.contains("compatibility.utools.shell.showItemInFolder"));
+        assert!(script.contains("shellTrashItem"));
+        assert!(script.contains("compatibility.utools.shell.trashItem"));
+        assert!(script.contains("getFileIcon(path)"));
+        assert!(script.contains("request.open(\"POST\", syncIconRoute, false)"));
+        assert!(script.contains("X-IHub-Utools-Icon"));
         assert!(script.contains("shellBeep"));
         assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));
@@ -2500,6 +2746,39 @@ mod tests {
         assert!(rejection["error"]
             .as_str()
             .is_some_and(|error| error.contains("only GET")));
+
+        assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn synchronous_utools_icon_endpoint_is_lease_scoped_and_uses_native_icons() {
+        let server = PluginAssetServer::new();
+        let plugin_id = "utools-sync-icon-test";
+        let (root, mut bundle) = temporary_bundle(plugin_id, false);
+        bundle.utools_compat = Some(utools_runtime_config(plugin_id));
+        let fixture = root.join("native-icon-fixture.txt");
+        fs::write(&fixture, b"iHub native icon fixture").expect("icon fixture should be written");
+        let documents = UtoolsDocumentStore::new(root.join("app-data"));
+        let lease = server
+            .issue_with_utools_documents(bundle, PluginFrontendPurpose::Surface, Some(documents))
+            .expect("uTools icon lease should issue");
+
+        let fixture_path = fixture.to_string_lossy().into_owned();
+        for request in [".txt", "folder", fixture_path.as_str()] {
+            let (status, icon) = send_sync_icon_request(&lease, request, true);
+            assert_eq!(status, "HTTP/1.1 200 OK");
+            assert!(icon
+                .as_str()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,")));
+        }
+
+        let (status, rejection) = send_sync_icon_request(&lease, ".txt", false);
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        assert!(rejection["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("header is missing")));
 
         assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
         let _ = fs::remove_dir_all(root);

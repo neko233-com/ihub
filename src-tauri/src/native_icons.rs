@@ -164,6 +164,7 @@ struct IconRequest {
     /// Platform parsing name used only by Shell/AppKit artwork APIs.
     shell_path: PathBuf,
     kind: String,
+    use_file_attributes: bool,
     reply: SyncSender<Option<String>>,
     /// Keeps the exact authorized filesystem object bound until the worker
     /// has finished every metadata and Shell lookup, even if the renderer's
@@ -237,7 +238,7 @@ impl NativeIconService {
 
     #[cfg(test)]
     pub(crate) fn try_request(&self, path: &Path, kind: &str) -> Option<NativeIconPending> {
-        self.try_request_inner(path.to_path_buf(), path.to_path_buf(), kind, None)
+        self.try_request_inner(path.to_path_buf(), path.to_path_buf(), kind, None, false)
     }
 
     pub(crate) fn try_request_prepared(
@@ -253,7 +254,46 @@ impl NativeIconService {
         // DOS path before extracting its artwork.
         let canonical_path = prepared.path().to_path_buf();
         let shell_path = shell_compatible_request_path(prepared.path());
-        self.try_request_inner(canonical_path, shell_path, kind, Some(prepared))
+        self.try_request_inner(canonical_path, shell_path, kind, Some(prepared), false)
+    }
+
+    /// Requests the Windows system icon for a lexical extension or folder
+    /// type without touching a caller-controlled filesystem path.
+    pub(crate) fn try_request_type_hint(
+        &self,
+        extension: Option<&str>,
+        folder: bool,
+    ) -> Option<NativeIconPending> {
+        #[cfg(windows)]
+        {
+            let path = if folder {
+                PathBuf::from(r"C:\__ihub_system_icon_folder__")
+            } else {
+                let extension = extension?;
+                if extension.len() < 2
+                    || extension.len() > 17
+                    || !extension.starts_with('.')
+                    || !extension[1..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric())
+                {
+                    return None;
+                }
+                PathBuf::from(format!(r"C:\__ihub_system_icon__{extension}"))
+            };
+            self.try_request_inner(
+                path.clone(),
+                path,
+                if folder { "folder" } else { "file" },
+                None,
+                true,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (extension, folder);
+            None
+        }
     }
 
     fn try_request_inner(
@@ -262,6 +302,7 @@ impl NativeIconService {
         shell_path: PathBuf,
         kind: &str,
         prepared: Option<PreparedLocalOpen>,
+        use_file_attributes: bool,
     ) -> Option<NativeIconPending> {
         if !valid_icon_input(&path, kind)
             || !valid_icon_input(&shell_path, kind)
@@ -281,6 +322,7 @@ impl NativeIconService {
             path,
             shell_path,
             kind: kind.to_owned(),
+            use_file_attributes,
             reply,
             _prepared: prepared,
         };
@@ -417,7 +459,11 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
     };
     let mut cache = IconCache::bounded();
     while let Ok(mut request) = receiver.recv() {
-        let metadata = fs::symlink_metadata(&request.path).ok();
+        let metadata = if request.use_file_attributes {
+            None
+        } else {
+            fs::symlink_metadata(&request.path).ok()
+        };
         let key = cache_key(
             request.path.clone(),
             request.kind.clone(),
@@ -427,18 +473,26 @@ fn icon_worker(receiver: Receiver<IconRequest>, worker_state: Arc<WorkerState>) 
         let value = if let Some(cached) = cache.get(&key, now) {
             cached
         } else {
-            let valid_type = metadata.as_ref().is_some_and(|value| {
-                if windows_backend::metadata_is_reparse(value) {
-                    false
-                } else if request.kind == "folder" {
-                    value.is_dir()
-                } else {
-                    value.is_file()
-                }
-            });
-            let extracted = valid_type
-                .then(|| windows_backend::icon_data_url(&request.shell_path))
-                .flatten();
+            let valid_type = request.use_file_attributes
+                || metadata.as_ref().is_some_and(|value| {
+                    if windows_backend::metadata_is_reparse(value) {
+                        false
+                    } else if request.kind == "folder" {
+                        value.is_dir()
+                    } else {
+                        value.is_file()
+                    }
+                });
+            let extracted = if request.use_file_attributes {
+                windows_backend::file_type_icon_data_url(
+                    &request.shell_path,
+                    request.kind == "folder",
+                )
+            } else {
+                valid_type
+                    .then(|| windows_backend::icon_data_url(&request.shell_path))
+                    .flatten()
+            };
             cache.insert(key, extracted.clone(), now);
             extracted
         };
@@ -515,7 +569,9 @@ mod windows_backend {
                 GetObjectW, SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
                 DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
             },
-            Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
+            Storage::FileSystem::{
+                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            },
             System::Com::{
                 CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, STGM_READ,
@@ -526,7 +582,7 @@ mod windows_backend {
                 Shell::{
                     IShellItemImageFactory, IShellLinkW, SHCreateItemFromParsingName,
                     SHDefExtractIconW, SHGetFileInfoW, ShellLink, SHFILEINFOW, SHGFI_ICON,
-                    SHGFI_LARGEICON, SIIGBF_ICONONLY,
+                    SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES, SIIGBF_ICONONLY,
                 },
                 WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL, HICON},
             },
@@ -727,6 +783,33 @@ mod windows_backend {
             _ if original_shell_fallback_is_allowed(path) => extract(&wide_path)?,
             _ => return None,
         };
+        encode_png_data_url(image.0, image.1, image.2)
+    }
+
+    pub(super) fn file_type_icon_data_url(path: &Path, folder: bool) -> Option<String> {
+        let wide_path = nul_terminated_wide(path)?;
+        let mut info = SHFILEINFOW::default();
+        let attributes = if folder {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        };
+        // SAFETY: the path is NUL-terminated and info has the documented
+        // size. SHGFI_USEFILEATTRIBUTES prevents a filesystem lookup: the
+        // synthetic path contributes only its extension and requested kind.
+        let result = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(wide_path.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(attributes.0),
+                Some(&mut info),
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
+            )
+        };
+        if result == 0 || info.hIcon.is_invalid() {
+            return None;
+        }
+        let image = icon_to_rgba(OwnedIcon(info.hIcon))?;
         encode_png_data_url(image.0, image.1, image.2)
     }
 

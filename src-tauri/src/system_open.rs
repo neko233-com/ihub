@@ -185,6 +185,127 @@ where
     prepared.launch_with(launcher)
 }
 
+/// Reveals one already-validated local object in the platform file manager
+/// while retaining the same path-identity guards used for ordinary opens.
+pub fn show_local_item_in_folder(requested_path: &Path) -> Result<(), String> {
+    let prepared = prepare_local_open(requested_path, None)?;
+    prepared.launch_with(show_prepared_item_in_folder)
+}
+
+/// Moves one validated local object to the operating-system recycle bin. This
+/// never falls back to permanent deletion.
+///
+/// Windows cannot recycle an object while our strict final guard deliberately
+/// denies delete sharing. Keep every guard through the last revalidation,
+/// capture the Shell-compatible path, then release them immediately before
+/// the single recycle call. Unlike ordinary open/reveal, the legacy Shell
+/// recycle API is necessarily path-based across that final handoff.
+pub fn trash_local_item(requested_path: &Path) -> Result<(), String> {
+    let prepared = prepare_local_open(requested_path, None)?;
+    #[cfg(windows)]
+    prepared.revalidate_traversal_only_components()?;
+    let path = {
+        #[cfg(windows)]
+        {
+            shell_compatible_windows_path(prepared.path())
+        }
+        #[cfg(not(windows))]
+        {
+            prepared.path().to_path_buf()
+        }
+    };
+    drop(prepared);
+    trash_validated_item(&path)
+}
+
+#[cfg(windows)]
+fn show_prepared_item_in_folder(prepared: &PreparedLocalOpen) -> Result<(), String> {
+    let path = shell_compatible_windows_path(prepared.path());
+    let mut command = crate::background_process::background_command("explorer.exe");
+    command.arg("/select,").arg(path);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Windows could not reveal the local item: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn show_prepared_item_in_folder(prepared: &PreparedLocalOpen) -> Result<(), String> {
+    crate::background_process::background_command("open")
+        .arg("-R")
+        .arg(prepared.path())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("macOS could not reveal the local item: {error}"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn show_prepared_item_in_folder(prepared: &PreparedLocalOpen) -> Result<(), String> {
+    let parent = if prepared.kind() == LocalOpenKind::Folder {
+        prepared.path()
+    } else {
+        prepared
+            .path()
+            .parent()
+            .ok_or_else(|| "The local item has no parent folder.".to_owned())?
+    };
+    crate::background_process::background_command("xdg-open")
+        .arg(parent)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("The file manager could not reveal the local item: {error}"))
+}
+
+#[cfg(windows)]
+fn trash_validated_item(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+        SHFILEOPSTRUCTW,
+    };
+
+    let mut from = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    // SHFileOperationW consumes a double-NUL-terminated path list.
+    from.extend_from_slice(&[0, 0]);
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        ..Default::default()
+    };
+    let result = unsafe { SHFileOperationW(&mut operation) };
+    if operation.fAnyOperationsAborted != 0 {
+        return Err("Windows cancelled the recycle-bin operation.".to_owned());
+    }
+    if result != 0 {
+        return Err(format!(
+            "Windows could not move the local item to the recycle bin (Shell code {result})."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn trash_validated_item(_path: &Path) -> Result<(), String> {
+    Err("Recycle-bin compatibility has been runtime-verified on Windows only.".to_owned())
+}
+
+#[cfg(windows)]
+fn shell_compatible_windows_path(path: &Path) -> PathBuf {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+    };
+
+    const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.starts_with(&VERBATIM_PREFIX) {
+        return PathBuf::from(OsString::from_wide(&wide[VERBATIM_PREFIX.len()..]));
+    }
+    path.to_path_buf()
+}
+
 fn enforce_expected_kind(
     actual: LocalOpenKind,
     expected: Option<LocalOpenKind>,

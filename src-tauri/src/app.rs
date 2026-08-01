@@ -3563,6 +3563,53 @@ fn confirm_utools_copy_files(
     dialog.show() == rfd::MessageDialogResult::Yes
 }
 
+fn validate_utools_shell_local_path(params: &Value, method: &str) -> Result<PathBuf, String> {
+    let Some(object) = params.as_object() else {
+        return Err(format!("uTools {method} parameters must be an object."));
+    };
+    if object.len() != 1 || !object.contains_key("path") {
+        return Err(format!("uTools {method} accepts exactly one path."));
+    }
+    let path = required_string(params, "path")?;
+    if path.is_empty()
+        || path.chars().count() > MAX_UTOOLS_COPY_FILE_PATH_CHARS
+        || path.len() > MAX_UTOOLS_COPY_FILE_PATH_BYTES
+        || path.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "uTools {method} path is empty, too long, or contains controls."
+        ));
+    }
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(format!("uTools {method} requires an absolute local path."));
+    }
+    Ok(path)
+}
+
+fn confirm_utools_local_path_action(
+    app: &AppHandle,
+    host: &PluginHostState,
+    plugin_id: &str,
+    action: &str,
+    warning: &str,
+    path: &Path,
+) -> bool {
+    let mut dialog = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("iHub · {plugin_id} 请求{action}"))
+        .set_description(format!(
+            "插件请求{warning}：\n\n{}\n\n是否允许？",
+            renderer_display_path(path)
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _dialog_guard = NativeDialogGuard::begin(host);
+    dialog.show() == rfd::MessageDialogResult::Yes
+}
+
 fn decode_utools_clipboard_png_data_url(
     data_url: &str,
 ) -> Result<arboard::ImageData<'static>, String> {
@@ -4593,6 +4640,57 @@ fn plugin_host_call_for_active_lease(
             open_external_in_system(required_string(&request.params, "url")?)?;
             Ok(json!({ "opened": true }))
         }
+        "compatibility.utools.shell.openPath"
+        | "compatibility.utools.shell.trashItem"
+        | "compatibility.utools.shell.showItemInFolder" => {
+            let path = validate_utools_shell_local_path(
+                &request.params,
+                request
+                    .method
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("local shell action"),
+            )?;
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Interactive uTools alerts are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            let (action, warning) = match request.method.as_str() {
+                "compatibility.utools.shell.openPath" => ("打开本机项目", "使用系统默认程序打开"),
+                "compatibility.utools.shell.showItemInFolder" => {
+                    ("在文件管理器中定位", "在文件管理器中定位")
+                }
+                "compatibility.utools.shell.trashItem" => {
+                    ("移到回收站", "把项目移到可恢复的系统回收站")
+                }
+                _ => unreachable!(),
+            };
+            if !confirm_utools_local_path_action(
+                app,
+                &state.host,
+                &request.plugin_id,
+                action,
+                warning,
+                &path,
+            ) {
+                return Ok(json!({ "accepted": false, "cancelled": true }));
+            }
+            match request.method.as_str() {
+                "compatibility.utools.shell.openPath" => {
+                    crate::system_open::open_local_path(&path, None)?
+                }
+                "compatibility.utools.shell.showItemInFolder" => {
+                    crate::system_open::show_local_item_in_folder(&path)?
+                }
+                "compatibility.utools.shell.trashItem" => {
+                    crate::system_open::trash_local_item(&path)?
+                }
+                _ => unreachable!(),
+            }
+            Ok(json!({ "accepted": true }))
+        }
         "compatibility.utools.shell.beep" => {
             if request
                 .params
@@ -4730,6 +4828,15 @@ fn ensure_plugin_host_request_is_allowed(
     }
     if (request.method.starts_with("compatibility.utools.window.")
         || request.method.starts_with("compatibility.utools.input.")
+        || request
+            .method
+            .starts_with("compatibility.utools.shell.openPath")
+        || request
+            .method
+            .starts_with("compatibility.utools.shell.trashItem")
+        || request
+            .method
+            .starts_with("compatibility.utools.shell.showItemInFolder")
         || request.method == "compatibility.utools.clipboard.writeFiles")
         && !request.surface
     {
@@ -7810,12 +7917,12 @@ mod tests {
         validate_local_search_selection, validate_plugin_clipboard_text,
         validate_system_icon_request, validate_utools_copy_file_paths,
         validate_utools_dynamic_feature, validate_utools_expend_height, validate_utools_input_text,
-        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
-        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
-        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
-        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_utools_shell_local_path, validate_utools_window_request_params, CaptureFocusLease,
+        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
+        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
+        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
+        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
+        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -9799,6 +9906,33 @@ mod tests {
                 .expect_err("control characters must be rejected")
                 .contains("controls")
         );
+    }
+
+    #[test]
+    fn utools_local_shell_paths_are_lexical_before_confirmation() {
+        let missing = std::env::temp_dir().join(format!(
+            "ihub-utools-local-shell-missing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert_eq!(
+            validate_utools_shell_local_path(
+                &json!({ "path": missing.to_string_lossy() }),
+                "openPath"
+            )
+            .expect("missing paths are not probed before user confirmation"),
+            missing
+        );
+        assert!(
+            validate_utools_shell_local_path(&json!({ "path": "relative.txt" }), "openPath")
+                .expect_err("relative paths must be rejected")
+                .contains("absolute")
+        );
+        assert!(validate_utools_shell_local_path(
+            &json!({ "path": missing.to_string_lossy(), "extra": true }),
+            "trashItem"
+        )
+        .expect_err("extra fields must be rejected")
+        .contains("exactly one"));
     }
 
     #[test]
