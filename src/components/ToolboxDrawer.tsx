@@ -21,10 +21,8 @@ import {
   LoaderCircle,
   NotebookPen,
   Palette,
-  Pause,
   Pin,
   PinOff,
-  Play,
   Plus,
   QrCode,
   RefreshCw,
@@ -38,6 +36,11 @@ import { ColorWorkbench } from "./ColorWorkbench";
 import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
 import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
 import { TranslationWorkbench } from "./TranslationWorkbench";
+import {
+  RecordingWorkbench,
+  type RecordingPhase,
+  type RecordingResult,
+} from "./RecordingWorkbench";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
 import { RegionCaptureEditor } from "./RegionCaptureEditor";
 import {
@@ -50,6 +53,12 @@ import { command, isDesktop } from "../lib/desktop";
 import { displayLocalPath } from "../lib/path-display";
 import { decodeQrImageFile } from "../lib/qr-image-decode";
 import { activeRecordingElapsedMs, remainingActiveRecordingMs } from "../lib/recording-timing";
+import {
+  createDisplayMediaOptions,
+  createMediaRecorderOptions,
+  type RecordingQuality,
+  type RecordingSourcePreference,
+} from "../lib/screen-recording";
 import {
   createRegionCaptureDemoSource,
   validateRegionCaptureSize,
@@ -246,12 +255,7 @@ type RecordingStopReason =
   | "drawer-closed"
   | "error";
 
-export type RecordingPhase =
-  | "idle"
-  | "starting"
-  | "recording"
-  | "paused"
-  | "stopping";
+export type { RecordingPhase } from "./RecordingWorkbench";
 
 const numberBases: Array<{ base: ConversionBase; label: string }> = [
   { base: 2, label: "BIN" },
@@ -326,20 +330,6 @@ function revokeScreenshotObjectUrl(value: string | null): void {
 
 function isPluginId(value: string) {
   return /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value);
-}
-
-function formatElapsed(milliseconds: number) {
-  const totalSeconds = Math.floor(milliseconds / 1000);
-  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-
-function formatByteSize(bytes: number) {
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(0, Math.round(bytes / 1024))} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
 function readQuickNotes(): QuickNote[] {
@@ -715,6 +705,7 @@ export function ToolboxDrawer({
   const recordingStopReasonRef = useRef<RecordingStopReason | null>(null);
   const recordingPhaseRef = useRef<RecordingPhase>("idle");
   const recordingStartAttemptRef = useRef(0);
+  const recordingResultUrlRef = useRef<string | null>(null);
   const recordingActiveStartedAtRef = useRef<number | null>(null);
   const recordingActiveElapsedMsRef = useRef(0);
   const mountedRef = useRef(true);
@@ -788,6 +779,10 @@ export function ToolboxDrawer({
   const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>("idle");
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const [recordingBytes, setRecordingBytes] = useState(0);
+  const [recordingQuality, setRecordingQuality] = useState<RecordingQuality>("balanced");
+  const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null);
+  const [recordingSourceName, setRecordingSourceName] = useState<string | null>(null);
+  const [recordingSourcePreference, setRecordingSourcePreference] = useState<RecordingSourcePreference>("monitor");
   const [renameDirectory, setRenameDirectory] = useState("");
   const [renameDirectoryOpenId, setRenameDirectoryOpenId] = useState<string | null>(null);
   const [renameFind, setRenameFind] = useState("");
@@ -882,10 +877,6 @@ export function ToolboxDrawer({
       return null;
     }
   }, [webDavConnectedRoot, webDavDirectory]);
-  const isStartingRecording = recordingPhase === "starting";
-  const isRecording = recordingPhase === "recording" || recordingPhase === "paused";
-  const isRecordingPaused = recordingPhase === "paused";
-  const isStoppingRecording = recordingPhase === "stopping";
   const isRecordingSessionActive = recordingPhase !== "idle";
 
   const applyClipboardHistorySnapshot = useCallback((snapshot: ClipboardHistorySnapshot) => {
@@ -1146,6 +1137,10 @@ export function ToolboxDrawer({
           }
         }
         stopTracks();
+        if (recordingResultUrlRef.current) {
+          URL.revokeObjectURL(recordingResultUrlRef.current);
+          recordingResultUrlRef.current = null;
+        }
       };
     },
     [],
@@ -1989,10 +1984,11 @@ export function ToolboxDrawer({
     );
     transitionRecordingPhase("starting");
     try {
-      stream = await getDisplayMediaWithFocusLease({
-        audio: includeSystemAudio,
-        video: true,
-      });
+      stream = await getDisplayMediaWithFocusLease(createDisplayMediaOptions(
+        recordingSourcePreference,
+        recordingQuality,
+        includeSystemAudio,
+      ));
       // The system picker is asynchronous. Closing the toolbox while it is
       // visible invalidates this attempt, so a late stream is stopped before a
       // MediaRecorder can ever be created.
@@ -2005,11 +2001,21 @@ export function ToolboxDrawer({
         "video/webm;codecs=vp8,opus",
         "video/webm",
       ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
-      const recorder = supportedMimeType
-        ? new MediaRecorder(stream, { mimeType: supportedMimeType })
-        : new MediaRecorder(stream);
+      const recorderOptions = createMediaRecorderOptions(recordingQuality, supportedMimeType);
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, recorderOptions);
+      } catch {
+        // Some WebViews expose MediaRecorder but reject bitrate hints. Keep the
+        // real capture working with the browser-selected default in that case.
+        recorder = supportedMimeType
+          ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+          : new MediaRecorder(stream);
+      }
 
       recordingStreamRef.current = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      setRecordingSourceName(videoTrack?.label || "已选择的系统共享目标");
       recordingChunksRef.current = [];
       recordingBytesRef.current = 0;
       recordingStopReasonRef.current = null;
@@ -2039,7 +2045,20 @@ export function ToolboxDrawer({
         const mimeType = recorder.mimeType || "video/webm";
         if (chunks.length) {
           const blob = new Blob(chunks, { type: mimeType });
-          saveBlob(blob, `ihub-screen-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`);
+          const name = `ihub-screen-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+          saveBlob(blob, name);
+          if (recordingResultUrlRef.current) {
+            URL.revokeObjectURL(recordingResultUrlRef.current);
+          }
+          const resultUrl = URL.createObjectURL(blob);
+          recordingResultUrlRef.current = resultUrl;
+          setRecordingResult({
+            durationMs: recordingActiveElapsedMsRef.current,
+            mimeType,
+            name,
+            size: blob.size,
+            url: resultUrl,
+          });
           const completionMessage = stopReason === "duration-limit"
             ? "已达到 30 分钟录制上限，已自动停止并下载 WebM。"
             : stopReason === "size-limit"
@@ -2091,6 +2110,7 @@ export function ToolboxDrawer({
       recordingStopReasonRef.current = null;
       recordingActiveElapsedMsRef.current = 0;
       recordingActiveStartedAtRef.current = null;
+      setRecordingSourceName(null);
       setRecordingBytes(0);
       setRecordingElapsed(0);
       transitionRecordingPhase("idle");
@@ -2504,9 +2524,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2551,6 +2571,28 @@ export function ToolboxDrawer({
                 onInputChange={setTranslateInput}
                 onStartWindowDrag={onStartWindowDrag}
                 onToast={onToast}
+              />
+            ) : activeTab === "record" ? (
+              <RecordingWorkbench
+                bytes={recordingBytes}
+                elapsedMs={recordingElapsed}
+                includeSystemAudio={includeSystemAudio}
+                maximumBytes={maxScreenRecordingBytes}
+                maximumDurationMs={maxScreenRecordingDurationMs}
+                onClose={closeToolbox}
+                onIncludeSystemAudioChange={setIncludeSystemAudio}
+                onPause={pauseScreenRecording}
+                onQualityChange={setRecordingQuality}
+                onResume={resumeScreenRecording}
+                onSourcePreferenceChange={setRecordingSourcePreference}
+                onStart={() => void startScreenRecording()}
+                onStartWindowDrag={onStartWindowDrag}
+                onStop={() => stopScreenRecording("manual")}
+                phase={recordingPhase}
+                quality={recordingQuality}
+                result={recordingResult}
+                sourceName={recordingSourceName}
+                sourcePreference={recordingSourcePreference}
               />
             ) : (
               <>
@@ -3736,87 +3778,6 @@ export function ToolboxDrawer({
                       <p className="toolbox-note">密码只在点击连接时进入一次原生层；成功后前端立即清空它，浏览、下载和上传只发送随机连接 ID。下载与上传继续使用原生选择器、流式临时文件和不覆盖发布。断开只清理内存会话；“忘记”才会删除系统凭据。iHub 不做后台同步、自动上传或云端全文索引。</p>
                     </>
                   )}
-                </section>
-              ) : null}
-
-              {activeTab === "record" ? (
-                <section aria-labelledby="toolbox-record-title" id="toolbox-panel-record" role="tabpanel">
-                  <div className="toolbox-section-heading">
-                    <span className="toolbox-section-heading__icon"><Video size={17} /></span>
-                    <div>
-                      <h3 id="toolbox-record-title">屏幕录制</h3>
-                      <p>使用系统屏幕选择器录制当前显示器、窗口或标签页。</p>
-                    </div>
-                  </div>
-                  <div className={"recording-status" + (recordingPhase === "recording" ? " is-recording" : isRecordingPaused ? " is-paused" : isStoppingRecording ? " is-stopping" : "")}>
-                    <span className="recording-status__dot" />
-                    <div>
-                      <small>
-                        {recordingPhase === "recording"
-                          ? "RECORDING · ACTIVE LIMIT"
-                          : isRecordingPaused
-                            ? "PAUSED · TIME FROZEN"
-                            : isStoppingRecording
-                              ? "SAVING WEBM"
-                              : isStartingRecording
-                                ? "WAITING FOR PERMISSION"
-                                : "READY"}
-                      </small>
-                      <strong>
-                        {recordingPhase === "recording"
-                          ? `正在录制 ${formatElapsed(recordingElapsed)}`
-                          : isRecordingPaused
-                            ? `录制已暂停 ${formatElapsed(recordingElapsed)}`
-                            : isStoppingRecording
-                              ? "正在保存已录制的 WebM"
-                              : isStartingRecording
-                                ? "请选择要录制的屏幕或窗口"
-                                : "准备开始屏幕录制"}
-                      </strong>
-                      {isRecording || isStoppingRecording ? (
-                        <span className="recording-status__meta">
-                          已缓存 {formatByteSize(recordingBytes)} / {formatByteSize(maxScreenRecordingBytes)} · 剩余活跃录制 {formatElapsed(Math.max(0, maxScreenRecordingDurationMs - recordingElapsed))}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                  <label className="toolbox-checkbox">
-                    <input
-                      checked={includeSystemAudio}
-                      disabled={isRecordingSessionActive}
-                      onChange={(event) => setIncludeSystemAudio(event.target.checked)}
-                      type="checkbox"
-                    />
-                    请求录制系统音频（取决于系统与选择目标）
-                  </label>
-                  <div className="toolbox-action-row toolbox-record-actions">
-                    <button
-                      className={"toolbox-record-action" + (isRecordingSessionActive ? " is-recording" : "")}
-                      disabled={isStartingRecording || isStoppingRecording}
-                      onClick={() => void (isRecording ? stopScreenRecording("manual") : startScreenRecording())}
-                      type="button"
-                    >
-                      {isRecordingSessionActive ? <span className="toolbox-record-action__stop" /> : <Video size={16} />}
-                      {isStoppingRecording
-                        ? "正在保存 WebM…"
-                        : isRecording
-                          ? "停止并保存 WebM"
-                          : isStartingRecording
-                            ? "正在打开系统选择器…"
-                            : "选择屏幕并开始录制"}
-                    </button>
-                    {isRecording ? (
-                      <button
-                        className="toolbox-secondary-action"
-                        onClick={isRecordingPaused ? resumeScreenRecording : pauseScreenRecording}
-                        type="button"
-                      >
-                        {isRecordingPaused ? <Play size={14} /> : <Pause size={14} />}
-                        {isRecordingPaused ? "继续录制" : "暂停录制"}
-                      </button>
-                    ) : null}
-                  </div>
-                  <p className="toolbox-note">录制完成后会下载 WebM 文件。浏览器会在本机内存中收集片段，达到 30 分钟活跃录制或 512 MB 触发阈值时会自动保存已录制部分；暂停不消耗 30 分钟倒计时。关闭工具箱会立刻停止并保存，系统选择器晚到的授权不会在后台开始录制。稳定 MP4、FFmpeg 转码、系统级快捷键和更深系统集成仍需独立的原生插件实现。</p>
                 </section>
               ) : null}
 
