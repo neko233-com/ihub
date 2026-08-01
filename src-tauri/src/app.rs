@@ -3557,6 +3557,31 @@ fn plugin_host_call_for_active_lease(
             )?;
             Ok(json!({ "removed": removed }))
         }
+        "compatibility.utools.window.hideMain" => {
+            validate_utools_window_request_params(
+                &request.params,
+                &["isRestorePreWindow"],
+            )?;
+            if let Some(value) = request.params.get("isRestorePreWindow") {
+                if !value.is_boolean() {
+                    return Err("uTools hideMainWindow expects a boolean argument.".to_owned());
+                }
+            }
+            Ok(json!(true))
+        }
+        "compatibility.utools.window.showMain" => {
+            validate_utools_window_request_params(&request.params, &[])?;
+            Ok(json!(true))
+        }
+        "compatibility.utools.window.outPlugin" => {
+            validate_utools_window_request_params(&request.params, &["isKill"])?;
+            if let Some(value) = request.params.get("isKill") {
+                if !value.is_boolean() {
+                    return Err("uTools outPlugin expects a boolean argument.".to_owned());
+                }
+            }
+            Ok(json!(true))
+        }
         "lifecycle.ready" => Ok(json!({ "ok": true })),
         "lifecycle.dispose" => {
             clear_plugin_runtime_state(&state.host, &request.plugin_id);
@@ -3791,6 +3816,12 @@ fn ensure_plugin_host_request_is_allowed(
     {
         return Err(
             "uTools compatibility host methods are available only to validated imported uTools packages."
+                .to_owned(),
+        );
+    }
+    if request.method.starts_with("compatibility.utools.window.") && !request.surface {
+        return Err(
+            "uTools window compatibility methods require the plugin's visible active surface."
                 .to_owned(),
         );
     }
@@ -6328,6 +6359,22 @@ fn decode_utools_db_storage_key(encoded: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn validate_utools_window_request_params(
+    params: &Value,
+    allowed_keys: &[&str],
+) -> Result<(), String> {
+    let Some(object) = params.as_object() else {
+        return Err("uTools window compatibility parameters must be an object.".to_owned());
+    };
+    if object
+        .keys()
+        .any(|key| !allowed_keys.contains(&key.as_str()))
+    {
+        return Err("uTools window compatibility request contains unsupported options.".to_owned());
+    }
+    Ok(())
+}
+
 fn required_value<'a>(params: &'a Value, key: &str) -> Result<&'a Value, String> {
     params
         .get(key)
@@ -6461,12 +6508,12 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        validate_system_icon_request, CaptureFocusLease, CursorColorApproval,
-        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
-        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
-        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_system_icon_request, validate_utools_window_request_params, CaptureFocusLease,
+        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
+        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
+        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
+        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
+        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -6488,6 +6535,22 @@ mod tests {
         assert_eq!(decode_utools_db_storage_key("0"), None);
         assert_eq!(decode_utools_db_storage_key("zz"), None);
         assert_eq!(decode_utools_db_storage_key("ff"), None);
+    }
+
+    #[test]
+    fn utools_window_requests_accept_only_declared_boolean_options() {
+        assert!(validate_utools_window_request_params(&json!({}), &[]).is_ok());
+        assert!(validate_utools_window_request_params(
+            &json!({ "isRestorePreWindow": true }),
+            &["isRestorePreWindow"],
+        )
+        .is_ok());
+        assert!(validate_utools_window_request_params(
+            &json!({ "nativeHandle": "forbidden" }),
+            &["isRestorePreWindow"],
+        )
+        .is_err());
+        assert!(validate_utools_window_request_params(&json!([]), &[]).is_err());
     }
 
     #[test]

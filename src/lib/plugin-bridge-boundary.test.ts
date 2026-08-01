@@ -20,6 +20,8 @@ describe("plugin iframe Bridge boundary", () => {
   it("accepts only the fixed host method contract and exact envelope", () => {
     expect(validatePluginBridgeCall(call()).ok).toBe(true);
     expect(validatePluginBridgeCall(call("ui.subInput.remove", undefined)).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("ui.subInput.select", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.outPlugin", { isKill: false })).ok).toBe(true);
     expect(validatePluginBridgeCall(call(), "com.example.safe").ok).toBe(true);
     expect(validatePluginBridgeCall(call(), "com.example.other").ok).toBe(false);
     expect(validatePluginBridgeCall(call("process.spawn")).ok).toBe(false);

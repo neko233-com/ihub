@@ -943,6 +943,9 @@ const pending = new Map();
 const readyCallbacks = [];
 const enterCallbacks = [];
 const outCallbacks = [];
+let pluginOutDispatched = false;
+let subInputChangeCallback = null;
+let currentWindowType = "main";
 function call(method, params) {{
   const id = "utools-compat-" + (++sequence).toString(36);
   return new Promise((resolve, reject) => {{
@@ -953,6 +956,11 @@ function call(method, params) {{
 }}
 function invoke(callbacks, value) {{
   for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
+}}
+function invokePluginOut(isKill) {{
+  if (pluginOutDispatched) return;
+  pluginOutDispatched = true;
+  invoke(outCallbacks, Boolean(isKill));
 }}
 const dbStorageState = Object.create(null);
 const dbStorageVersions = new Map();
@@ -1014,7 +1022,20 @@ window.addEventListener("message", (event) => {{
     message.ok ? request.resolve(message.result) : request.reject(new Error(typeof message.error === "string" ? message.error : "iHub host request failed."));
     return;
   }}
-  if (message.type !== "event" || message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
+  if (message.type !== "event") return;
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/subInput.change") {{
+    if (typeof subInputChangeCallback === "function") {{
+      const text = message.payload && typeof message.payload.text === "string" ? message.payload.text : "";
+      try {{ subInputChangeCallback({{ text }}); }} catch (error) {{ console.error("uTools compatibility sub-input callback failed", error); }}
+    }}
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.windowType") {{
+    const value = message.payload && message.payload.windowType;
+    if (value === "main" || value === "detach") currentWindowType = value;
+    return;
+  }}
+  if (message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
   const commandId = message.payload && message.payload.commandId;
   const command = config.commands.find((candidate) => candidate.commandId === commandId);
   if (!command) return;
@@ -1026,6 +1047,44 @@ const utools = Object.freeze({{
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
+  setSubInput(callback, placeholder, isFocus) {{
+    if (typeof callback !== "function") return false;
+    if (placeholder !== undefined && typeof placeholder !== "string") return false;
+    if (isFocus !== undefined && typeof isFocus !== "boolean") return false;
+    const previous = subInputChangeCallback;
+    subInputChangeCallback = callback;
+    void call("ui.subInput.set", {{ placeholder: placeholder || "", focus: isFocus !== false }}).catch((error) => {{
+      if (subInputChangeCallback === callback) subInputChangeCallback = previous;
+      console.error("iHub compatibility sub-input setup failed", error);
+    }});
+    return true;
+  }},
+  removeSubInput() {{
+    subInputChangeCallback = null;
+    void call("ui.subInput.remove", {{}}).catch((error) => console.error("iHub compatibility sub-input removal failed", error));
+    return true;
+  }},
+  setSubInputValue(value) {{
+    if (typeof value !== "string") return false;
+    void call("ui.subInput.setValue", {{ value }}).catch((error) => console.error("iHub compatibility sub-input update failed", error));
+    return true;
+  }},
+  subInputFocus() {{ void call("ui.subInput.focus", {{}}).catch((error) => console.error("iHub compatibility sub-input focus failed", error)); return true; }},
+  subInputBlur() {{ void call("ui.subInput.blur", {{}}).catch((error) => console.error("iHub compatibility sub-input blur failed", error)); return true; }},
+  subInputSelect() {{ void call("ui.subInput.select", {{}}).catch((error) => console.error("iHub compatibility sub-input selection failed", error)); return true; }},
+  hideMainWindow(isRestorePreWindow) {{
+    if (isRestorePreWindow !== undefined && typeof isRestorePreWindow !== "boolean") return false;
+    void call("compatibility.utools.window.hideMain", {{ isRestorePreWindow: isRestorePreWindow !== false }}).catch((error) => console.error("iHub compatibility window hide failed", error));
+    return true;
+  }},
+  showMainWindow() {{ void call("compatibility.utools.window.showMain", {{}}).catch((error) => console.error("iHub compatibility window show failed", error)); return true; }},
+  outPlugin(isKill) {{
+    if (isKill !== undefined && typeof isKill !== "boolean") return false;
+    invokePluginOut(Boolean(isKill));
+    void call("compatibility.utools.window.outPlugin", {{ isKill: Boolean(isKill) }})
+      .catch((error) => console.error("iHub compatibility plugin exit failed", error));
+    return true;
+  }},
   copyText(value) {{
     if (typeof value !== "string" || !navigator.clipboard || typeof navigator.clipboard.writeText !== "function") return false;
     void navigator.clipboard.writeText(value).catch((error) => console.error("iHub compatibility clipboard write failed", error));
@@ -1035,7 +1094,11 @@ const utools = Object.freeze({{
     if (typeof callback !== "function") return;
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
   }},
-  getWindowType() {{ return "main"; }},
+  getWindowType() {{ return currentWindowType; }},
+  getAppName() {{ return "iHub"; }},
+  getAppVersion() {{ return config.appVersion; }},
+  getUser() {{ return null; }},
+  isDev() {{ return false; }},
   isDarkColors() {{ return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches; }},
   isWindows() {{ return /\\bwindows?\\b|\\bwin(?:32|64)\\b/.test((navigator.platform + " " + navigator.userAgent).toLowerCase()); }},
   isMacOS() {{ const platform = (navigator.platform + " " + navigator.userAgent).toLowerCase(); return platform.includes("mac") || platform.includes("darwin"); }},
@@ -1056,7 +1119,7 @@ call("compatibility.utools.dbStorage.snapshot", {{}})
   .then(() => call("lifecycle.ready", {{}}))
   .then(() => invoke(readyCallbacks, undefined))
   .catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
-window.addEventListener("pagehide", () => {{ invoke(outCallbacks, undefined); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
+window.addEventListener("pagehide", () => {{ invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
 }})();
 "#
     )
@@ -1172,6 +1235,7 @@ mod tests {
     #[test]
     fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
         let config = UtoolsCompatRuntimeConfig {
+            app_version: "0.1.0".to_owned(),
             plugin_id: "utools-color-picker".to_owned(),
             commands: vec![UtoolsCompatCommand {
                 command_id: "utools-feature-1".to_owned(),
@@ -1190,6 +1254,12 @@ mod tests {
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        assert!(script.contains("setSubInput"));
+        assert!(script.contains("subInputSelect"));
+        assert!(script.contains("compatibility.utools.window.hideMain"));
+        assert!(script.contains("compatibility.utools.window.outPlugin"));
+        assert!(script.contains("getAppVersion"));
+        assert!(script.contains("getUser() { return null; }"));
         let storage_snapshot = script
             .find("compatibility.utools.dbStorage.snapshot")
             .expect("bootstrap should hydrate the compatibility storage cache");

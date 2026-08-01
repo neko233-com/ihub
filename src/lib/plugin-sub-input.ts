@@ -4,6 +4,7 @@ export const PLUGIN_SUB_INPUT_MAX_VALUE_LENGTH = 4_096;
 export interface PluginSubInputHostState {
   focusVersion: number;
   placeholder: string;
+  selectionVersion: number;
   value: string;
 }
 
@@ -19,7 +20,10 @@ export type PluginSubInputBridgeAction =
   | {
       kind: "set-value";
       value: string;
-    };
+    }
+  | { kind: "focus" }
+  | { kind: "blur" }
+  | { kind: "select" };
 
 export type PluginSubInputBridgeParseResult =
   | { handled: false }
@@ -64,6 +68,9 @@ export function parsePluginSubInputBridgeCall(
     method !== "ui.subInput.set"
     && method !== "ui.subInput.remove"
     && method !== "ui.subInput.setValue"
+    && method !== "ui.subInput.focus"
+    && method !== "ui.subInput.blur"
+    && method !== "ui.subInput.select"
   ) {
     return { handled: false };
   }
@@ -86,6 +93,25 @@ export function parsePluginSubInputBridgeCall(
       };
     }
     return { handled: true, ok: true, action: { kind: "remove" } };
+  }
+
+  if (
+    method === "ui.subInput.focus"
+    || method === "ui.subInput.blur"
+    || method === "ui.subInput.select"
+  ) {
+    if (!hasOnlyKeys(params, [])) {
+      return {
+        handled: true,
+        ok: false,
+        error: `${method} does not accept parameters.`,
+      };
+    }
+    return {
+      handled: true,
+      ok: true,
+      action: { kind: method.slice("ui.subInput.".length) as "focus" | "blur" | "select" },
+    };
   }
 
   if (method === "ui.subInput.setValue") {
@@ -196,6 +222,7 @@ export function resolvePluginSubInputBridgeCall(
           ? (current?.focusVersion ?? 0) + 1
           : current?.focusVersion ?? 0,
         placeholder: action.placeholder,
+        selectionVersion: current?.selectionVersion ?? 0,
         value: current?.value ?? "",
       },
     };
@@ -207,6 +234,32 @@ export function resolvePluginSubInputBridgeCall(
       result: true,
       state: null,
       focusPluginFrame: true,
+    };
+  }
+  if (action.kind === "blur") {
+    return {
+      handled: true,
+      ok: true,
+      result: Boolean(current),
+      state: current,
+      focusPluginFrame: Boolean(current),
+    };
+  }
+  if (action.kind === "focus" || action.kind === "select") {
+    if (!current) {
+      return { handled: true, ok: true, result: false, state: null };
+    }
+    return {
+      handled: true,
+      ok: true,
+      result: true,
+      state: {
+        ...current,
+        focusVersion: current.focusVersion + 1,
+        selectionVersion: action.kind === "select"
+          ? current.selectionVersion + 1
+          : current.selectionVersion,
+      },
     };
   }
   if (!current) {

@@ -163,7 +163,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | --- | --- | --- |
 | `commands.register` | 无 | 注册命令处理器。 |
 | `search.register` | 无 | 注册低延迟搜索提供器。 |
-| `subInput.set/setValue/remove` | 无（仅可见 surface 租约） | 控制由可信 iHub 宿主绘制的有界文本输入。回调留在 iframe 内；隐藏搜索 runtime、原生 worker 和失效租约不能创建或修改输入。关闭、替换、禁用或 dispose 插件页会清除值和回调。 |
+| `subInput.set/setValue/remove/focus/blur/select` | 无（仅可见 surface 租约） | 控制由可信 iHub 宿主绘制的有界文本输入。回调留在 iframe 内；隐藏搜索 runtime、原生 worker 和失效租约不能创建、修改或聚焦输入。关闭、替换、禁用或 dispose 插件页会清除值和回调。 |
 | `settings.get/set` | 无 | 插件命名空间下的设置存储。密钥设置必须在清单上标注 `secret`。 |
 | `clipboard.readText/writeText` | `clipboard.read/write` | 读写剪贴板文本。 |
 | `clipboard.history.snapshot` | `clipboard.history` | 仅在插件主动调用时返回最多 36 条、已经由用户启用的内置纯文本历史；不会开启采集、读取当前系统剪贴板或修改全局历史。 |
@@ -183,6 +183,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | `logger` | 无 | 写入带插件 ID 的宿主日志。 |
 
 `bootstrapPlugin` 运行期间还会安装一个冻结的最小兼容对象，并让 `window.utools === window.rubick`。兼容对象提供 `setSubInput`、`removeSubInput`、`setSubInputValue`，以及映射到上表既有权限检查的 `copyText`、`showNotification`、`shellOpenExternal`、`shellOpenPath`、`screenColorPick`；另有只读的主题、平台和 `"main"` 窗口类型查询。同步 `boolean` 返回值只表示参数已通过 SDK 本地校验且异步宿主请求已排队，真正的权限或租约拒绝仍写入 `BootstrapOptions.onError`。兼容层不会覆盖页面已有的同名全局，并在 runtime dispose 时恢复原值。
+
+直接导入的公开 uTools 包使用另一套宿主固定注入层：除 ready/enter/out、`dbStorage` 和逐次确认取色外，还提供官方签名一致的 `setSubInput`、`removeSubInput`、`setSubInputValue`、`subInputFocus/Blur/Select`，以及仅限当前可见活动 surface 的 `hideMainWindow`、`showMainWindow`、`outPlugin`。窗口请求先经过原生侧“已验证 uTools 包 + 活动租约”复核，响应成功后才由可信 React 父层隐藏/显示 iHub 或退出当前插件。`getAppName/getAppVersion` 返回 iHub 的真实产品信息，未接入 uTools 账号体系时 `getUser()` 明确返回 `null`。
 
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 

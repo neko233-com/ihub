@@ -3013,6 +3013,20 @@ export function App() {
   const hotkeyResetAction = launcherHotkeyResetAction(health?.launcherHotkey);
 
   const returnToLauncher = revealLauncherSurface;
+  const hidePluginHostWindow = useCallback(async () => {
+    if (!isDesktop()) {
+      throw new Error("uTools 主窗口控制仅在 iHub 桌面端可用。");
+    }
+    await getCurrentWindow().hide();
+  }, []);
+  const showPluginHostWindow = useCallback(async () => {
+    if (!isDesktop()) {
+      throw new Error("uTools 主窗口控制仅在 iHub 桌面端可用。");
+    }
+    const window = getCurrentWindow();
+    await window.show();
+    await window.setFocus();
+  }, []);
 
   const detachActivePlugin = async () => {
     const plugin = activePlugin;
@@ -4269,6 +4283,7 @@ export function App() {
           <PluginFrontendFrame
             onDetach={detachActivePlugin}
             onClose={returnToLauncher}
+            onHideMainWindow={hidePluginHostWindow}
             onPendingEventHandled={(eventId) => {
               setPendingPluginEvent((current) => (current?.id === eventId ? null : current));
             }}
@@ -4277,6 +4292,7 @@ export function App() {
             onSearchProviderUnregistered={unmarkSearchProvider}
             onSurfaceReady={dispatchLauncherContextAfterSurfaceReady}
             onSurfaceUnavailable={discardPendingLauncherContextForSurface}
+            onShowMainWindow={showPluginHostWindow}
             onToast={showToast}
             pendingEvent={pendingPluginEvent}
             plugin={activePlugin}

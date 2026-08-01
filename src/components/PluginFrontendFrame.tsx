@@ -43,6 +43,11 @@ interface PluginFrontendFrameProps {
   plugin: PluginInfo | null;
   pendingEvent: PluginFrontendEvent | null;
   onClose: () => void;
+  /** uTools-compatible main-window controls remain parent-owned. The iframe
+   * can request them only after the native host validates its compatibility
+   * package and active visible lease. */
+  onHideMainWindow?: (restorePreviousWindow: boolean) => void | Promise<void>;
+  onShowMainWindow?: () => void | Promise<void>;
   onPendingEventHandled: (eventId: string) => void;
   onToast: (message: string) => void;
   /** A hidden runtime hosts only manifest-declared search providers. It keeps
@@ -209,6 +214,8 @@ export function PluginFrontendFrame({
   plugin,
   pendingEvent,
   onClose,
+  onHideMainWindow,
+  onShowMainWindow,
   onPendingEventHandled,
   onToast,
   mode = "surface",
@@ -274,6 +281,16 @@ export function PluginFrontendFrame({
     postEventToFrameRef.current = postEventToFrame;
   }, [postEventToFrame]);
 
+  useEffect(() => {
+    if (!bridgeIsReady || !pluginId || runtimeOnly) {
+      return;
+    }
+    postEventToFrame(
+      `ihub://plugin/${pluginId}/event/utools.windowType`,
+      { windowType: detachedHost ? "detach" : "main" },
+    );
+  }, [bridgeIsReady, detachedHost, pluginId, postEventToFrame, runtimeOnly]);
+
   const detachPluginSurface = useCallback(() => {
     if (!onDetach || !pluginId || runtimeOnly || detachedHost || detaching) {
       return;
@@ -318,6 +335,13 @@ export function PluginFrontendFrame({
     }
     subInputElementRef.current?.focus({ preventScroll: true });
   }, [subInput?.focusVersion]);
+
+  useEffect(() => {
+    if (!subInput || subInput.selectionVersion === 0) {
+      return;
+    }
+    subInputElementRef.current?.select();
+  }, [subInput?.selectionVersion]);
 
   const handleSubInputChange = useCallback((value: string) => {
     const current = subInputRef.current;
@@ -721,6 +745,28 @@ export function PluginFrontendFrame({
         setPendingCursorColorRequest(pendingRequest);
         return;
       }
+      const utoolsWindowMethod = bridgeCall.request.method.startsWith("compatibility.utools.window.")
+        ? bridgeCall.request.method
+        : null;
+      if (
+        utoolsWindowMethod
+        && (
+          runtimeOnly
+          || (utoolsWindowMethod === "compatibility.utools.window.hideMain" && !onHideMainWindow)
+          || (utoolsWindowMethod === "compatibility.utools.window.showMain" && !onShowMainWindow)
+        )
+      ) {
+        reply({
+          channel: RESPONSE_CHANNEL,
+          type: "response",
+          id: bridgeCall.id,
+          ok: false,
+          error: runtimeOnly
+            ? "uTools window controls are unavailable from a hidden plugin runtime."
+            : "This plugin host cannot control the iHub main window.",
+        });
+        return;
+      }
       const providerId = bridgeCall.request.method === "search.register"
         && bridgeCall.request.params
         && typeof bridgeCall.request.params === "object"
@@ -766,6 +812,22 @@ export function PluginFrontendFrame({
             ok: true,
             result,
           });
+          if (utoolsWindowMethod) {
+            window.setTimeout(() => {
+              if (utoolsWindowMethod === "compatibility.utools.window.hideMain") {
+                const params = bridgeCall.request.params as { isRestorePreWindow?: boolean } | undefined;
+                void Promise.resolve(onHideMainWindow?.(params?.isRestorePreWindow ?? true)).catch((error) => {
+                  onToast(error instanceof Error ? error.message : "iHub 主窗口未能隐藏。");
+                });
+              } else if (utoolsWindowMethod === "compatibility.utools.window.showMain") {
+                void Promise.resolve(onShowMainWindow?.()).catch((error) => {
+                  onToast(error instanceof Error ? error.message : "iHub 主窗口未能显示。");
+                });
+              } else if (utoolsWindowMethod === "compatibility.utools.window.outPlugin") {
+                onClose();
+              }
+            }, 0);
+          }
           if (bridgeCall.request.method === "lifecycle.ready") {
             // Runtime.activate() only makes this call after its handlers have
             // registered. Delay host-delivered work until that handshake is
@@ -813,9 +875,13 @@ export function PluginFrontendFrame({
       window.removeEventListener("message", onMessage);
     };
   }, [
+    onClose,
+    onHideMainWindow,
     onRuntimeDisposed,
     onSearchProviderRegistered,
     onSearchProviderUnregistered,
+    onShowMainWindow,
+    onToast,
     pluginId,
     runtimeOnly,
     sourceLeaseId,

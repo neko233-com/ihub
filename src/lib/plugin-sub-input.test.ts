@@ -7,7 +7,7 @@ import {
 } from "./plugin-sub-input";
 
 describe("plugin sub-input bridge parser", () => {
-  it("accepts only the three renderer-owned methods with bounded JSON values", () => {
+  it("accepts only the renderer-owned methods with bounded JSON values", () => {
     expect(parsePluginSubInputBridgeCall("ui.subInput.set", undefined)).toEqual({
       handled: true,
       ok: true,
@@ -32,6 +32,21 @@ describe("plugin sub-input bridge parser", () => {
       handled: true,
       ok: true,
       action: { kind: "remove" },
+    });
+    expect(parsePluginSubInputBridgeCall("ui.subInput.focus", {})).toEqual({
+      handled: true,
+      ok: true,
+      action: { kind: "focus" },
+    });
+    expect(parsePluginSubInputBridgeCall("ui.subInput.blur", {})).toEqual({
+      handled: true,
+      ok: true,
+      action: { kind: "blur" },
+    });
+    expect(parsePluginSubInputBridgeCall("ui.subInput.select", {})).toEqual({
+      handled: true,
+      ok: true,
+      action: { kind: "select" },
     });
     expect(parsePluginSubInputBridgeCall("shell.openExternal", {})).toEqual({
       handled: false,
@@ -63,6 +78,7 @@ describe("plugin sub-input bridge parser", () => {
       state: {
         focusVersion: 1,
         placeholder: "Filter",
+        selectionVersion: 0,
         value: "",
       },
     });
@@ -82,10 +98,28 @@ describe("plugin sub-input bridge parser", () => {
       state: {
         focusVersion: 1,
         placeholder: "Filter",
+        selectionVersion: 0,
         value: "needle",
       },
       emitText: "needle",
     });
+    expect(resolvePluginSubInputBridgeCall(
+      created.state,
+      "ui.subInput.select",
+      {},
+      false,
+    )).toMatchObject({
+      handled: true,
+      ok: true,
+      result: true,
+      state: { focusVersion: 2, selectionVersion: 1 },
+    });
+    expect(resolvePluginSubInputBridgeCall(
+      created.state,
+      "ui.subInput.blur",
+      {},
+      false,
+    )).toMatchObject({ handled: true, ok: true, result: true, focusPluginFrame: true });
     expect(resolvePluginSubInputBridgeCall(
       created.state,
       "ui.subInput.remove",
@@ -126,6 +160,8 @@ describe("plugin sub-input bridge parser", () => {
       command: "child_process",
     })).toMatchObject({ handled: true, error: expect.any(String) });
     expect(parsePluginSubInputBridgeCall("ui.subInput.setValue", ["value"]))
+      .toMatchObject({ handled: true, error: expect.any(String) });
+    expect(parsePluginSubInputBridgeCall("ui.subInput.focus", { force: true }))
       .toMatchObject({ handled: true, error: expect.any(String) });
   });
 });

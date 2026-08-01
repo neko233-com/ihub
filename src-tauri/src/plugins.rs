@@ -261,6 +261,7 @@ pub(crate) struct PluginFrontendAssetBundle {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UtoolsCompatRuntimeConfig {
+    pub(crate) app_version: String,
     pub(crate) plugin_id: String,
     pub(crate) commands: Vec<UtoolsCompatCommand>,
 }
@@ -1888,6 +1889,7 @@ impl PluginManager {
                 .compatibility
                 .is_utools()
                 .then(|| UtoolsCompatRuntimeConfig {
+                    app_version: env!("CARGO_PKG_VERSION").to_owned(),
                     plugin_id: plugin_id.to_owned(),
                     commands: manifest.utools_commands,
                 }),
