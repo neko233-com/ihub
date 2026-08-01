@@ -1152,6 +1152,26 @@ const utools = Object.freeze({{
     }});
     return true;
   }},
+  findInPage(text, options) {{
+    if (typeof text !== "string" || text.length === 0 || Array.from(text).length > 512) return;
+    if (options !== undefined && (!options || typeof options !== "object" || Array.isArray(options))) return;
+    const allowed = new Set(["forward", "findNext", "matchCase", "wordStart", "medialCapitalAsWordStart"]);
+    if (options && (Object.keys(options).some((key) => !allowed.has(key)) || Object.values(options).some((value) => typeof value !== "boolean"))) return;
+    if (typeof window.find === "function") {{
+      window.find(text, options?.matchCase === true, options?.forward === false, true, false, false, false);
+    }}
+  }},
+  stopFindInPage(action) {{
+    if (!["clearSelection", "keepSelection", "activateSelection"].includes(action)) return;
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount === 0) return;
+    if (action === "activateSelection") {{
+      const node = selection.anchorNode;
+      const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+      if (element instanceof HTMLElement) element.focus({{ preventScroll: true }});
+    }}
+    if (action === "clearSelection") selection.removeAllRanges();
+  }},
   setSubInput(callback, placeholder, isFocus) {{
     if (typeof callback !== "function") return false;
     if (placeholder !== undefined && typeof placeholder !== "string") return false;
@@ -1407,6 +1427,9 @@ mod tests {
         assert!(script.contains("compatibility.utools.features.set"));
         assert!(script.contains("compatibility.utools.features.remove"));
         assert!(script.contains("utools-dynamic-"));
+        assert!(script.contains("findInPage"));
+        assert!(script.contains("stopFindInPage"));
+        assert!(script.contains("selection.removeAllRanges()"));
         assert!(script.contains("setSubInput"));
         assert!(script.contains("subInputSelect"));
         assert!(script.contains("compatibility.utools.window.hideMain"));
