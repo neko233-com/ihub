@@ -938,6 +938,8 @@ fn render_utools_compat_script(config: &UtoolsCompatRuntimeConfig) -> Result<Vec
 const config = {config};
 const responseChannel = "ihub-host-bridge/v1";
 const requestChannel = "ihub-plugin-bridge/v1";
+const copyImageMaxPngBytes = 4194304;
+const copyImageMaxDataUrlChars = 5592430;
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -955,6 +957,21 @@ function call(method, params) {{
     pending.set(id, {{ resolve, reject, timeout }});
     window.parent.postMessage({{ channel: requestChannel, type: "call", id, request: {{ pluginId: config.pluginId, method, params: params || {{}} }} }}, "*");
   }});
+}}
+function pngDataUrlForCopyImage(value) {{
+  if (typeof value === "string") {{
+    return value.startsWith("data:image/png;base64,iVBORw0KGgo") && value.length <= copyImageMaxDataUrlChars
+      ? value
+      : null;
+  }}
+  if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > copyImageMaxPngBytes) return null;
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (signature.some((byte, index) => value[index] !== byte)) return null;
+  let binary = "";
+  for (let offset = 0; offset < value.byteLength; offset += 32768) {{
+    binary += String.fromCharCode(...value.subarray(offset, Math.min(value.byteLength, offset + 32768)));
+  }}
+  return "data:image/png;base64," + btoa(binary);
 }}
 function invoke(callbacks, value) {{
   for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
@@ -1234,6 +1251,13 @@ const utools = Object.freeze({{
       .catch((error) => console.error("iHub compatibility clipboard write failed", error));
     return true;
   }},
+  copyImage(value) {{
+    const dataUrl = pngDataUrlForCopyImage(value);
+    if (!dataUrl) return false;
+    void call("compatibility.utools.clipboard.writeImage", {{ dataUrl }})
+      .catch((error) => console.error("iHub compatibility image copy failed", error));
+    return true;
+  }},
   showNotification(body, clickFeatureCode) {{
     if (typeof body !== "string") return;
     const trimmedBody = body.trim();
@@ -1424,6 +1448,10 @@ mod tests {
         assert!(script.contains("rubick"));
         assert!(script.contains("copyText"));
         assert!(script.contains("compatibility.utools.clipboard.writeText"));
+        assert!(script.contains("copyImage"));
+        assert!(script.contains("pngDataUrlForCopyImage"));
+        assert!(script.contains("value instanceof Uint8Array"));
+        assert!(script.contains("compatibility.utools.clipboard.writeImage"));
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("compatibility.utools.notification.show"));

@@ -13,7 +13,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
-use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+use image::{codecs::png::PngEncoder, ColorType, ImageEncoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
@@ -1322,6 +1322,8 @@ const MAX_PASTED_IMAGE_EDGE: usize = 8_192;
 const MAX_PASTED_IMAGE_PIXELS: usize = 12_000_000;
 const MAX_PASTED_IMAGE_RAW_BYTES: usize = 48 * 1024 * 1024;
 const MAX_PASTED_IMAGE_PNG_BYTES: usize = 12 * 1024 * 1024;
+const MAX_UTOOLS_COPY_IMAGE_PNG_BYTES: usize = 4 * 1024 * 1024;
+const UTOOLS_COPY_IMAGE_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 /// Launcher context is intentionally shorter than a filesystem picker grant:
 /// it exists only to bridge one already-chosen action while a frontend loads.
 const LAUNCHER_CONTEXT_TTL: Duration = Duration::from_secs(60);
@@ -3355,6 +3357,81 @@ fn clipboard_image_from_rgba(image: arboard::ImageData<'static>) -> Result<Clipb
     })
 }
 
+fn decode_utools_clipboard_png_data_url(
+    data_url: &str,
+) -> Result<arboard::ImageData<'static>, String> {
+    let encoded = data_url
+        .strip_prefix(UTOOLS_COPY_IMAGE_DATA_URL_PREFIX)
+        .ok_or_else(|| "uTools copyImage accepts only a PNG data URL or Uint8Array.".to_owned())?;
+    let max_encoded_chars = MAX_UTOOLS_COPY_IMAGE_PNG_BYTES.div_ceil(3) * 4;
+    if encoded.is_empty() || encoded.len() > max_encoded_chars {
+        return Err(format!(
+            "uTools copyImage PNG payloads are limited to {MAX_UTOOLS_COPY_IMAGE_PNG_BYTES} bytes."
+        ));
+    }
+    let png = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| "uTools copyImage received malformed PNG base64 data.".to_owned())?;
+    if png.len() > MAX_UTOOLS_COPY_IMAGE_PNG_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("uTools copyImage received an invalid or oversized PNG.".to_owned());
+    }
+
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_PASTED_IMAGE_EDGE as u32);
+    limits.max_image_height = Some(MAX_PASTED_IMAGE_EDGE as u32);
+    // The normalized RGBA output is capped separately at 48 MiB. Give the
+    // decoder a small, fixed amount of workspace in addition to that output
+    // instead of inheriting image-rs's 512 MiB default.
+    limits.max_alloc = Some((MAX_PASTED_IMAGE_RAW_BYTES + 16 * 1024 * 1024) as u64);
+    let mut dimensions_reader =
+        ImageReader::with_format(io::Cursor::new(png.as_slice()), ImageFormat::Png);
+    dimensions_reader.limits(limits.clone());
+    let (width, height) = dimensions_reader
+        .into_dimensions()
+        .map_err(|error| format!("uTools copyImage could not read the PNG header: {error}"))?;
+    let width_usize = usize::try_from(width)
+        .map_err(|_| "uTools copyImage PNG width is unsupported.".to_owned())?;
+    let height_usize = usize::try_from(height)
+        .map_err(|_| "uTools copyImage PNG height is unsupported.".to_owned())?;
+    let pixels = width_usize
+        .checked_mul(height_usize)
+        .ok_or_else(|| "uTools copyImage PNG dimensions overflow.".to_owned())?;
+    if width_usize == 0
+        || height_usize == 0
+        || width_usize > MAX_PASTED_IMAGE_EDGE
+        || height_usize > MAX_PASTED_IMAGE_EDGE
+        || pixels > MAX_PASTED_IMAGE_PIXELS
+    {
+        return Err("uTools copyImage PNG dimensions exceed the host limits.".to_owned());
+    }
+    let expected_rgba_bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| "uTools copyImage PNG byte size overflows.".to_owned())?;
+    if expected_rgba_bytes > MAX_PASTED_IMAGE_RAW_BYTES {
+        return Err("uTools copyImage PNG uses too much decoded memory.".to_owned());
+    }
+
+    let mut image_reader =
+        ImageReader::with_format(io::Cursor::new(png.as_slice()), ImageFormat::Png);
+    image_reader.limits(limits);
+    let rgba = image_reader
+        .decode()
+        .map_err(|error| format!("uTools copyImage could not decode the PNG: {error}"))?
+        .into_rgba8();
+    if rgba.width() != width
+        || rgba.height() != height
+        || rgba.as_raw().len() != expected_rgba_bytes
+    {
+        return Err("uTools copyImage produced an invalid RGBA pixel buffer.".to_owned());
+    }
+
+    Ok(arboard::ImageData {
+        width: width_usize,
+        height: height_usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    })
+}
+
 /// Lets the PNG encoder stop before an arbitrary clipboard bitmap can retain
 /// tens of megabytes of compressed output in process memory.
 struct LimitedPngBuffer {
@@ -4051,6 +4128,32 @@ fn plugin_host_call_for_active_lease(
             crate::clipboard_access::with_clipboard(|clipboard| clipboard.set_text(value))
                 .map_err(|error| format!("Could not write to the system clipboard: {error}"))?;
             Ok(json!({ "written": true }))
+        }
+        "compatibility.utools.clipboard.writeImage" => {
+            let Some(params) = request.params.as_object() else {
+                return Err("uTools copyImage parameters must be an object.".to_owned());
+            };
+            if params.len() != 1 || !params.contains_key("dataUrl") {
+                return Err(
+                    "uTools copyImage accepts only one PNG dataUrl parameter.".to_owned(),
+                );
+            }
+            let image = decode_utools_clipboard_png_data_url(required_string(
+                &request.params,
+                "dataUrl",
+            )?)?;
+            let width = image.width;
+            let height = image.height;
+            let bytes = image.bytes.into_owned();
+            crate::clipboard_access::with_clipboard(|clipboard| {
+                clipboard.set_image(arboard::ImageData {
+                    width,
+                    height,
+                    bytes: std::borrow::Cow::Borrowed(bytes.as_ref()),
+                })
+            })
+            .map_err(|error| format!("Could not write the PNG to the system clipboard: {error}"))?;
+            Ok(json!({ "written": true, "width": width, "height": height }))
         }
         "clipboard.history.snapshot" => serde_json::to_value(plugin_clipboard_history_snapshot(
             &state.clipboard_history,
@@ -7263,13 +7366,13 @@ mod tests {
         clear_plugin_session_secrets, clipboard_files_from_paths, clipboard_image_from_rgba,
         complete_plugin_search, create_plugin_project_for_grant,
         create_plugin_project_with_open_grant, cursor_color_approval_id,
-        decode_utools_db_storage_key, directory_for_grant, get_plugin_session_secret,
-        issue_file_grant, issue_filesystem_grant, issue_plugin_launcher_context_transfer,
-        launcher_visibility_action, native_plugin_command_input, normalize_plugin_search_results,
-        normalized_host_target, optional_u32, optional_u8, physical_point_in_monitor,
-        plugin_clipboard_history_snapshot, plugin_notification_body,
-        plugin_search_providers_changed_payload, prepare_directory_for_grant,
-        renderer_display_path, resolve_issued_plugin_search_selection,
+        decode_utools_clipboard_png_data_url, decode_utools_db_storage_key, directory_for_grant,
+        get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
+        issue_plugin_launcher_context_transfer, launcher_visibility_action,
+        native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
+        optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
+        plugin_notification_body, plugin_search_providers_changed_payload,
+        prepare_directory_for_grant, renderer_display_path, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
@@ -7289,8 +7392,8 @@ mod tests {
         MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
         MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
         MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_NOTIFICATION_WINDOW,
-        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_PNG_BYTES, PLUGIN_LOG_WINDOW,
+        PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
     #[test]
@@ -9203,6 +9306,40 @@ mod tests {
         assert!(clipboard_image_from_rgba(oversized)
             .expect_err("edge limits must apply before allocating")
             .contains("edge limit"));
+    }
+
+    #[test]
+    fn utools_copy_image_decodes_only_bounded_png_data_urls() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&[0x12, 0x34, 0x56, 0xff], 1, 1, ColorType::Rgba8.into())
+            .expect("a one-pixel PNG should encode");
+        let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&png));
+        let decoded = decode_utools_clipboard_png_data_url(&data_url)
+            .expect("a bounded PNG data URL should decode");
+        assert_eq!((decoded.width, decoded.height), (1, 1));
+        assert_eq!(decoded.bytes.as_ref(), &[0x12, 0x34, 0x56, 0xff]);
+
+        assert!(
+            decode_utools_clipboard_png_data_url("C:\\untrusted\\image.png")
+                .expect_err("filesystem paths must not bypass a picker grant")
+                .contains("PNG data URL")
+        );
+        assert!(
+            decode_utools_clipboard_png_data_url("data:image/jpeg;base64,/9j/")
+                .expect_err("non-PNG formats must be rejected")
+                .contains("PNG data URL")
+        );
+        let oversized = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(MAX_UTOOLS_COPY_IMAGE_PNG_BYTES.div_ceil(3) * 4 + 1)
+        );
+        assert!(decode_utools_clipboard_png_data_url(&oversized)
+            .expect_err("compressed PNG bytes must be bounded before decoding")
+            .contains("limited"));
     }
 
     #[test]

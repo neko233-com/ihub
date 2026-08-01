@@ -21,6 +21,7 @@ import { command, isDesktop } from "../lib/desktop";
 import { shouldDetachPluginSurface } from "../lib/detached-plugin-window";
 import {
   PluginBridgeInFlightGate,
+  isLargePluginBridgeMethod,
   validatePluginBridgeCall,
 } from "../lib/plugin-bridge-boundary";
 import {
@@ -641,7 +642,10 @@ export function PluginFrontendFrame({
       }
 
       const bridgeCall = validation.call;
-      const admission = inFlight.begin(bridgeCall.id);
+      const admission = inFlight.begin(
+        bridgeCall.id,
+        isLargePluginBridgeMethod(bridgeCall.request.method),
+      );
       if (admission !== "accepted") {
         try {
           sourceWindow.postMessage({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PLUGIN_BRIDGE_MAX_IN_FLIGHT,
+  PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS,
   PLUGIN_BRIDGE_MAX_JSON_BYTES,
   PLUGIN_BRIDGE_MAX_JSON_DEPTH,
   PluginBridgeInFlightGate,
@@ -22,6 +23,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("ui.subInput.remove", undefined)).ok).toBe(true);
     expect(validatePluginBridgeCall(call("ui.subInput.select", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeText", { value: "copied" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
@@ -43,6 +47,28 @@ describe("plugin iframe Bridge boundary", () => {
       ...call(),
       request: { ...call().request, arbitrary: true },
     }).ok).toBe(false);
+  });
+
+  it("enlarges only a shape-checked PNG copy request", () => {
+    const boundedImage = "data:image/png;base64,iVBORw0KGgo".padEnd(
+      PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS,
+      "A",
+    );
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: boundedImage,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: `${boundedImage}A`,
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: "C:\\untrusted\\image.png",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: "data:image/jpeg;base64,/9j/",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("log", {
+      message: "A".repeat(PLUGIN_BRIDGE_MAX_JSON_BYTES),
+    })).ok).toBe(false);
   });
 
   it("rejects oversized, too-deep, cyclic, and non-JSON payloads iteratively", () => {
@@ -73,6 +99,12 @@ describe("plugin iframe Bridge boundary", () => {
     expect(gate.begin("overflow")).toBe("busy");
     gate.finish("call-0");
     expect(gate.begin("overflow")).toBe("accepted");
+    gate.clear();
+    expect(gate.begin("image-1", true)).toBe("accepted");
+    expect(gate.begin("image-2", true)).toBe("busy");
+    expect(gate.begin("ordinary-while-image")).toBe("accepted");
+    gate.finish("image-1");
+    expect(gate.begin("image-2", true)).toBe("accepted");
     gate.clear();
     expect(gate.size).toBe(0);
   });

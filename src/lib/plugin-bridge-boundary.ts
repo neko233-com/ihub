@@ -3,6 +3,13 @@ const PLUGIN_BRIDGE_REQUEST_CHANNEL = "ihub-plugin-bridge/v1";
 export const PLUGIN_BRIDGE_MAX_ID_LENGTH = 128;
 export const PLUGIN_BRIDGE_MAX_METHOD_LENGTH = 64;
 export const PLUGIN_BRIDGE_MAX_JSON_BYTES = 64 * 1024;
+export const PLUGIN_BRIDGE_MAX_IMAGE_PNG_BYTES = 4 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS = "data:image/png;base64,".length
+  + Math.ceil(PLUGIN_BRIDGE_MAX_IMAGE_PNG_BYTES / 3) * 4;
+// The generic walker conservatively counts three bytes for every UTF-16 code
+// unit. A PNG data URL is ASCII, but retain that conservative accounting and
+// enlarge the envelope only for this one exact, shape-checked method.
+export const PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES = 17 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_IN_FLIGHT = 32;
@@ -18,6 +25,7 @@ const pluginHostMethods = new Set([
   "commands.register",
   "commands.unregister",
   "compatibility.utools.clipboard.writeText",
+  "compatibility.utools.clipboard.writeImage",
   "compatibility.utools.dbStorage.remove",
   "compatibility.utools.dbStorage.set",
   "compatibility.utools.dbStorage.snapshot",
@@ -93,7 +101,7 @@ function hasOnlyKeys(record: Record<string, unknown>, allowed: ReadonlySet<strin
     && Object.getOwnPropertySymbols(record).length === 0;
 }
 
-function boundedJsonValue(value: unknown): boolean {
+function boundedJsonValue(value: unknown, maxBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
   const seen = new WeakSet<object>();
   let bytes = 0;
@@ -152,7 +160,7 @@ function boundedJsonValue(value: unknown): boolean {
         return false;
       }
 
-      if (bytes > PLUGIN_BRIDGE_MAX_JSON_BYTES) {
+      if (bytes > maxBytes) {
         return false;
       }
     }
@@ -231,10 +239,31 @@ export function validatePluginBridgeCall(
     id: responseId,
     request: normalizedRequest,
   };
-  if (!boundedJsonValue(normalizedCall)) {
+  const isImageCopy = method === "compatibility.utools.clipboard.writeImage";
+  if (isImageCopy) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const dataUrl = params?.dataUrl;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["dataUrl"]))
+      || typeof dataUrl !== "string"
+      || !dataUrl.startsWith("data:image/png;base64,iVBORw0KGgo")
+      || dataUrl.length > PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS
+    ) {
+      return {
+        ok: false,
+        error: "uTools copyImage accepts one bounded PNG data URL.",
+        responseId,
+      };
+    }
+  }
+  const maxJsonBytes = isImageCopy
+    ? PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES
+    : PLUGIN_BRIDGE_MAX_JSON_BYTES;
+  if (!boundedJsonValue(normalizedCall, maxJsonBytes)) {
     return {
       ok: false,
-      error: `Plugin Bridge requests are limited to ${PLUGIN_BRIDGE_MAX_JSON_BYTES} bytes, ${PLUGIN_BRIDGE_MAX_JSON_DEPTH} levels, and ${PLUGIN_BRIDGE_MAX_JSON_NODES} values.`,
+      error: `Plugin Bridge requests are limited to ${maxJsonBytes} bytes, ${PLUGIN_BRIDGE_MAX_JSON_DEPTH} levels, and ${PLUGIN_BRIDGE_MAX_JSON_NODES} values.`,
       responseId,
     };
   }
@@ -246,16 +275,19 @@ export function validatePluginBridgeCall(
 }
 
 export class PluginBridgeInFlightGate {
-  readonly #active = new Set<string>();
+  readonly #active = new Map<string, boolean>();
 
-  begin(id: string): "accepted" | "duplicate" | "busy" {
+  begin(id: string, large = false): "accepted" | "duplicate" | "busy" {
     if (this.#active.has(id)) {
       return "duplicate";
     }
     if (this.#active.size >= PLUGIN_BRIDGE_MAX_IN_FLIGHT) {
       return "busy";
     }
-    this.#active.add(id);
+    if (large && [...this.#active.values()].some(Boolean)) {
+      return "busy";
+    }
+    this.#active.set(id, large);
     return "accepted";
   }
 
@@ -270,4 +302,8 @@ export class PluginBridgeInFlightGate {
   get size(): number {
     return this.#active.size;
   }
+}
+
+export function isLargePluginBridgeMethod(method: string): boolean {
+  return method === "compatibility.utools.clipboard.writeImage";
 }
