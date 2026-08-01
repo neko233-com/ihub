@@ -192,7 +192,9 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `getPath(name)` 在插件页面任何脚本执行前同步提供官方列出的 `home/appData/userData/temp/exe/desktop/documents/downloads/music/pictures/videos/logs` 投影；得到路径字符串本身不会授予读取、写入或启动该路径的能力。`getNativeId()` 返回宿主为每个插件分别生成并持久化的随机标识，同一插件重启后稳定，但不同插件无法用它关联同一台设备，也不读取硬件序列号。
 
-这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
+`utools.db.promises` 当前提供 `get(id)`、`put(doc)`、`remove(idOrDoc)`、`bulkDocs(docs)` 与 `allDocs(prefixOrIds)`。文档按已验证的插件 ID 分库持久化，写入使用 `_rev` 乐观并发控制和原子文件替换；单文档（包含宿主写入的 `_id/_rev`）最多 1 MiB，每库最多 2,048 个文档、32 MiB，单次 bulk 最多 16 个文档且输入最多 8 MiB。`allDocs()` 按 `_id` 排序，无参数返回全部，字符串选择器匹配前缀，字符串数组按请求顺序去重取回；卸载受管插件时会同时清除其数据库。同步 `utools.db.get/put/...`、附件 API 和云复制尚未接入，插件必须等待 Promise 结果，不能把排队当成落盘成功。
+
+这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、同步数据库 API、数据库附件、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 

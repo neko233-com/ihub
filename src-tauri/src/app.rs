@@ -561,6 +561,7 @@ pub struct AppState {
     launcher_shortcuts: LauncherShortcutStore,
     plugin_assets: PluginAssetServer,
     plugin_settings: PluginSettingsStore,
+    utools_documents: crate::utools_db::UtoolsDocumentStore,
     host: Arc<PluginHostState>,
     launcher_focus: LauncherFocusGate,
     launcher_hotkey_store: LauncherHotkeyStore,
@@ -594,6 +595,7 @@ impl AppState {
     fn new(app_data_dir: PathBuf) -> Self {
         let plugins = PluginManager::new();
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
+        let utools_documents = crate::utools_db::UtoolsDocumentStore::new(app_data_dir.clone());
         let super_panel = Arc::new(SuperPanelState::with_storage(app_data_dir.clone()));
         // Older development builds persisted every setting. Before plugin
         // frontends can access the host, scrub any value now declared secret
@@ -617,6 +619,7 @@ impl AppState {
             launcher_shortcuts: LauncherShortcutStore::new(app_data_dir.clone()),
             plugin_assets: PluginAssetServer::new(),
             plugin_settings,
+            utools_documents,
             host: Arc::new(PluginHostState::default()),
             launcher_focus: LauncherFocusGate::default(),
             launcher_hotkey_store: LauncherHotkeyStore::new(app_data_dir),
@@ -2422,6 +2425,7 @@ pub async fn uninstall_managed_plugin(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let plugin_settings = state.plugin_settings.clone();
+    let utools_documents = state.utools_documents.clone();
     let host = state.host.clone();
     let uninstall_result = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
@@ -2439,6 +2443,15 @@ pub async fn uninstall_managed_plugin(
                     "plugins",
                     format!(
                         "Could not remove settings for uninstalled plugin '{}': {error}",
+                        removed.plugin_id
+                    ),
+                );
+            }
+            if let Err(error) = utools_documents.remove_plugin(&removed.plugin_id) {
+                host_log::warn(
+                    "plugins",
+                    format!(
+                        "Could not remove the document database for uninstalled plugin '{}': {error}",
                         removed.plugin_id
                     ),
                 );
@@ -3962,6 +3975,50 @@ fn plugin_host_call_for_active_lease(
                     .set(&request.plugin_id, key, value)?;
                 Ok(json!({ "saved": true, "persistent": true }))
             }
+        }
+        "compatibility.utools.db.get" => {
+            validate_exact_plugin_params(&request.params, &["id"])?;
+            let id = required_string(&request.params, "id")?;
+            Ok(state
+                .utools_documents
+                .get(&request.plugin_id, id)?
+                .unwrap_or(Value::Null))
+        }
+        "compatibility.utools.db.put" => {
+            validate_exact_plugin_params(&request.params, &["doc"])?;
+            serde_json::to_value(state.utools_documents.put(
+                &request.plugin_id,
+                required_value(&request.params, "doc")?.clone(),
+            )?)
+            .map_err(|error| format!("Could not encode the uTools database result: {error}"))
+        }
+        "compatibility.utools.db.remove" => {
+            validate_exact_plugin_params(&request.params, &["target"])?;
+            serde_json::to_value(state.utools_documents.remove(
+                &request.plugin_id,
+                required_value(&request.params, "target")?,
+            )?)
+            .map_err(|error| format!("Could not encode the uTools database result: {error}"))
+        }
+        "compatibility.utools.db.bulkDocs" => {
+            validate_exact_plugin_params(&request.params, &["docs"])?;
+            let documents = required_value(&request.params, "docs")?
+                .as_array()
+                .ok_or_else(|| "uTools bulkDocs requires a document array.".to_owned())?
+                .clone();
+            serde_json::to_value(
+                state
+                    .utools_documents
+                    .bulk_docs(&request.plugin_id, documents)?,
+            )
+            .map_err(|error| format!("Could not encode uTools bulk database results: {error}"))
+        }
+        "compatibility.utools.db.allDocs" => {
+            validate_optional_plugin_param(&request.params, "selector")?;
+            let documents = state
+                .utools_documents
+                .all_docs(&request.plugin_id, request.params.get("selector"))?;
+            Ok(Value::Array(documents))
         }
         "compatibility.utools.dbStorage.snapshot" => {
             let values = state
@@ -7422,6 +7479,31 @@ fn required_value<'a>(params: &'a Value, key: &str) -> Result<&'a Value, String>
     params
         .get(key)
         .ok_or_else(|| format!("Plugin host method requires params.{key}."))
+}
+
+fn validate_exact_plugin_params(params: &Value, keys: &[&str]) -> Result<(), String> {
+    let Some(object) = params.as_object() else {
+        return Err("Plugin host method parameters must be an object.".to_owned());
+    };
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err(format!(
+            "Plugin host method accepts exactly params.{}.",
+            keys.join(" and params.")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_plugin_param(params: &Value, key: &str) -> Result<(), String> {
+    let Some(object) = params.as_object() else {
+        return Err("Plugin host method parameters must be an object.".to_owned());
+    };
+    if object.len() > usize::from(object.contains_key(key)) {
+        return Err(format!(
+            "Plugin host method accepts only the optional params.{key}."
+        ));
+    }
+    Ok(())
 }
 
 fn required_string<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {

@@ -8,10 +8,16 @@ export const PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS = "data:image/png;base64,".l
   + Math.ceil(PLUGIN_BRIDGE_MAX_IMAGE_PNG_BYTES / 3) * 4;
 // The generic walker conservatively counts three bytes for every UTF-16 code
 // unit. A PNG data URL is ASCII, but retain that conservative accounting and
-// enlarge the envelope only for this one exact, shape-checked method.
+// enlarge the envelope for this exact, shape-checked method.
 export const PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES = 17 * 1024 * 1024;
+// uTools documents are capped again by the native store at 1 MiB each and an
+// 8 MiB bulk input. The iterative browser walker charges three bytes per
+// UTF-16 unit, so this conservative envelope is reserved for exact DB writes.
+export const PLUGIN_BRIDGE_MAX_DB_JSON_BYTES = 25 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_DB_QUERY_JSON_BYTES = 512 * 1024;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
+export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
 export const PLUGIN_BRIDGE_MAX_IN_FLIGHT = 32;
 
 const pluginHostMethods = new Set([
@@ -27,6 +33,11 @@ const pluginHostMethods = new Set([
   "compatibility.utools.clipboard.writeText",
   "compatibility.utools.clipboard.writeImage",
   "compatibility.utools.clipboard.writeFiles",
+  "compatibility.utools.db.allDocs",
+  "compatibility.utools.db.bulkDocs",
+  "compatibility.utools.db.get",
+  "compatibility.utools.db.put",
+  "compatibility.utools.db.remove",
   "compatibility.utools.dbStorage.remove",
   "compatibility.utools.dbStorage.set",
   "compatibility.utools.dbStorage.snapshot",
@@ -102,7 +113,11 @@ function hasOnlyKeys(record: Record<string, unknown>, allowed: ReadonlySet<strin
     && Object.getOwnPropertySymbols(record).length === 0;
 }
 
-function boundedJsonValue(value: unknown, maxBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES): boolean {
+function boundedJsonValue(
+  value: unknown,
+  maxBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES,
+  maxNodes = PLUGIN_BRIDGE_MAX_JSON_NODES,
+): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
   const seen = new WeakSet<object>();
   let bytes = 0;
@@ -119,7 +134,7 @@ function boundedJsonValue(value: unknown, maxBytes = PLUGIN_BRIDGE_MAX_JSON_BYTE
       const current = stack.pop()!;
       nodes += 1;
       if (
-        nodes > PLUGIN_BRIDGE_MAX_JSON_NODES
+        nodes > maxNodes
         || current.depth > PLUGIN_BRIDGE_MAX_JSON_DEPTH
       ) {
         return false;
@@ -241,6 +256,9 @@ export function validatePluginBridgeCall(
     request: normalizedRequest,
   };
   const isImageCopy = method === "compatibility.utools.clipboard.writeImage";
+  const isDbWrite = method === "compatibility.utools.db.put"
+    || method === "compatibility.utools.db.bulkDocs";
+  const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   if (isImageCopy) {
     const params = isPlainRecord(request.params) ? request.params : null;
     const dataUrl = params?.dataUrl;
@@ -258,13 +276,45 @@ export function validatePluginBridgeCall(
       };
     }
   }
-  const maxJsonBytes = isImageCopy
-    ? PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES
-    : PLUGIN_BRIDGE_MAX_JSON_BYTES;
-  if (!boundedJsonValue(normalizedCall, maxJsonBytes)) {
+  if (isDbWrite) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const expectedKey = method.endsWith(".put") ? "doc" : "docs";
+    const payload = params?.[expectedKey];
+    const validPayload = expectedKey === "doc"
+      ? isPlainRecord(payload)
+      : Array.isArray(payload)
+        && payload.length >= 1
+        && payload.length <= 16
+        && payload.every(isPlainRecord);
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set([expectedKey]))
+      || !validPayload
+    ) {
+      return {
+        ok: false,
+        error: method.endsWith(".put")
+          ? "uTools db.put accepts one document object."
+          : "uTools db.bulkDocs accepts 1-16 document objects.",
+        responseId,
+      };
+    }
+  }
+  let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
+  if (isImageCopy) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
+  } else if (isDbWrite) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_JSON_BYTES;
+  } else if (isDbAllDocs) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_QUERY_JSON_BYTES;
+  }
+  const maxJsonNodes = isDbWrite
+    ? PLUGIN_BRIDGE_MAX_DB_JSON_NODES
+    : PLUGIN_BRIDGE_MAX_JSON_NODES;
+  if (!boundedJsonValue(normalizedCall, maxJsonBytes, maxJsonNodes)) {
     return {
       ok: false,
-      error: `Plugin Bridge requests are limited to ${maxJsonBytes} bytes, ${PLUGIN_BRIDGE_MAX_JSON_DEPTH} levels, and ${PLUGIN_BRIDGE_MAX_JSON_NODES} values.`,
+      error: `Plugin Bridge requests are limited to ${maxJsonBytes} bytes, ${PLUGIN_BRIDGE_MAX_JSON_DEPTH} levels, and ${maxJsonNodes} values.`,
       responseId,
     };
   }
@@ -306,5 +356,7 @@ export class PluginBridgeInFlightGate {
 }
 
 export function isLargePluginBridgeMethod(method: string): boolean {
-  return method === "compatibility.utools.clipboard.writeImage";
+  return method === "compatibility.utools.clipboard.writeImage"
+    || method === "compatibility.utools.db.put"
+    || method === "compatibility.utools.db.bulkDocs";
 }

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   PLUGIN_BRIDGE_MAX_IN_FLIGHT,
+  PLUGIN_BRIDGE_MAX_DB_JSON_BYTES,
   PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS,
   PLUGIN_BRIDGE_MAX_JSON_BYTES,
   PLUGIN_BRIDGE_MAX_JSON_DEPTH,
   PluginBridgeInFlightGate,
+  isLargePluginBridgeMethod,
   validatePluginBridgeCall,
 } from "./plugin-bridge-boundary";
 
@@ -32,6 +34,14 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.get", { id: "note/1" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.put", { doc: { _id: "note/1", text: "hello" } })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.remove", { target: "note/1" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.bulkDocs", { docs: [{ _id: "note/1" }] })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.allDocs", { selector: "note/" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.allDocs", {
+      selector: Array.from({ length: 256 }, (_, index) => `document-${index}-${"x".repeat(480)}`),
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.set", { feature: { code: "docs", cmds: ["文档"] } })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.remove", { code: "docs" })).ok).toBe(true);
@@ -72,6 +82,29 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("log", {
       message: "A".repeat(PLUGIN_BRIDGE_MAX_JSON_BYTES),
     })).ok).toBe(false);
+  });
+
+  it("reserves the large JSON envelope for shape-checked document writes", () => {
+    const text = "x".repeat(PLUGIN_BRIDGE_MAX_JSON_BYTES);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.put", {
+      doc: { _id: "large", text },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.bulkDocs", {
+      docs: [{ _id: "large", text }],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.put", {
+      doc: { _id: "large", text: "x".repeat(PLUGIN_BRIDGE_MAX_DB_JSON_BYTES) },
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.put", {
+      doc: [],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.bulkDocs", {
+      docs: [],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("log", { message: text })).ok).toBe(false);
+    expect(isLargePluginBridgeMethod("compatibility.utools.db.put")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.db.bulkDocs")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.db.allDocs")).toBe(false);
   });
 
   it("rejects oversized, too-deep, cyclic, and non-JSON payloads iteratively", () => {

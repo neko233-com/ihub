@@ -988,6 +988,24 @@ function invokePluginDetach() {{
 }}
 const dbStorageState = Object.create(null);
 const dbStorageVersions = new Map();
+const dbPromises = Object.freeze({{
+  get(id) {{ return call("compatibility.utools.db.get", {{ id }}); }},
+  put(doc) {{ return call("compatibility.utools.db.put", {{ doc }}); }},
+  remove(target) {{
+    if (typeof target === "string") return call("compatibility.utools.db.remove", {{ target }});
+    if (!target || typeof target !== "object" || Array.isArray(target)) return Promise.reject(new TypeError("uTools db.remove accepts a document ID or document object."));
+    const projected = {{ _id: target._id }};
+    if (target._rev !== undefined) projected._rev = target._rev;
+    return call("compatibility.utools.db.remove", {{ target: projected }});
+  }},
+  bulkDocs(docs) {{ return call("compatibility.utools.db.bulkDocs", {{ docs }}); }},
+  allDocs(selector) {{
+    return selector === undefined
+      ? call("compatibility.utools.db.allDocs", {{}})
+      : call("compatibility.utools.db.allDocs", {{ selector }});
+  }}
+}});
+const db = Object.freeze({{ promises: dbPromises }});
 function dbStorageKey(key) {{
   if (typeof key !== "string") throw new TypeError("uTools dbStorage keys must be strings.");
   if (new TextEncoder().encode(key).byteLength > 48) throw new RangeError("uTools dbStorage keys must not exceed 48 UTF-8 bytes.");
@@ -1126,6 +1144,7 @@ window.addEventListener("message", (event) => {{
   invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
 }});
 const utools = Object.freeze({{
+  db,
   dbStorage,
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
@@ -1494,6 +1513,12 @@ mod tests {
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        assert!(script.contains("const dbPromises = Object.freeze"));
+        assert!(script.contains("compatibility.utools.db.get"));
+        assert!(script.contains("compatibility.utools.db.put"));
+        assert!(script.contains("compatibility.utools.db.remove"));
+        assert!(script.contains("compatibility.utools.db.bulkDocs"));
+        assert!(script.contains("compatibility.utools.db.allDocs"));
         assert!(script.contains("getFeatures"));
         assert!(script.contains("setFeature"));
         assert!(script.contains("removeFeature"));
