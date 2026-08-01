@@ -21,6 +21,7 @@ import {
   Puzzle,
   QrCode,
   Search,
+  ScanText,
   Sparkles,
   Video,
   Gauge,
@@ -298,6 +299,14 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
     detail: "延迟、抖动、下载与上传",
     icon: Gauge,
     tone: "blue",
+    badge: "内置",
+  },
+  {
+    id: "ihub.tool.ocr",
+    label: "屏幕 OCR",
+    detail: "截图框选 · 本地识别文字",
+    icon: ScanText,
+    tone: "violet",
     badge: "内置",
   },
   {

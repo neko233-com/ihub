@@ -37,6 +37,7 @@ export type BuiltinToolId =
   | "cloud"
   | "record"
   | "network"
+  | "ocr"
   | "rename"
   | "developer";
 
@@ -126,6 +127,17 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     tags: ["取色", "颜色", "HEX", "RGB", "HSL", "CMYK", "OKLCH", "色卡", "离线"],
     icon: "palette",
     builtinTool: "color",
+  },
+  {
+    id: "ihub-screen-ocr",
+    name: "屏幕 OCR",
+    description: "隐藏 iHub 后截取主显示器，框选文字区域并通过 Windows.Media.Ocr 本地识别；不写临时文件、不联网。",
+    category: "media",
+    distribution: "builtin",
+    tags: ["OCR", "截图", "屏幕", "文字识别", "图片转文字", "离线"],
+    icon: "ocr",
+    builtinTool: "ocr",
+    featured: true,
   },
   {
     id: "ihub-plugin-ocr",

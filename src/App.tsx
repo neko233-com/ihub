@@ -758,6 +758,13 @@ const builtinTools: Array<{
     tab: "network",
   },
   {
+    commandId: "ihub.tool.ocr",
+    name: "屏幕截图 OCR",
+    metadata: "截取屏幕并框选区域，通过 Windows 本地语言包离线识别文字",
+    keywords: ["OCR", "截图识别", "屏幕文字", "图片转文字", "离线识别"],
+    tab: "ocr",
+  },
+  {
     commandId: "ihub.tool.batch-rename",
     name: "批量重命名",
     metadata: "预览后再安全执行文件改名",

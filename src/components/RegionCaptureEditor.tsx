@@ -21,6 +21,7 @@ import {
 
 interface RegionCaptureEditorProps {
   developmentPreview?: boolean;
+  exportLabel?: string;
   onCancel: () => void;
   onExport: (capture: CroppedCapture) => Promise<void> | void;
   onStatus?: (message: string) => void;
@@ -29,6 +30,7 @@ interface RegionCaptureEditorProps {
 
 export function RegionCaptureEditor({
   developmentPreview = false,
+  exportLabel = "导出选区 PNG",
   onCancel,
   onExport,
   onStatus,
@@ -226,7 +228,7 @@ export function RegionCaptureEditor({
           type="button"
         >
           {isExporting ? <LoaderCircle className="spin" size={15} /> : selection ? <Check size={15} /> : <Crop size={15} />}
-          {isExporting ? "正在裁剪…" : "导出选区 PNG"}
+          {isExporting ? "正在裁剪…" : exportLabel}
         </button>
       </footer>
     </section>

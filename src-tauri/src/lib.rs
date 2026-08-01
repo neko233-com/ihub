@@ -16,6 +16,7 @@ mod native_icons;
 mod native_screenshot;
 mod network_diagnostics;
 mod ntfs_usn;
+mod ocr;
 mod plugin_artwork;
 mod plugin_asset_server;
 mod plugin_settings;

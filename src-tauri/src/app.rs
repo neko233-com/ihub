@@ -5581,6 +5581,8 @@ pub fn run() {
             crate::network_diagnostics::get_local_network_info,
             crate::network_diagnostics::get_public_network_info,
             crate::network_diagnostics::run_network_speed_test,
+            crate::ocr::get_ocr_capabilities,
+            crate::ocr::recognize_ocr_image,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
             preview_batch_rename,

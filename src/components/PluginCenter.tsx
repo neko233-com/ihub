@@ -22,6 +22,7 @@ import {
   QrCode,
   RefreshCw,
   Search,
+  ScanText,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -153,7 +154,7 @@ export interface PluginCenterProps {
 
 const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   search: FolderSearch,
-  ocr: FolderSearch,
+  ocr: ScanText,
   translate: Sparkles,
   palette: Palette,
   clipboard: Clipboard,

@@ -48,6 +48,11 @@ zeroize = { version = "1.8", features = ["derive"] }
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 windows = { version = "0.61.3", features = [
+  "Foundation",
+  "Globalization",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage_Streams",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
@@ -55,6 +60,7 @@ windows = { version = "0.61.3", features = [
   "Win32_System_Environment",
   "Win32_System_LibraryLoader",
   "Win32_System_Registry",
+  "Win32_System_WinRT",
   "Win32_System_WindowsProgramming",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
