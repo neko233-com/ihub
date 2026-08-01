@@ -264,6 +264,8 @@ pub(crate) struct UtoolsCompatRuntimeConfig {
     pub(crate) app_version: String,
     pub(crate) plugin_id: String,
     pub(crate) commands: Vec<UtoolsCompatCommand>,
+    pub(crate) native_id: String,
+    pub(crate) paths: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1892,6 +1894,8 @@ impl PluginManager {
                     app_version: env!("CARGO_PKG_VERSION").to_owned(),
                     plugin_id: plugin_id.to_owned(),
                     commands: manifest.utools_commands,
+                    native_id: String::new(),
+                    paths: BTreeMap::new(),
                 }),
         })
     }

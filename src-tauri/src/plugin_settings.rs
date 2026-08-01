@@ -124,6 +124,45 @@ impl PluginSettingsStore {
         Ok(())
     }
 
+    /// Atomically returns an existing value or persists the supplied default.
+    /// Host-owned compatibility identifiers use this instead of a separate
+    /// get/set pair so simultaneous surface/runtime bootstraps cannot observe
+    /// different first-run identities.
+    pub fn get_or_insert(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        default_value: Value,
+    ) -> Result<Value, String> {
+        Self::validate_entry(key, &default_value)?;
+
+        let mut state = self.lock_state();
+        if let Some(value) = state
+            .plugins
+            .get(plugin_id)
+            .and_then(|settings| settings.get(key))
+        {
+            return Ok(value.clone());
+        }
+        let mut next = state.clone();
+        if !next.plugins.contains_key(plugin_id) && next.plugins.len() >= MAX_PLUGINS_WITH_SETTINGS
+        {
+            return Err(format!(
+                "iHub stores settings for at most {MAX_PLUGINS_WITH_SETTINGS} plugins."
+            ));
+        }
+        let plugin_settings = next.plugins.entry(plugin_id.to_owned()).or_default();
+        if plugin_settings.len() >= MAX_SETTINGS_PER_PLUGIN {
+            return Err(format!(
+                "A plugin may store at most {MAX_SETTINGS_PER_PLUGIN} settings."
+            ));
+        }
+        plugin_settings.insert(key.to_owned(), default_value.clone());
+        self.persist(&next)?;
+        *state = next;
+        Ok(default_value)
+    }
+
     /// Validates an entry before it is placed in either the durable store or
     /// the host's session-only secret setting map. Keeping the bounds shared
     /// prevents a secret declaration from becoming a route around the normal
@@ -454,6 +493,8 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs,
+        sync::{Arc, Barrier},
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -518,6 +559,33 @@ mod tests {
         assert!(settings
             .set("ihub-plugin-one", "large", json!("x".repeat(64 * 1024)))
             .is_err());
+        if directory.exists() {
+            fs::remove_dir_all(directory).expect("cleanup test directory");
+        }
+    }
+
+    #[test]
+    fn get_or_insert_is_atomic_across_concurrent_bootstraps() {
+        let directory = temporary_directory("plugin-settings-get-or-insert");
+        let settings = PluginSettingsStore::new(directory.clone());
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = ["first", "second"].map(|candidate| {
+            let settings = settings.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                settings
+                    .get_or_insert("utools-plugin", "ihub.host.id", json!(candidate))
+                    .expect("host identity should be inserted or restored")
+            })
+        });
+        barrier.wait();
+        let values = workers.map(|worker| worker.join().expect("bootstrap worker should finish"));
+        assert_eq!(values[0], values[1]);
+        assert_eq!(
+            settings.get("utools-plugin", "ihub.host.id"),
+            Some(values[0].clone())
+        );
         if directory.exists() {
             fs::remove_dir_all(directory).expect("cleanup test directory");
         }

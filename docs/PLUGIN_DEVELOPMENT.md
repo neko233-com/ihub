@@ -188,6 +188,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `copyImage(value)` 当前接受 PNG Data URL 或 PNG `Uint8Array`，同步 `true` 仍只表示本地校验通过并已排队。压缩数据最多 4 MiB，宿主在写入剪贴板前重新验证 PNG 签名、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。字符串文件路径暂不接受，后续只能通过系统选择器签发的路径授权接入，不能直接开放任意本机路径。
 
+`getPath(name)` 在插件页面任何脚本执行前同步提供官方列出的 `home/appData/userData/temp/exe/desktop/documents/downloads/music/pictures/videos/logs` 投影；得到路径字符串本身不会授予读取、写入或启动该路径的能力。`getNativeId()` 返回宿主为每个插件分别生成并持久化的随机标识，同一插件重启后稳定，但不同插件无法用它关联同一台设备，也不读取硬件序列号。
+
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。

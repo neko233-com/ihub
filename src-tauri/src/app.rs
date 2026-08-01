@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -55,7 +55,7 @@ use crate::{
         plan_plugin_shortcuts, PluginShortcutBinding, PluginShortcutEvent, PluginShortcutRegistry,
         PluginShortcutStatus,
     },
-    plugins::PluginManager,
+    plugins::{PluginManager, UtoolsCompatRuntimeConfig},
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
     system_open::{LocalOpenKind, LocalPathIdentity, PreparedLocalOpen},
@@ -87,6 +87,7 @@ const MAX_FIRST_PARTY_INDEX_ROOTS: usize = 32;
 const IHUB_HELP_URL: &str = "https://github.com/neko233-com/ihub#readme";
 const IHUB_FEEDBACK_URL: &str = "https://github.com/neko233-com/ihub/issues";
 const UTOOLS_DB_STORAGE_PREFIX: &str = "utools.db.";
+const UTOOLS_NATIVE_ID_SETTING_KEY: &str = "ihub.host.utools-native-id";
 const MAX_UTOOLS_DB_STORAGE_KEY_BYTES: usize = 48;
 const UTOOLS_DYNAMIC_FEATURE_PREFIX: &str = "utools.feature.";
 const MAX_UTOOLS_DYNAMIC_FEATURES: usize = 64;
@@ -1738,6 +1739,59 @@ pub fn list_plugins(state: State<'_, AppState>) -> Vec<PluginInfo> {
     plugins
 }
 
+fn populate_utools_runtime_system_config(
+    app: &AppHandle,
+    settings: &PluginSettingsStore,
+    config: &mut UtoolsCompatRuntimeConfig,
+) -> Result<(), String> {
+    let generated_native_id = format!("ihub-{}", Uuid::new_v4().simple());
+    let native_id = settings.get_or_insert(
+        &config.plugin_id,
+        UTOOLS_NATIVE_ID_SETTING_KEY,
+        Value::String(generated_native_id.clone()),
+    )?;
+    config.native_id = native_id
+        .as_str()
+        .filter(|value| {
+            value.len() == 37
+                && value.starts_with("ihub-")
+                && value[5..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| generated_native_id.clone());
+    if native_id.as_str() != Some(config.native_id.as_str()) {
+        settings.set(
+            &config.plugin_id,
+            UTOOLS_NATIVE_ID_SETTING_KEY,
+            Value::String(config.native_id.clone()),
+        )?;
+    }
+
+    let resolver = app.path();
+    let mut paths = BTreeMap::new();
+    let mut insert = |name: &str, path: Result<PathBuf, tauri::Error>| {
+        if let Ok(path) = path {
+            paths.insert(name.to_owned(), renderer_display_path(&path));
+        }
+    };
+    insert("home", resolver.home_dir());
+    insert("appData", resolver.data_dir());
+    insert("userData", resolver.app_data_dir());
+    insert("temp", resolver.temp_dir());
+    insert("desktop", resolver.desktop_dir());
+    insert("documents", resolver.document_dir());
+    insert("downloads", resolver.download_dir());
+    insert("music", resolver.audio_dir());
+    insert("pictures", resolver.picture_dir());
+    insert("videos", resolver.video_dir());
+    insert("logs", resolver.app_log_dir());
+    if let Ok(path) = std::env::current_exe() {
+        paths.insert("exe".to_owned(), renderer_display_path(&path));
+    }
+    config.paths = paths;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_plugin_frontend_url(
     plugin_id: String,
@@ -1771,11 +1825,16 @@ pub async fn get_plugin_frontend_url(
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
+    let app = window.app_handle().clone();
+    let plugin_settings = state.plugin_settings.clone();
     let lease_plugin_id = plugin_id.clone();
     let lease = tauri::async_runtime::spawn_blocking(move || {
         let server = plugin_assets.clone();
         plugin_assets.with_plugin_operation(&lease_plugin_id, || {
-            let bundle = plugins.frontend_asset_bundle(&lease_plugin_id)?;
+            let mut bundle = plugins.frontend_asset_bundle(&lease_plugin_id)?;
+            if let Some(config) = bundle.utools_compat.as_mut() {
+                populate_utools_runtime_system_config(&app, &plugin_settings, config)?;
+            }
             let resolved_plugin_id = bundle.plugin_id.clone();
             let lease = server.issue(bundle, purpose)?;
             // A visible surface and hidden search runtime hand off ownership
@@ -3779,6 +3838,10 @@ fn plugin_host_call_for_active_lease(
         }
         "settings.get" => {
             let key = required_string(&request.params, "key")?;
+            if key.starts_with("ihub.host.") {
+                return Err("Host-owned plugin settings are not readable through the Bridge."
+                    .to_owned());
+            }
             let value = if state
                 .plugins
                 .is_secret_setting(&request.plugin_id, key)?
@@ -3802,6 +3865,10 @@ fn plugin_host_call_for_active_lease(
         }
         "settings.set" => {
             let key = required_string(&request.params, "key")?;
+            if key.starts_with("ihub.host.") {
+                return Err("Host-owned plugin settings are not writable through the Bridge."
+                    .to_owned());
+            }
             let value = required_value(&request.params, "value")?.clone();
             if state
                 .plugins

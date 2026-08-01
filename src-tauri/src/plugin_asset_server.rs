@@ -1283,6 +1283,12 @@ const utools = Object.freeze({{
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
   }},
   getWindowType() {{ return currentWindowType; }},
+  getNativeId() {{ return config.nativeId; }},
+  getPath(name) {{
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(config.paths, name)) return "";
+    const value = config.paths[name];
+    return typeof value === "string" ? value : "";
+  }},
   getAppName() {{ return "iHub"; }},
   getAppVersion() {{ return config.appVersion; }},
   getUser() {{ return null; }},
@@ -1439,6 +1445,10 @@ mod tests {
                 command_id: "utools-feature-1".to_owned(),
                 code: "pick-color".to_owned(),
             }],
+            native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
+            paths: [("home".to_owned(), "C:\\Users\\Tester".to_owned())]
+                .into_iter()
+                .collect(),
         };
         let script = String::from_utf8(
             render_utools_compat_script(&config).expect("compatibility bootstrap should render"),
@@ -1487,6 +1497,10 @@ mod tests {
         assert!(script.contains("compatibility.utools.window.setHeight"));
         assert!(script.contains("compatibility.utools.window.outPlugin"));
         assert!(script.contains("getAppVersion"));
+        assert!(script.contains("getNativeId"));
+        assert!(script.contains("ihub-0123456789abcdef0123456789abcdef"));
+        assert!(script.contains("getPath(name)"));
+        assert!(script.contains("C:\\\\Users\\\\Tester"));
         assert!(script.contains("getUser() { return null; }"));
         let storage_snapshot = script
             .find("compatibility.utools.dbStorage.snapshot")
