@@ -17,6 +17,7 @@ const pluginHostMethods = new Set([
   "commands.execute",
   "commands.register",
   "commands.unregister",
+  "compatibility.utools.clipboard.writeText",
   "compatibility.utools.notification.show",
   "compatibility.utools.shell.openExternal",
   "compatibility.utools.window.hideMain",

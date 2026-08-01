@@ -1110,8 +1110,9 @@ const utools = Object.freeze({{
     return true;
   }},
   copyText(value) {{
-    if (typeof value !== "string" || !navigator.clipboard || typeof navigator.clipboard.writeText !== "function") return false;
-    void navigator.clipboard.writeText(value).catch((error) => console.error("iHub compatibility clipboard write failed", error));
+    if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > 49152) return false;
+    void call("compatibility.utools.clipboard.writeText", {{ value }})
+      .catch((error) => console.error("iHub compatibility clipboard write failed", error));
     return true;
   }},
   showNotification(body, clickFeatureCode) {{
@@ -1289,6 +1290,7 @@ mod tests {
         assert!(script.contains("Object.defineProperties(window"));
         assert!(script.contains("rubick"));
         assert!(script.contains("copyText"));
+        assert!(script.contains("compatibility.utools.clipboard.writeText"));
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("compatibility.utools.notification.show"));

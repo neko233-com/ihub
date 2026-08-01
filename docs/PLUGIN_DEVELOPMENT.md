@@ -165,7 +165,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | `search.register` | 无 | 注册低延迟搜索提供器。 |
 | `subInput.set/setValue/remove/focus/blur/select` | 无（仅可见 surface 租约） | 控制由可信 iHub 宿主绘制的有界文本输入。回调留在 iframe 内；隐藏搜索 runtime、原生 worker 和失效租约不能创建、修改或聚焦输入。关闭、替换、禁用或 dispose 插件页会清除值和回调。 |
 | `settings.get/set` | 无 | 插件命名空间下的设置存储。密钥设置必须在清单上标注 `secret`。 |
-| `clipboard.readText/writeText` | `clipboard.read/write` | 读写剪贴板文本。 |
+| `clipboard.readText/writeText` | `clipboard.read/write` | 读写剪贴板文本；写入最多 48 KiB UTF-8，并经过宿主串行重试通道。 |
 | `clipboard.history.snapshot` | `clipboard.history` | 仅在插件主动调用时返回最多 36 条、已经由用户启用的内置纯文本历史；不会开启采集、读取当前系统剪贴板或修改全局历史。 |
 | `screenCapture.acquireFocusLease/releaseFocusLease` | `screenCapture: true` | 仅在可见 `Surface` 的活动原生租约上，可信 host 才向跨 origin iframe 委派 `display-capture`；隐藏搜索 runtime 和未声明插件没有委派。焦点租约只在浏览器 `getDisplayMedia` 系统选择器显示期间阻止启动器因失焦隐藏，不授予屏幕像素、录制、全局快捷键或原生捕获 API。 |
 | 浏览器 `getUserMedia({ audio: true })` | `microphone: true` | 仅向 Rust 验证的可见 `Surface` 活动租约委派 `microphone`；它与 `screenCapture` 独立，不授予后台、隐藏 runtime 或原生 worker 录音能力，也不会跳过浏览器／OS 同意。 |
@@ -184,7 +184,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `bootstrapPlugin` 运行期间还会安装一个冻结的最小兼容对象，并让 `window.utools === window.rubick`。兼容对象提供 `setSubInput`、`removeSubInput`、`setSubInputValue`，以及映射到上表既有权限检查的 `copyText`、`showNotification`、`shellOpenExternal`、`shellOpenPath`、`screenColorPick`；另有只读的主题、平台和 `"main"` 窗口类型查询。同步 `boolean` 返回值只表示参数已通过 SDK 本地校验且异步宿主请求已排队，真正的权限或租约拒绝仍写入 `BootstrapOptions.onError`。兼容层不会覆盖页面已有的同名全局，并在 runtime dispose 时恢复原值。
 
-直接导入的公开 uTools 包使用另一套宿主固定注入层：除 ready/enter/out、分离窗口就绪后的单次 `onPluginDetach`、`dbStorage` 和逐次确认取色外，还提供单参数 `showNotification(body)`、受限 `shellOpenExternal(url)`、官方签名一致的 `setSubInput`、`removeSubInput`、`setSubInputValue`、`subInputFocus/Blur/Select`，以及仅限当前可见活动 surface 的 `hideMainWindow`、`showMainWindow`、`outPlugin` 和 `setExpendHeight`。外链最长 2048 字符，只允许无控制字符且 host 非空的绝对 `http/https` URL 或非空 `mailto` 收件人；不接受文件路径、其他协议或命令字符串。分离回调由可信 host 在新窗口 Bridge ready 后触发，隐藏 runtime 不会收到；回调晚于窗口类型事件注册时会立即补发一次。兼容通知正文最多 1000 字符，并与 SDK 通知共用每插件每 10 秒 5 条的原生限流；`clickFeatureCode` 尚未接入，因此传入时明确拒绝。高度请求只接受 100–900 的整数内容像素；iHub 可信标题栏另占 60 像素，切换插件会恢复默认内容高度。窗口请求先经过原生侧“已验证 uTools 包 + 活动租约”复核，响应成功后才由可信 React 父层隐藏/显示 iHub、调整主窗口高度或退出当前插件。`getAppName/getAppVersion` 返回 iHub 的真实产品信息，未接入 uTools 账号体系时 `getUser()` 明确返回 `null`。
+直接导入的公开 uTools 包使用另一套宿主固定注入层：除 ready/enter/out、分离窗口就绪后的单次 `onPluginDetach`、`dbStorage` 和逐次确认取色外，还提供原生 `copyText(value)`、单参数 `showNotification(body)`、受限 `shellOpenExternal(url)`、官方签名一致的 `setSubInput`、`removeSubInput`、`setSubInputValue`、`subInputFocus/Blur/Select`，以及仅限当前可见活动 surface 的 `hideMainWindow`、`showMainWindow`、`outPlugin` 和 `setExpendHeight`。复制文本最多 48 KiB UTF-8，经过活动租约和 Rust 串行重试通道写入系统剪贴板，不依赖 iframe 的浏览器剪贴板权限。外链最长 2048 字符，只允许无控制字符且 host 非空的绝对 `http/https` URL 或非空 `mailto` 收件人；不接受文件路径、其他协议或命令字符串。分离回调由可信 host 在新窗口 Bridge ready 后触发，隐藏 runtime 不会收到；回调晚于窗口类型事件注册时会立即补发一次。兼容通知正文最多 1000 字符，并与 SDK 通知共用每插件每 10 秒 5 条的原生限流；`clickFeatureCode` 尚未接入，因此传入时明确拒绝。高度请求只接受 100–900 的整数内容像素；iHub 可信标题栏另占 60 像素，切换插件会恢复默认内容高度。窗口请求先经过原生侧“已验证 uTools 包 + 活动租约”复核，响应成功后才由可信 React 父层隐藏/显示 iHub、调整主窗口高度或退出当前插件。`getAppName/getAppVersion` 返回 iHub 的真实产品信息，未接入 uTools 账号体系时 `getUser()` 明确返回 `null`。
 
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 

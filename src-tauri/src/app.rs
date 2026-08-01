@@ -1328,6 +1328,7 @@ const MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW: usize = 5;
 const MAX_PLUGIN_NOTIFICATION_WINDOWS: usize = 128;
 const PLUGIN_NOTIFICATION_WINDOW: Duration = Duration::from_secs(10);
 const PLUGIN_NOTIFICATION_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
+const MAX_PLUGIN_CLIPBOARD_TEXT_BYTES: usize = 48 * 1024;
 
 /// The plugin-facing projection deliberately strips the cursor coordinates
 /// from the trusted Toolbox result. A plugin receives a color value only;
@@ -3927,8 +3928,11 @@ fn plugin_host_call_for_active_lease(
                 .map(Value::String)
                 .map_err(|error| format!("Could not read the system clipboard: {error}"))
         }
-        "clipboard.writeText" | "clipboard.write" => {
+        "clipboard.writeText"
+        | "clipboard.write"
+        | "compatibility.utools.clipboard.writeText" => {
             let value = required_string(&request.params, "value")?;
+            validate_plugin_clipboard_text(value)?;
             crate::clipboard_access::with_clipboard(|clipboard| clipboard.set_text(value))
                 .map_err(|error| format!("Could not write to the system clipboard: {error}"))?;
             Ok(json!({ "written": true }))
@@ -6641,6 +6645,16 @@ fn validate_external_url(value: &str) -> Result<(), String> {
     }
 }
 
+fn validate_plugin_clipboard_text(value: &str) -> Result<(), String> {
+    if value.len() > MAX_PLUGIN_CLIPBOARD_TEXT_BYTES {
+        return Err(format!(
+            "Plugin clipboard text exceeds the {} KiB limit.",
+            MAX_PLUGIN_CLIPBOARD_TEXT_BYTES / 1024
+        ));
+    }
+    Ok(())
+}
+
 fn utools_db_storage_key(key: &str) -> Result<String, String> {
     if key.len() > MAX_UTOOLS_DB_STORAGE_KEY_BYTES {
         return Err(format!(
@@ -6833,17 +6847,19 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        validate_external_url, validate_local_search_selection, validate_system_icon_request,
-        validate_utools_expend_height, validate_utools_window_request_params, CaptureFocusLease,
-        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
-        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
-        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
-        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_external_url, validate_local_search_selection, validate_plugin_clipboard_text,
+        validate_system_icon_request, validate_utools_expend_height,
+        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
+        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
+        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
+        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
-        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_LOGS_PER_WINDOW,
+        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
+        MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
         MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
         MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_NOTIFICATION_WINDOW,
         PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
@@ -6926,6 +6942,22 @@ mod tests {
         assert!(
             validate_external_url(&format!("https://example.com/{}", "x".repeat(2_048))).is_err()
         );
+    }
+
+    #[test]
+    fn plugin_clipboard_text_is_bounded_by_utf8_bytes() {
+        assert!(validate_plugin_clipboard_text("").is_ok());
+        assert!(
+            validate_plugin_clipboard_text(&"x".repeat(MAX_PLUGIN_CLIPBOARD_TEXT_BYTES)).is_ok()
+        );
+        assert!(
+            validate_plugin_clipboard_text(&"界".repeat(MAX_PLUGIN_CLIPBOARD_TEXT_BYTES / 3))
+                .is_ok()
+        );
+        assert!(validate_plugin_clipboard_text(
+            &"界".repeat(MAX_PLUGIN_CLIPBOARD_TEXT_BYTES / 3 + 1)
+        )
+        .is_err());
     }
 
     #[test]

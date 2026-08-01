@@ -21,6 +21,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call()).ok).toBe(true);
     expect(validatePluginBridgeCall(call("ui.subInput.remove", undefined)).ok).toBe(true);
     expect(validatePluginBridgeCall(call("ui.subInput.select", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeText", { value: "copied" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.notification.show", { body: "done" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.openExternal", { url: "https://example.com" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);
