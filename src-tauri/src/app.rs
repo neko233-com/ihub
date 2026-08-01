@@ -2657,7 +2657,13 @@ pub async fn capture_native_screenshot(
     window: tauri::WebviewWindow,
     request: Option<crate::native_screenshot::NativeScreenshotRequest>,
 ) -> Result<crate::native_screenshot::NativeScreenshot, String> {
-    let request = request.unwrap_or_default();
+    capture_native_screenshot_for_window(&window, request.unwrap_or_default()).await
+}
+
+async fn capture_native_screenshot_for_window(
+    window: &tauri::WebviewWindow,
+    request: crate::native_screenshot::NativeScreenshotRequest,
+) -> Result<crate::native_screenshot::NativeScreenshot, String> {
     window
         .hide()
         .map_err(|error| format!("iHub could not hide its own window before capture: {error}"))?;
@@ -2683,6 +2689,53 @@ pub async fn capture_native_screenshot(
         (Ok(_), Err(show_error)) => Err(show_error),
         (Err(capture_error), Err(show_error)) => Err(format!("{capture_error}; {show_error}")),
     }
+}
+
+/// Captures one main-display frame only after the trusted parent frame's
+/// explicit screenshot confirmation. The remote loopback iframe cannot call
+/// Tauri IPC, and the native reservation prevents disable/update/uninstall
+/// from racing the one-shot OS read. The full frame returns only to the
+/// trusted parent; the plugin receives the subsequently user-cropped PNG.
+#[tauri::command]
+pub async fn capture_plugin_screen_screenshot(
+    plugin_id: String,
+    lease_id: String,
+    window: tauri::WebviewWindow,
+    detached: State<'_, DetachedPluginWindowRegistry>,
+    state: State<'_, AppState>,
+) -> Result<crate::native_screenshot::NativeScreenshot, String> {
+    if !is_plugin_id(&plugin_id) {
+        return Err("Invalid plugin ID.".to_owned());
+    }
+    validate_plugin_renderer_lease_caller(&window, &detached, &plugin_id, &lease_id)?;
+    let plugin_assets = state.plugin_assets.clone();
+    let reservation_server = plugin_assets.clone();
+    let native_command_lease = plugin_assets.with_plugin_bridge_operation(&plugin_id, || {
+        if !reservation_server.is_active_surface_for(&lease_id, &plugin_id) {
+            return Err(
+                "Screen capture must be confirmed from the plugin's visible active surface."
+                    .to_owned(),
+            );
+        }
+        state.plugins.ensure_plugin_enabled(&plugin_id)?;
+        if !state
+            .plugins
+            .allows_host_method(&plugin_id, "compatibility.utools.screen.capture")?
+        {
+            return Err(format!(
+                "Plugin '{plugin_id}' is not allowed to request screen capture."
+            ));
+        }
+        reservation_server.begin_native_command(&plugin_id)
+    })?;
+
+    let result = capture_native_screenshot_for_window(
+        &window,
+        crate::native_screenshot::NativeScreenshotRequest::default(),
+    )
+    .await;
+    drop(native_command_lease);
+    result
 }
 
 /// Opens a host-owned file picker and immediately starts a bounded LAN-only
@@ -6440,6 +6493,7 @@ pub fn run() {
             sample_cursor_color_neighborhood,
             end_cursor_color_picker,
             capture_native_screenshot,
+            capture_plugin_screen_screenshot,
             crate::network_diagnostics::get_local_network_info,
             crate::network_diagnostics::get_public_network_info,
             crate::network_diagnostics::run_network_speed_test,

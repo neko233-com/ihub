@@ -58,6 +58,8 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.input.typeString", { value: "type" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.beep", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.notification.show", { body: "done" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.screen.capture", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.screen.capture", { displayIndex: 1 })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.openExternal", { url: "https://example.com" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.outPlugin", { isKill: false })).ok).toBe(true);

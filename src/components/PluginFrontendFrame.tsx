@@ -35,7 +35,13 @@ import {
   type PluginSubInputHostState,
 } from "../lib/plugin-sub-input";
 import type { PluginFrontendEvent, PluginFrontendLease, PluginInfo } from "../lib/types";
+import {
+  validateRegionCaptureSize,
+  type CroppedCapture,
+  type RegionCaptureSource,
+} from "../lib/region-capture";
 import { PluginArtwork, safePluginArtworkSrc } from "./PluginArtwork";
+import { RegionCaptureEditor } from "./RegionCaptureEditor";
 
 const RESPONSE_CHANNEL = "ihub-host-bridge/v1";
 const LEASE_HEARTBEAT_MS = 30_000;
@@ -93,6 +99,41 @@ interface PendingCursorColorRequest {
   pluginId: string;
   leaseId: string;
   reply: (payload: Record<string, unknown>) => void;
+}
+
+interface PendingScreenCaptureRequest {
+  id: string;
+  pluginId: string;
+  leaseId: string;
+  reply: (payload: Record<string, unknown>) => void;
+}
+
+interface NativeScreenshot {
+  dataUrl: string;
+  name: string;
+  mimeType: string;
+  width: number;
+  height: number;
+}
+
+const MAX_PLUGIN_SCREEN_CAPTURE_PNG_BYTES = 16 * 1024 * 1024;
+
+function captureBlobDataUrl(blob: Blob): Promise<string> {
+  if (blob.type !== "image/png" || blob.size < 1 || blob.size > MAX_PLUGIN_SCREEN_CAPTURE_PNG_BYTES) {
+    return Promise.reject(new Error("插件截图选区必须是不超过 16 MiB 的 PNG。"));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("无法读取插件截图选区。"));
+    reader.onload = () => {
+      if (typeof reader.result === "string" && reader.result.startsWith("data:image/png;base64,")) {
+        resolve(reader.result);
+      } else {
+        reject(new Error("无法生成有效的插件截图 PNG。"));
+      }
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 interface CursorColorApproval {
@@ -245,12 +286,17 @@ export function PluginFrontendFrame({
   const [bridgeReadyLeaseId, setBridgeReadyLeaseId] = useState<string | null>(null);
   const [leaseRetry, setLeaseRetry] = useState(0);
   const [pendingCursorColorRequest, setPendingCursorColorRequest] = useState<PendingCursorColorRequest | null>(null);
+  const [pendingScreenCaptureRequest, setPendingScreenCaptureRequest] = useState<PendingScreenCaptureRequest | null>(null);
+  const [screenCaptureSource, setScreenCaptureSource] = useState<RegionCaptureSource | null>(null);
+  const [screenCaptureError, setScreenCaptureError] = useState<string | null>(null);
   const [subInput, setSubInput] = useState<PluginSubInputHostState | null>(null);
   const [approvingCursorColor, setApprovingCursorColor] = useState(false);
+  const [capturingPluginScreen, setCapturingPluginScreen] = useState(false);
   const [detaching, setDetaching] = useState(false);
   const readyPluginIdRef = useRef<string | null>(null);
   const postEventToFrameRef = useRef<(name: string, payload: unknown) => boolean>(() => false);
   const pendingCursorColorRequestRef = useRef<PendingCursorColorRequest | null>(null);
+  const pendingScreenCaptureRequestRef = useRef<PendingScreenCaptureRequest | null>(null);
   const subInputRef = useRef<PluginSubInputHostState | null>(null);
   const subInputElementRef = useRef<HTMLInputElement>(null);
   const announcedSurfaceReadyLeaseRef = useRef<string | null>(null);
@@ -428,6 +474,97 @@ export function PluginFrontendFrame({
     })();
   }, [approvingCursorColor, clearPendingCursorColorRequest]);
 
+  const clearPendingScreenCaptureRequest = useCallback((request: PendingScreenCaptureRequest) => {
+    if (pendingScreenCaptureRequestRef.current !== request) {
+      return;
+    }
+    pendingScreenCaptureRequestRef.current = null;
+    setPendingScreenCaptureRequest(null);
+    setScreenCaptureSource(null);
+    setScreenCaptureError(null);
+    setCapturingPluginScreen(false);
+  }, []);
+
+  const cancelPendingScreenCaptureRequest = useCallback(() => {
+    const request = pendingScreenCaptureRequestRef.current;
+    if (!request || capturingPluginScreen) {
+      return;
+    }
+    request.reply({
+      channel: RESPONSE_CHANNEL,
+      type: "response",
+      id: request.id,
+      ok: false,
+      error: "Screen capture was cancelled in the iHub host.",
+    });
+    clearPendingScreenCaptureRequest(request);
+  }, [capturingPluginScreen, clearPendingScreenCaptureRequest]);
+
+  const approvePendingScreenCaptureRequest = useCallback(() => {
+    const request = pendingScreenCaptureRequestRef.current;
+    if (!request || capturingPluginScreen || screenCaptureSource) {
+      return;
+    }
+    setCapturingPluginScreen(true);
+    setScreenCaptureError(null);
+    void (async () => {
+      try {
+        const screenshot = await command<NativeScreenshot>("capture_plugin_screen_screenshot", {
+          pluginId: request.pluginId,
+          leaseId: request.leaseId,
+        });
+        if (pendingScreenCaptureRequestRef.current !== request) {
+          return;
+        }
+        if (screenshot.mimeType !== "image/png" || !screenshot.dataUrl.startsWith("data:image/png;base64,")) {
+          throw new Error("宿主没有返回有效的 PNG 截图。");
+        }
+        validateRegionCaptureSize(screenshot);
+        setScreenCaptureSource({
+          width: screenshot.width,
+          height: screenshot.height,
+          name: screenshot.name,
+          url: screenshot.dataUrl,
+        });
+      } catch (reason) {
+        if (pendingScreenCaptureRequestRef.current !== request) {
+          return;
+        }
+        request.reply({
+          channel: RESPONSE_CHANNEL,
+          type: "response",
+          id: request.id,
+          ok: false,
+          error: reason instanceof Error ? reason.message : "iHub could not capture the screen.",
+        });
+        clearPendingScreenCaptureRequest(request);
+      } finally {
+        if (pendingScreenCaptureRequestRef.current === request) {
+          setCapturingPluginScreen(false);
+        }
+      }
+    })();
+  }, [capturingPluginScreen, clearPendingScreenCaptureRequest, screenCaptureSource]);
+
+  const exportPendingScreenCapture = useCallback(async (capture: CroppedCapture) => {
+    const request = pendingScreenCaptureRequestRef.current;
+    if (!request) {
+      throw new Error("插件截图请求已经失效。");
+    }
+    const dataUrl = await captureBlobDataUrl(capture.blob);
+    if (pendingScreenCaptureRequestRef.current !== request) {
+      throw new Error("插件截图请求已经失效。");
+    }
+    request.reply({
+      channel: RESPONSE_CHANNEL,
+      type: "response",
+      id: request.id,
+      ok: true,
+      result: dataUrl,
+    });
+    clearPendingScreenCaptureRequest(request);
+  }, [clearPendingScreenCaptureRequest]);
+
   useEffect(() => {
     const request = pendingCursorColorRequestRef.current;
     if (!request || request.leaseId === sourceLeaseId) {
@@ -442,6 +579,21 @@ export function PluginFrontendFrame({
     });
     clearPendingCursorColorRequest(request);
   }, [clearPendingCursorColorRequest, sourceLeaseId]);
+
+  useEffect(() => {
+    const request = pendingScreenCaptureRequestRef.current;
+    if (!request || request.leaseId === sourceLeaseId) {
+      return;
+    }
+    request.reply({
+      channel: RESPONSE_CHANNEL,
+      type: "response",
+      id: request.id,
+      ok: false,
+      error: "The plugin surface changed before screen capture was completed.",
+    });
+    clearPendingScreenCaptureRequest(request);
+  }, [clearPendingScreenCaptureRequest, sourceLeaseId]);
 
   useEffect(() => {
     const previous = previousPluginSource.current;
@@ -729,7 +881,7 @@ export function PluginFrontendFrame({
           });
           return;
         }
-        if (pendingCursorColorRequestRef.current) {
+        if (pendingCursorColorRequestRef.current || pendingScreenCaptureRequestRef.current) {
           reply({
             channel: RESPONSE_CHANNEL,
             type: "response",
@@ -749,6 +901,40 @@ export function PluginFrontendFrame({
         // The iframe waits for the parent-owned confirmation instead.
         pendingCursorColorRequestRef.current = pendingRequest;
         setPendingCursorColorRequest(pendingRequest);
+        return;
+      }
+      if (bridgeCall.request.method === "compatibility.utools.screen.capture") {
+        if (runtimeOnly) {
+          reply({
+            channel: RESPONSE_CHANNEL,
+            type: "response",
+            id: bridgeCall.id,
+            ok: false,
+            error: "Screen capture is unavailable from a hidden plugin runtime.",
+          });
+          return;
+        }
+        if (pendingScreenCaptureRequestRef.current || pendingCursorColorRequestRef.current) {
+          reply({
+            channel: RESPONSE_CHANNEL,
+            type: "response",
+            id: bridgeCall.id,
+            ok: false,
+            error: "Another native screen interaction is already waiting in iHub.",
+          });
+          return;
+        }
+        const pendingRequest: PendingScreenCaptureRequest = {
+          id: bridgeCall.id,
+          pluginId,
+          leaseId: sourceLeaseId,
+          reply,
+        };
+        // Keep the full display frame in the trusted parent. Only the user's
+        // cropped PNG is posted back to the remote plugin document.
+        pendingScreenCaptureRequestRef.current = pendingRequest;
+        setPendingScreenCaptureRequest(pendingRequest);
+        setScreenCaptureError(null);
         return;
       }
       const utoolsWindowMethod = bridgeCall.request.method.startsWith("compatibility.utools.window.")
@@ -1159,6 +1345,38 @@ export function PluginFrontendFrame({
                     </button>
                   </div>
                 </div>
+              </div>
+            ) : null}
+            {pendingScreenCaptureRequest ? (
+              <div
+                aria-label="插件截图"
+                aria-modal="true"
+                className="plugin-frame__screen-capture"
+                role="dialog"
+              >
+                {screenCaptureSource ? (
+                  <RegionCaptureEditor
+                    exportLabel="完成截图"
+                    onCancel={cancelPendingScreenCaptureRequest}
+                    onExport={exportPendingScreenCapture}
+                    onStatus={setScreenCaptureError}
+                    source={screenCaptureSource}
+                  />
+                ) : (
+                  <div className="plugin-frame__screen-capture-card">
+                    <span>SCREEN CAPTURE</span>
+                    <h2>允许 {plugin.name} 发起截图？</h2>
+                    <p>iHub 将隐藏当前窗口并读取主显示器的一帧。只有你随后框选的 PNG 区域会返回给插件，完整画面不会离开可信宿主。</p>
+                    {screenCaptureError ? <small role="alert">{screenCaptureError}</small> : null}
+                    <div>
+                      <button disabled={capturingPluginScreen} onClick={cancelPendingScreenCaptureRequest} type="button">取消</button>
+                      <button disabled={capturingPluginScreen} onClick={approvePendingScreenCaptureRequest} type="button">
+                        {capturingPluginScreen ? "正在截取…" : "开始截图"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {screenCaptureSource && screenCaptureError ? <p className="plugin-frame__screen-capture-error" role="alert">{screenCaptureError}</p> : null}
               </div>
             ) : null}
             {loading ? (

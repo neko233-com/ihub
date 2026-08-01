@@ -1923,9 +1923,9 @@ impl PluginManager {
             "clipboard.readText" | "clipboard.read" => Some("clipboard.read"),
             "clipboard.writeText" | "clipboard.write" => Some("clipboard.write"),
             "clipboard.history.snapshot" => Some("clipboard.history"),
-            "screenCapture.acquireFocusLease" | "screenCapture.releaseFocusLease" => {
-                Some("screenCapture")
-            }
+            "screenCapture.acquireFocusLease"
+            | "screenCapture.releaseFocusLease"
+            | "compatibility.utools.screen.capture" => Some("screenCapture"),
             "cursorColor.sampleOnce" => Some("cursorColor"),
             "shell.openPath" | "shell.open" => Some("shell.openPath"),
             "shell.openExternal" => Some("shell.openExternal"),
@@ -1995,6 +1995,12 @@ impl PluginManager {
                 .is_some_and(|clipboard| clipboard.history),
             "screenCapture.acquireFocusLease" | "screenCapture.releaseFocusLease" => {
                 manifest.permissions.screen_capture
+            }
+            "compatibility.utools.screen.capture" => {
+                // The compatibility call never receives native pixels
+                // directly. The trusted parent captures only after its own
+                // confirmation and returns the user's cropped PNG selection.
+                manifest.permissions.screen_capture || manifest.compatibility.is_utools()
             }
             "cursorColor.sampleOnce" => {
                 // A uTools `screenColorPick` call is never ambient access:
@@ -4813,6 +4819,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.screenColorPick.confirmed".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.screenCapture.confirmedCrop".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5368,6 +5377,9 @@ mod tests {
         assert!(manager
             .allows_host_method(&plugin_id, "cursorColor.sampleOnce")
             .expect("screenColorPick should be confirmation-gated rather than ambient"));
+        assert!(manager
+            .allows_host_method(&plugin_id, "compatibility.utools.screen.capture")
+            .expect("screenCapture should be host-confirmed for a compatible package"));
         assert!(!manager
             .allows_host_method(&plugin_id, "clipboard.readText")
             .expect("uTools compatibility must not grant clipboard read"));
@@ -7700,12 +7712,21 @@ mod tests {
         assert!(!manager
             .allows_host_method(plugin_id, "screenCapture.releaseFocusLease")
             .expect("release must be gated by the same explicit permission"));
+        assert!(!manager
+            .allows_host_method(plugin_id, "compatibility.utools.screen.capture")
+            .expect("an ordinary iHub plugin must declare screen capture"));
         assert_eq!(
             PluginManager::required_permission_for_host_method("screenCapture.acquireFocusLease"),
             Some("screenCapture")
         );
         assert_eq!(
             PluginManager::required_permission_for_host_method("screenCapture.releaseFocusLease"),
+            Some("screenCapture")
+        );
+        assert_eq!(
+            PluginManager::required_permission_for_host_method(
+                "compatibility.utools.screen.capture"
+            ),
             Some("screenCapture")
         );
 
@@ -7727,6 +7748,9 @@ mod tests {
         assert!(manager
             .allows_host_method(plugin_id, "screenCapture.releaseFocusLease")
             .expect("an explicit screenCapture declaration should allow release"));
+        assert!(manager
+            .allows_host_method(plugin_id, "compatibility.utools.screen.capture")
+            .expect("an explicit screenCapture declaration should allow a confirmed crop"));
         assert!(!manager
             .allows_host_method(plugin_id, "clipboard.readText")
             .expect("screen capture permission must not grant clipboard reads"));

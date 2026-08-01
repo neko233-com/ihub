@@ -1745,6 +1745,10 @@ const utools = Object.freeze({{
     if (typeof callback !== "function") return;
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
   }},
+  screenCapture(callback) {{
+    if (typeof callback !== "function") return;
+    void call("compatibility.utools.screen.capture", {{}}).then((image) => callback(image)).catch((error) => console.error("iHub compatibility screen capture failed", error));
+  }},
   getWindowType() {{ return currentWindowType; }},
   getNativeId() {{ return config.nativeId; }},
   getPath(name) {{
@@ -1992,6 +1996,8 @@ mod tests {
         assert!(script.contains("shellBeep"));
         assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));
+        assert!(script.contains("screenCapture(callback)"));
+        assert!(script.contains("compatibility.utools.screen.capture"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("invokePluginDetach"));
         assert!(script.contains("cursorColor.sampleOnce"));

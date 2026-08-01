@@ -5718,6 +5718,133 @@ kbd {
   color: #102126;
 }
 
+/* A uTools-compatible screenshot request is rendered entirely by the trusted
+ * parent above the remote iframe. The full monitor frame stays here; only the
+ * explicitly cropped PNG is posted back to the plugin. */
+.plugin-frame__screen-capture {
+  align-items: center;
+  background: linear-gradient(145deg, rgba(5, 16, 52, 0.94), rgba(31, 17, 83, 0.94));
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  overflow: auto;
+  padding: 20px;
+  position: absolute;
+  z-index: 5;
+}
+
+.plugin-frame__screen-capture-card {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(100, 210, 255, 0.42);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(5, 13, 49, 0.48);
+  color: #12214f;
+  max-width: 430px;
+  padding: 25px;
+  width: min(100%, 430px);
+}
+
+.plugin-frame__screen-capture-card > span {
+  color: #0a84ff;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.plugin-frame__screen-capture-card h2 {
+  font-size: 20px;
+  letter-spacing: -0.03em;
+  margin: 10px 0 8px;
+}
+
+.plugin-frame__screen-capture-card p {
+  color: #536086;
+  font-size: 13px;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.plugin-frame__screen-capture-card small,
+.plugin-frame__screen-capture-error {
+  color: #ff375f;
+  display: block;
+  font-size: 11px;
+  margin-top: 10px;
+}
+
+.plugin-frame__screen-capture-card > div {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 21px;
+}
+
+.plugin-frame__screen-capture-card button {
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 9px 14px;
+}
+
+.plugin-frame__screen-capture-card button:first-child {
+  background: rgba(94, 92, 230, 0.1);
+  color: #4b4aa7;
+}
+
+.plugin-frame__screen-capture-card button:last-child {
+  background: linear-gradient(135deg, #0a84ff, #5e5ce6);
+  color: white;
+}
+
+.plugin-frame__screen-capture-card button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.plugin-frame__screen-capture > .region-capture-editor {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(100, 210, 255, 0.32);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(5, 13, 49, 0.48);
+  margin: auto;
+  max-width: 820px;
+  overflow: hidden;
+  padding: 16px;
+  width: 100%;
+}
+
+.plugin-frame__screen-capture .region-capture-editor__header strong {
+  color: #16265a;
+}
+
+.plugin-frame__screen-capture .region-capture-editor__header span,
+.plugin-frame__screen-capture .region-capture-editor__header output {
+  color: #5d6687;
+}
+
+.plugin-frame__screen-capture .region-capture-editor__workspace {
+  background: linear-gradient(145deg, #071a51, #281568);
+}
+
+.plugin-frame__screen-capture .region-capture-editor__export {
+  background: linear-gradient(135deg, #0a84ff, #5e5ce6);
+}
+
+.plugin-frame__screen-capture-error {
+  background: rgba(255, 255, 255, 0.96);
+  border-radius: 8px;
+  bottom: 12px;
+  left: 50%;
+  margin: 0;
+  padding: 7px 10px;
+  position: absolute;
+  transform: translateX(-50%);
+}
+
 /* Search-provider iframes are deliberately real browser documents (so the
  * existing constrained bridge works unchanged), but never become a visible
  * app surface or receive pointer/focus input. */

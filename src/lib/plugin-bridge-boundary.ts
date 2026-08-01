@@ -57,6 +57,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.input.pasteFiles",
   "compatibility.utools.input.typeString",
   "compatibility.utools.notification.show",
+  "compatibility.utools.screen.capture",
   "compatibility.utools.shell.beep",
   "compatibility.utools.shell.openExternal",
   "compatibility.utools.window.hideMain",
@@ -271,6 +272,16 @@ export function validatePluginBridgeCall(
     || method === "compatibility.utools.db.bulkDocs";
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
+  if (method === "compatibility.utools.screen.capture") {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    if (!params || !hasOnlyKeys(params, new Set())) {
+      return {
+        ok: false,
+        error: "uTools screenCapture does not accept capture options.",
+        responseId,
+      };
+    }
+  }
   if (isImageCopy) {
     const params = isPlainRecord(request.params) ? request.params : null;
     const dataUrl = params?.dataUrl;

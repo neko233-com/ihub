@@ -34,6 +34,19 @@ describe("PluginFrontendFrame surface chrome", () => {
     expect(appSource).toContain("onSetExpendHeight={setPluginExpendHeight}");
   });
 
+  it("keeps uTools screen capture in the trusted parent until the user crops it", () => {
+    const frameSource = readFileSync(
+      new URL("./PluginFrontendFrame.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(frameSource).toContain('bridgeCall.request.method === "compatibility.utools.screen.capture"');
+    expect(frameSource).toContain('command<NativeScreenshot>("capture_plugin_screen_screenshot"');
+    expect(frameSource).toContain("<RegionCaptureEditor");
+    expect(frameSource).toContain("result: dataUrl");
+    expect(frameSource).not.toContain("result: screenshot.dataUrl");
+  });
+
   it("announces the trusted detached host type only after its bridge is ready", () => {
     const frameSource = readFileSync(
       new URL("./PluginFrontendFrame.tsx", import.meta.url),
