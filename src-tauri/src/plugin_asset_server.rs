@@ -943,7 +943,9 @@ const pending = new Map();
 const readyCallbacks = [];
 const enterCallbacks = [];
 const outCallbacks = [];
+const detachCallbacks = [];
 let pluginOutDispatched = false;
+let pluginDetachDispatched = false;
 let subInputChangeCallback = null;
 let currentWindowType = "main";
 function call(method, params) {{
@@ -961,6 +963,11 @@ function invokePluginOut(isKill) {{
   if (pluginOutDispatched) return;
   pluginOutDispatched = true;
   invoke(outCallbacks, Boolean(isKill));
+}}
+function invokePluginDetach() {{
+  if (pluginDetachDispatched) return;
+  pluginDetachDispatched = true;
+  invoke(detachCallbacks);
 }}
 const dbStorageState = Object.create(null);
 const dbStorageVersions = new Map();
@@ -1032,7 +1039,10 @@ window.addEventListener("message", (event) => {{
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.windowType") {{
     const value = message.payload && message.payload.windowType;
-    if (value === "main" || value === "detach") currentWindowType = value;
+    if (value === "main" || value === "detach") {{
+      currentWindowType = value;
+      if (value === "detach") invokePluginDetach();
+    }}
     return;
   }}
   if (message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
@@ -1047,6 +1057,14 @@ const utools = Object.freeze({{
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
+  onPluginDetach(callback) {{
+    if (typeof callback !== "function") return;
+    if (pluginDetachDispatched) {{
+      try {{ callback(); }} catch (error) {{ console.error("uTools compatibility detach callback failed", error); }}
+      return;
+    }}
+    detachCallbacks.push(callback);
+  }},
   setSubInput(callback, placeholder, isFocus) {{
     if (typeof callback !== "function") return false;
     if (placeholder !== undefined && typeof placeholder !== "string") return false;
@@ -1270,6 +1288,8 @@ mod tests {
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("compatibility.utools.notification.show"));
         assert!(script.contains("screenColorPick"));
+        assert!(script.contains("onPluginDetach"));
+        assert!(script.contains("invokePluginDetach"));
         assert!(script.contains("cursorColor.sampleOnce"));
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));

@@ -32,6 +32,19 @@ describe("PluginFrontendFrame surface chrome", () => {
     expect(appSource).toContain("onSetExpendHeight={setPluginExpendHeight}");
   });
 
+  it("announces the trusted detached host type only after its bridge is ready", () => {
+    const frameSource = readFileSync(
+      new URL("./PluginFrontendFrame.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(frameSource).toContain('`ihub://plugin/${pluginId}/event/utools.windowType`');
+    expect(frameSource).toContain('{ windowType: detachedHost ? "detach" : "main" }');
+    expect(frameSource).toMatch(
+      /if \(!bridgeIsReady \|\| !pluginId \|\| runtimeOnly\) \{[\s\S]*?utools\.windowType/,
+    );
+  });
+
   it("sandboxes every real plugin document without navigation or popup capabilities", () => {
     const markup = renderToStaticMarkup(
       <PluginFrontendIframe
