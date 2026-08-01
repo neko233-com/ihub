@@ -4020,6 +4020,49 @@ fn plugin_host_call_for_active_lease(
                 .all_docs(&request.plugin_id, request.params.get("selector"))?;
             Ok(Value::Array(documents))
         }
+        "compatibility.utools.db.postAttachment" => {
+            validate_exact_plugin_params(
+                &request.params,
+                &["id", "dataBase64", "contentType"],
+            )?;
+            let id = required_string(&request.params, "id")?;
+            let encoded = required_string(&request.params, "dataBase64")?;
+            let max_encoded = crate::utools_db::MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
+            if encoded.is_empty() || encoded.len() > max_encoded {
+                return Err("uTools attachment base64 is empty or exceeds 10 MiB.".to_owned());
+            }
+            let bytes = BASE64_STANDARD
+                .decode(encoded)
+                .map_err(|_| "uTools attachment base64 is malformed.".to_owned())?;
+            serde_json::to_value(state.utools_documents.post_attachment(
+                &request.plugin_id,
+                id,
+                &bytes,
+                required_string(&request.params, "contentType")?,
+            )?)
+            .map_err(|error| format!("Could not encode the uTools attachment result: {error}"))
+        }
+        "compatibility.utools.db.getAttachment" => {
+            validate_exact_plugin_params(&request.params, &["id"])?;
+            let Some(bytes) = state.utools_documents.get_attachment(
+                &request.plugin_id,
+                required_string(&request.params, "id")?,
+            )? else {
+                return Ok(Value::Null);
+            };
+            Ok(json!({ "dataBase64": BASE64_STANDARD.encode(bytes) }))
+        }
+        "compatibility.utools.db.getAttachmentType" => {
+            validate_exact_plugin_params(&request.params, &["id"])?;
+            Ok(state
+                .utools_documents
+                .get_attachment_type(
+                    &request.plugin_id,
+                    required_string(&request.params, "id")?,
+                )?
+                .map(Value::String)
+                .unwrap_or(Value::Null))
+        }
         "compatibility.utools.dbStorage.snapshot" => {
             let values = state
                 .plugin_settings

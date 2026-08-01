@@ -940,6 +940,7 @@ const responseChannel = "ihub-host-bridge/v1";
 const requestChannel = "ihub-plugin-bridge/v1";
 const copyImageMaxPngBytes = 4194304;
 const copyImageMaxDataUrlChars = 5592430;
+const attachmentMaxBytes = 10485760;
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -973,6 +974,22 @@ function pngDataUrlForCopyImage(value) {{
   }}
   return "data:image/png;base64," + btoa(binary);
 }}
+function attachmentBase64(value) {{
+  if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > attachmentMaxBytes) return null;
+  let binary = "";
+  for (let offset = 0; offset < value.byteLength; offset += 32768) {{
+    binary += String.fromCharCode(...value.subarray(offset, Math.min(value.byteLength, offset + 32768)));
+  }}
+  return btoa(binary);
+}}
+function attachmentBytes(value) {{
+  if (typeof value !== "string") return null;
+  const binary = atob(value);
+  if (binary.length === 0 || binary.length > attachmentMaxBytes) throw new RangeError("uTools attachment response exceeds 10 MiB.");
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}}
 function invoke(callbacks, value) {{
   for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
 }}
@@ -1003,9 +1020,25 @@ const dbPromises = Object.freeze({{
     return selector === undefined
       ? call("compatibility.utools.db.allDocs", {{}})
       : call("compatibility.utools.db.allDocs", {{ selector }});
-  }}
+  }},
+  postAttachment(id, attachment, contentType) {{
+    const dataBase64 = attachmentBase64(attachment);
+    if (typeof id !== "string" || !dataBase64 || typeof contentType !== "string" || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(contentType) || contentType.length > 255) {{
+      return Promise.reject(new TypeError("uTools postAttachment accepts one bounded ID, Uint8Array, and MIME type."));
+    }}
+    return call("compatibility.utools.db.postAttachment", {{ id, dataBase64, contentType }});
+  }},
+  getAttachment(id) {{
+    return call("compatibility.utools.db.getAttachment", {{ id }})
+      .then((result) => result === null ? null : attachmentBytes(result && result.dataBase64));
+  }},
+  getAttachmentType(id) {{ return call("compatibility.utools.db.getAttachmentType", {{ id }}); }},
+  replicateStateFromCloud() {{ return Promise.resolve(null); }}
 }});
-const db = Object.freeze({{ promises: dbPromises }});
+const db = Object.freeze({{
+  promises: dbPromises,
+  replicateStateFromCloud() {{ return null; }}
+}});
 function dbStorageKey(key) {{
   if (typeof key !== "string") throw new TypeError("uTools dbStorage keys must be strings.");
   if (new TextEncoder().encode(key).byteLength > 48) throw new RangeError("uTools dbStorage keys must not exceed 48 UTF-8 bytes.");
@@ -1519,6 +1552,12 @@ mod tests {
         assert!(script.contains("compatibility.utools.db.remove"));
         assert!(script.contains("compatibility.utools.db.bulkDocs"));
         assert!(script.contains("compatibility.utools.db.allDocs"));
+        assert!(script.contains("postAttachment"));
+        assert!(script.contains("compatibility.utools.db.postAttachment"));
+        assert!(script.contains("getAttachment"));
+        assert!(script.contains("compatibility.utools.db.getAttachment"));
+        assert!(script.contains("getAttachmentType"));
+        assert!(script.contains("replicateStateFromCloud"));
         assert!(script.contains("getFeatures"));
         assert!(script.contains("setFeature"));
         assert!(script.contains("removeFeature"));

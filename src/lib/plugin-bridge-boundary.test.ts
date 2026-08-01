@@ -42,6 +42,13 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.db.allDocs", {
       selector: Array.from({ length: 256 }, (_, index) => `document-${index}-${"x".repeat(480)}`),
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
+      id: "asset/logo",
+      dataBase64: "c2FmZQ==",
+      contentType: "text/plain",
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.getAttachment", { id: "asset/logo" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.getAttachmentType", { id: "asset/logo" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.set", { feature: { code: "docs", cmds: ["文档"] } })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.features.remove", { code: "docs" })).ok).toBe(true);
@@ -105,6 +112,13 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.db.put")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.bulkDocs")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.allDocs")).toBe(false);
+    expect(isLargePluginBridgeMethod("compatibility.utools.db.postAttachment")).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
+      id: "asset/logo",
+      dataBase64: "c2FmZQ==",
+      contentType: "text/plain",
+      extra: true,
+    })).ok).toBe(false);
   });
 
   it("rejects oversized, too-deep, cyclic, and non-JSON payloads iteratively", () => {

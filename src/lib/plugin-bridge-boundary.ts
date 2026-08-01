@@ -15,6 +15,11 @@ export const PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES = 17 * 1024 * 1024;
 // UTF-16 unit, so this conservative envelope is reserved for exact DB writes.
 export const PLUGIN_BRIDGE_MAX_DB_JSON_BYTES = 25 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_DB_QUERY_JSON_BYTES = 512 * 1024;
+export const PLUGIN_BRIDGE_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_ATTACHMENT_BASE64_CHARS = Math.ceil(
+  PLUGIN_BRIDGE_MAX_ATTACHMENT_BYTES / 3,
+) * 4;
+export const PLUGIN_BRIDGE_MAX_ATTACHMENT_JSON_BYTES = 43 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
@@ -36,6 +41,9 @@ const pluginHostMethods = new Set([
   "compatibility.utools.db.allDocs",
   "compatibility.utools.db.bulkDocs",
   "compatibility.utools.db.get",
+  "compatibility.utools.db.getAttachment",
+  "compatibility.utools.db.getAttachmentType",
+  "compatibility.utools.db.postAttachment",
   "compatibility.utools.db.put",
   "compatibility.utools.db.remove",
   "compatibility.utools.dbStorage.remove",
@@ -259,6 +267,7 @@ export function validatePluginBridgeCall(
   const isDbWrite = method === "compatibility.utools.db.put"
     || method === "compatibility.utools.db.bulkDocs";
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
+  const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
   if (isImageCopy) {
     const params = isPlainRecord(request.params) ? request.params : null;
     const dataUrl = params?.dataUrl;
@@ -300,11 +309,38 @@ export function validatePluginBridgeCall(
       };
     }
   }
+  if (isAttachmentWrite) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const id = params?.id;
+    const dataBase64 = params?.dataBase64;
+    const contentType = params?.contentType;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["id", "dataBase64", "contentType"]))
+      || typeof id !== "string"
+      || id.length === 0
+      || id.length > 512
+      || typeof dataBase64 !== "string"
+      || dataBase64.length === 0
+      || dataBase64.length > PLUGIN_BRIDGE_MAX_ATTACHMENT_BASE64_CHARS
+      || typeof contentType !== "string"
+      || contentType.length === 0
+      || contentType.length > 255
+    ) {
+      return {
+        ok: false,
+        error: "uTools postAttachment accepts one bounded ID, MIME type, and 10 MiB attachment.",
+        responseId,
+      };
+    }
+  }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
   if (isImageCopy) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
   } else if (isDbWrite) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_JSON_BYTES;
+  } else if (isAttachmentWrite) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_ATTACHMENT_JSON_BYTES;
   } else if (isDbAllDocs) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_QUERY_JSON_BYTES;
   }
@@ -358,5 +394,6 @@ export class PluginBridgeInFlightGate {
 export function isLargePluginBridgeMethod(method: string): boolean {
   return method === "compatibility.utools.clipboard.writeImage"
     || method === "compatibility.utools.db.put"
-    || method === "compatibility.utools.db.bulkDocs";
+    || method === "compatibility.utools.db.bulkDocs"
+    || method === "compatibility.utools.db.postAttachment";
 }

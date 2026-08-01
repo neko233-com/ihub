@@ -17,6 +17,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::host_log;
@@ -30,6 +31,8 @@ const MAX_DATABASE_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_BULK_DOCUMENTS: usize = 16;
 const MAX_BULK_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ALL_DOC_IDS: usize = 256;
+pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_CONTENT_TYPE_BYTES: usize = 255;
 
 #[derive(Clone)]
 pub struct UtoolsDocumentStore {
@@ -43,6 +46,16 @@ struct PersistedDatabase {
     schema_version: u32,
     plugin_id: String,
     documents: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    attachments: BTreeMap<String, PersistedAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedAttachment {
+    content_type: String,
+    byte_length: u64,
+    sha256: String,
 }
 
 impl PersistedDatabase {
@@ -51,6 +64,7 @@ impl PersistedDatabase {
             schema_version: DATABASE_SCHEMA_VERSION,
             plugin_id: plugin_id.to_owned(),
             documents: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         }
     }
 }
@@ -146,11 +160,116 @@ impl UtoolsDocumentStore {
             return Ok(conflict_result(&id));
         }
 
+        let attachment = current.attachments.get(&id).cloned();
         let mut next = current;
         next.documents.remove(&id);
+        next.attachments.remove(&id);
         self.persist(plugin_id, &next)?;
         databases.insert(plugin_id.to_owned(), next);
+        if attachment.is_some() {
+            let path = self.attachment_path(plugin_id, &id)?;
+            if path.exists() {
+                if let Err(error) = validate_regular_attachment_file(&path).and_then(|()| {
+                    fs::remove_file(&path)
+                        .map_err(|error| format!("Could not remove the uTools attachment: {error}"))
+                }) {
+                    host_log::warn("plugins", error);
+                }
+            }
+        }
         Ok(UtoolsDbResult::success(id, current_rev))
+    }
+
+    pub fn post_attachment(
+        &self,
+        plugin_id: &str,
+        id: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<UtoolsDbResult, String> {
+        validate_plugin_id(plugin_id)?;
+        validate_document_id(id)?;
+        validate_attachment_content_type(content_type)?;
+        if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "uTools attachments must contain 1-{MAX_ATTACHMENT_BYTES} bytes."
+            ));
+        }
+
+        let mut databases = self.lock_databases();
+        let current = self.load_locked(&mut databases, plugin_id)?.clone();
+        if current.documents.contains_key(id) || current.attachments.contains_key(id) {
+            return Ok(conflict_result(id));
+        }
+        let mut next = current;
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let result = apply_put(
+            &mut next,
+            serde_json::json!({
+                "_id": id,
+                "_attachments": {
+                    "attachment": {
+                        "content_type": content_type,
+                        "digest": format!("sha256-{digest}"),
+                        "length": bytes.len(),
+                        "stub": true,
+                    }
+                }
+            }),
+        );
+        if result.ok != Some(true) {
+            return Ok(result);
+        }
+        next.attachments.insert(
+            id.to_owned(),
+            PersistedAttachment {
+                content_type: content_type.to_owned(),
+                byte_length: bytes.len() as u64,
+                sha256: digest,
+            },
+        );
+
+        let attachment_path = self.write_attachment(plugin_id, id, bytes)?;
+        if let Err(error) = self.persist(plugin_id, &next) {
+            if let Err(cleanup_error) = fs::remove_file(&attachment_path) {
+                host_log::warn(
+                    "plugins",
+                    format!(
+                        "Could not remove an attachment after its database write failed: {cleanup_error}"
+                    ),
+                );
+            }
+            return Err(error);
+        }
+        databases.insert(plugin_id.to_owned(), next);
+        Ok(result)
+    }
+
+    pub fn get_attachment(&self, plugin_id: &str, id: &str) -> Result<Option<Vec<u8>>, String> {
+        validate_plugin_id(plugin_id)?;
+        validate_document_id(id)?;
+        let mut databases = self.lock_databases();
+        let metadata = self
+            .load_locked(&mut databases, plugin_id)?
+            .attachments
+            .get(id)
+            .cloned();
+        let Some(metadata) = metadata else {
+            return Ok(None);
+        };
+        let bytes = read_attachment_file(&self.attachment_path(plugin_id, id)?, &metadata)?;
+        Ok(Some(bytes))
+    }
+
+    pub fn get_attachment_type(&self, plugin_id: &str, id: &str) -> Result<Option<String>, String> {
+        validate_plugin_id(plugin_id)?;
+        validate_document_id(id)?;
+        let mut databases = self.lock_databases();
+        Ok(self
+            .load_locked(&mut databases, plugin_id)?
+            .attachments
+            .get(id)
+            .map(|metadata| metadata.content_type.clone()))
     }
 
     pub fn bulk_docs(
@@ -294,6 +413,48 @@ impl UtoolsDocumentStore {
         Ok(self.root.join(format!("{plugin_id}.json")))
     }
 
+    fn attachment_path(&self, plugin_id: &str, id: &str) -> Result<PathBuf, String> {
+        validate_plugin_id(plugin_id)?;
+        validate_document_id(id)?;
+        Ok(attachment_path(self.root.as_ref(), plugin_id, id))
+    }
+
+    fn write_attachment(&self, plugin_id: &str, id: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        fs::create_dir_all(self.root.as_ref())
+            .map_err(|error| format!("Could not create the uTools database directory: {error}"))?;
+        validate_database_directory(self.root.as_ref())?;
+        let final_path = self.attachment_path(plugin_id, id)?;
+        if final_path.exists() {
+            validate_regular_attachment_file(&final_path)?;
+            fs::remove_file(&final_path).map_err(|error| {
+                format!("Could not replace an orphaned uTools attachment: {error}")
+            })?;
+        }
+        let digest = attachment_id_digest(id);
+        let temporary = self.root.join(format!(
+            ".{plugin_id}.attachment.{digest}.{}.tmp",
+            Uuid::new_v4().simple()
+        ));
+        let mut staged = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("Could not stage the uTools attachment: {error}"))?;
+        if let Err(error) = staged.write_all(bytes).and_then(|()| staged.sync_all()) {
+            drop(staged);
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "Could not flush the staged uTools attachment: {error}"
+            ));
+        }
+        drop(staged);
+        fs::rename(&temporary, &final_path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Could not save the uTools attachment: {error}")
+        })?;
+        Ok(final_path)
+    }
+
     fn persist(&self, plugin_id: &str, database: &PersistedDatabase) -> Result<(), String> {
         validate_database(database, plugin_id)?;
         fs::create_dir_all(self.root.as_ref())
@@ -389,6 +550,14 @@ fn apply_put(database: &mut PersistedDatabase, document: Value) -> UtoolsDbResul
             )
         }
     };
+
+    if database.attachments.contains_key(&id) {
+        return UtoolsDbResult::failure(
+            id,
+            "conflict",
+            "Attachment documents cannot be updated; remove and recreate the attachment.",
+        );
+    }
 
     let generation = match database.documents.get(&id) {
         None if supplied_rev.is_some() => return conflict_result(&id),
@@ -528,6 +697,101 @@ fn validate_database(database: &PersistedDatabase, plugin_id: &str) -> Result<()
     for (id, document) in &database.documents {
         validate_document(id, document)?;
     }
+    for (id, attachment) in &database.attachments {
+        if !database.documents.contains_key(id) {
+            return Err("A uTools attachment has no matching database document.".to_owned());
+        }
+        validate_attachment_metadata(attachment)?;
+    }
+    Ok(())
+}
+
+fn validate_attachment_content_type(content_type: &str) -> Result<(), String> {
+    let Some((category, subtype)) = content_type.split_once('/') else {
+        return Err("uTools attachment types must be MIME types such as image/png.".to_owned());
+    };
+    let valid_component = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+    };
+    if content_type.len() > MAX_ATTACHMENT_CONTENT_TYPE_BYTES
+        || !content_type.is_ascii()
+        || !valid_component(category)
+        || !valid_component(subtype)
+    {
+        return Err("uTools attachment MIME type is invalid or too long.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_attachment_metadata(metadata: &PersistedAttachment) -> Result<(), String> {
+    validate_attachment_content_type(&metadata.content_type)?;
+    if metadata.byte_length == 0 || metadata.byte_length > MAX_ATTACHMENT_BYTES as u64 {
+        return Err("A stored uTools attachment has an invalid byte length.".to_owned());
+    }
+    if metadata.sha256.len() != 64 || !metadata.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("A stored uTools attachment has an invalid digest.".to_owned());
+    }
+    Ok(())
+}
+
+fn attachment_id_digest(id: &str) -> String {
+    format!("{:x}", Sha256::digest(id.as_bytes()))
+}
+
+fn attachment_path(root: &Path, plugin_id: &str, id: &str) -> PathBuf {
+    root.join(format!(
+        ".{plugin_id}.attachment.{}.bin",
+        attachment_id_digest(id)
+    ))
+}
+
+fn validate_regular_attachment_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect the uTools attachment file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("The uTools attachment path must be a regular non-symlink file.".to_owned());
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+        return Err("The uTools attachment file exceeds the host size limit.".to_owned());
+    }
+    Ok(())
+}
+
+fn read_attachment_file(path: &Path, metadata: &PersistedAttachment) -> Result<Vec<u8>, String> {
+    validate_regular_attachment_file(path)?;
+    let bytes = fs::read(path)
+        .map_err(|error| format!("Could not read the uTools attachment file: {error}"))?;
+    if bytes.len() as u64 != metadata.byte_length
+        || format!("{:x}", Sha256::digest(&bytes)) != metadata.sha256
+    {
+        return Err(
+            "The uTools attachment does not match its persisted integrity metadata.".to_owned(),
+        );
+    }
+    Ok(bytes)
+}
+
+fn validate_attachment_file_metadata(
+    path: &Path,
+    metadata: &PersistedAttachment,
+) -> Result<(), String> {
+    validate_regular_attachment_file(path)?;
+    let length = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect the uTools attachment file: {error}"))?
+        .len();
+    if length != metadata.byte_length {
+        return Err(
+            "The uTools attachment length does not match its database metadata.".to_owned(),
+        );
+    }
     Ok(())
 }
 
@@ -565,20 +829,36 @@ fn validate_database_directory(path: &Path) -> Result<(), String> {
 
 fn is_database_sidecar_name(name: &str, plugin_id: &str) -> bool {
     let prefix = format!(".{plugin_id}.");
-    let (token, recognized_suffix) = if let Some(token) = name
-        .strip_prefix(&prefix)
-        .and_then(|value| value.strip_suffix(".backup"))
-    {
+    let Some(value) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    let (token, recognized_suffix) = if let Some(token) = value.strip_suffix(".backup") {
         (token, true)
-    } else if let Some(token) = name
-        .strip_prefix(&prefix)
-        .and_then(|value| value.strip_suffix(".tmp"))
-    {
+    } else if let Some(token) = value.strip_suffix(".tmp") {
         (token, true)
     } else {
         ("", false)
     };
-    recognized_suffix && token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if recognized_suffix && token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return true;
+    }
+
+    let Some(attachment) = value.strip_prefix("attachment.") else {
+        return false;
+    };
+    if let Some(digest) = attachment.strip_suffix(".bin") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    let mut parts = attachment.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(digest), Some(token), Some("tmp"), None)
+            if digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && token.len() == 32
+                && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    )
 }
 
 fn recover_database_backup(path: &Path, plugin_id: &str) -> Result<(), String> {
@@ -652,6 +932,12 @@ fn load_database_file(path: &Path, plugin_id: &str) -> Result<PersistedDatabase,
     let database = serde_json::from_slice::<PersistedDatabase>(&bytes)
         .map_err(|error| format!("Could not parse the uTools database file: {error}"))?;
     validate_database(&database, plugin_id)?;
+    let root = path
+        .parent()
+        .ok_or_else(|| "The uTools database file has no parent directory.".to_owned())?;
+    for (id, metadata) in &database.attachments {
+        validate_attachment_file_metadata(&attachment_path(root, plugin_id, id), metadata)?;
+    }
     Ok(database)
 }
 
@@ -669,7 +955,7 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::{UtoolsDocumentStore, DATABASE_DIRECTORY};
+    use super::{attachment_path, UtoolsDocumentStore, DATABASE_DIRECTORY};
 
     fn fixture(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ihub-{label}-{}", uuid::Uuid::new_v4()))
@@ -797,5 +1083,81 @@ mod tests {
             Some(json!(42))
         );
         fs::remove_dir_all(root).expect("cleanup recovery fixture");
+    }
+
+    #[test]
+    fn attachments_are_immutable_integrity_checked_and_removed_with_their_document() {
+        let root = fixture("utools-attachments");
+        let plugin_id = "utools-attachment-test";
+        let store = UtoolsDocumentStore::new(root.clone());
+        let created = store
+            .post_attachment(plugin_id, "asset/logo", b"safe attachment", "text/plain")
+            .expect("create attachment");
+        assert_eq!(created.ok, Some(true));
+        assert_eq!(
+            store
+                .get_attachment_type(plugin_id, "asset/logo")
+                .expect("attachment type"),
+            Some("text/plain".to_owned())
+        );
+        assert_eq!(
+            store
+                .get_attachment(plugin_id, "asset/logo")
+                .expect("attachment bytes"),
+            Some(b"safe attachment".to_vec())
+        );
+        assert!(store
+            .get(plugin_id, "asset/logo")
+            .expect("attachment document")
+            .and_then(|document| document.get("_attachments").cloned())
+            .is_some());
+        assert_eq!(
+            store
+                .put(
+                    plugin_id,
+                    json!({ "_id": "asset/logo", "_rev": created.rev, "changed": true }),
+                )
+                .expect("immutable update result")
+                .name
+                .as_deref(),
+            Some("conflict")
+        );
+        assert_eq!(
+            store
+                .post_attachment(plugin_id, "asset/logo", b"replacement", "text/plain")
+                .expect("duplicate attachment result")
+                .name
+                .as_deref(),
+            Some("conflict")
+        );
+        drop(store);
+
+        let reopened = UtoolsDocumentStore::new(root.clone());
+        assert_eq!(
+            reopened
+                .get_attachment(plugin_id, "asset/logo")
+                .expect("reopened attachment"),
+            Some(b"safe attachment".to_vec())
+        );
+        let stored_attachment =
+            attachment_path(&root.join(DATABASE_DIRECTORY), plugin_id, "asset/logo");
+        fs::write(&stored_attachment, b"evil attachment").expect("tamper attachment bytes");
+        assert!(reopened
+            .get_attachment(plugin_id, "asset/logo")
+            .expect_err("same-size tampering must fail")
+            .contains("integrity metadata"));
+        fs::write(&stored_attachment, b"safe attachment").expect("restore attachment fixture");
+        assert_eq!(
+            reopened
+                .remove(plugin_id, &json!("asset/logo"))
+                .expect("remove attachment document")
+                .ok,
+            Some(true)
+        );
+        assert!(reopened
+            .get_attachment(plugin_id, "asset/logo")
+            .expect("removed attachment")
+            .is_none());
+        fs::remove_dir_all(root).expect("cleanup attachment fixture");
     }
 }
