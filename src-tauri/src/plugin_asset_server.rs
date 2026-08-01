@@ -1019,6 +1019,61 @@ const dbStorage = Object.freeze({{
     }});
   }}
 }});
+const dynamicFeatures = new Map();
+const dynamicFeatureVersions = new Map();
+function dynamicFeatureCommandId(code) {{
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(code)) {{
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+  }}
+  return "utools-dynamic-" + hash.toString(16).padStart(16, "0");
+}}
+function normalizeDynamicFeature(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const allowed = new Set(["code", "explain", "icon", "platform", "mainHide", "mainPush", "cmds"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) return null;
+  const code = typeof value.code === "string" ? value.code.trim() : "";
+  if (!code || Array.from(code).length > 160 || /[\u0000-\u001f\u007f]/.test(code)) return null;
+  if (!Array.isArray(value.cmds) || value.cmds.length < 1 || value.cmds.length > 16) return null;
+  const cmds = [];
+  for (const rawCommand of value.cmds) {{
+    if (typeof rawCommand !== "string") return null;
+    const command = rawCommand.trim();
+    if (!command || Array.from(command).length > 80 || /[\u0000-\u001f\u007f]/.test(command)) return null;
+    if (!cmds.includes(command)) cmds.push(command);
+  }}
+  const feature = {{ code, cmds }};
+  if (value.explain !== undefined) {{
+    if (typeof value.explain !== "string" || Array.from(value.explain).length > 240) return null;
+    const explain = value.explain.trim();
+    if (explain) feature.explain = explain;
+  }}
+  if (value.icon !== undefined) {{
+    if (typeof value.icon !== "string" || Array.from(value.icon).length > 2048 || /[\u0000-\u001f\u007f]/.test(value.icon)) return null;
+    feature.icon = value.icon;
+  }}
+  if (value.platform !== undefined) {{
+    const platforms = typeof value.platform === "string" ? [value.platform] : value.platform;
+    if (!Array.isArray(platforms) || platforms.length < 1 || platforms.length > 3 || platforms.some((platform) => !["win32", "darwin", "linux"].includes(platform))) return null;
+    feature.platform = typeof value.platform === "string" ? value.platform : Array.from(new Set(platforms));
+  }}
+  for (const key of ["mainHide", "mainPush"]) {{
+    if (value[key] !== undefined) {{
+      if (typeof value[key] !== "boolean") return null;
+      feature[key] = value[key];
+    }}
+  }}
+  return Object.freeze({{ ...feature, commandId: dynamicFeatureCommandId(code) }});
+}}
+function publicDynamicFeature(feature) {{
+  const {{ commandId, ...value }} = feature;
+  return JSON.parse(JSON.stringify(value));
+}}
+function nextDynamicFeatureVersion(code) {{
+  const version = (dynamicFeatureVersions.get(code) || 0) + 1;
+  dynamicFeatureVersions.set(code, version);
+  return version;
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -1047,7 +1102,8 @@ window.addEventListener("message", (event) => {{
   }}
   if (message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
   const commandId = message.payload && message.payload.commandId;
-  const command = config.commands.find((candidate) => candidate.commandId === commandId);
+  const command = config.commands.find((candidate) => candidate.commandId === commandId)
+    || Array.from(dynamicFeatures.values()).find((candidate) => candidate.commandId === commandId);
   if (!command) return;
   const input = message.payload && message.payload.input;
   invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
@@ -1064,6 +1120,37 @@ const utools = Object.freeze({{
       return;
     }}
     detachCallbacks.push(callback);
+  }},
+  getFeatures(codes) {{
+    if (codes !== undefined && (!Array.isArray(codes) || codes.some((code) => typeof code !== "string"))) return [];
+    const selected = codes === undefined ? Array.from(dynamicFeatures.values()) : codes.flatMap((code) => dynamicFeatures.has(code) ? [dynamicFeatures.get(code)] : []);
+    return selected.map(publicDynamicFeature);
+  }},
+  setFeature(value) {{
+    const feature = normalizeDynamicFeature(value);
+    if (!feature) {{ console.error("iHub rejected an invalid or unsupported uTools dynamic feature."); return; }}
+    if (!dynamicFeatures.has(feature.code) && dynamicFeatures.size >= 64) {{ console.error("iHub limits each uTools plugin to 64 dynamic features."); return; }}
+    const previous = dynamicFeatures.get(feature.code);
+    const version = nextDynamicFeatureVersion(feature.code);
+    dynamicFeatures.set(feature.code, feature);
+    void call("compatibility.utools.features.set", {{ feature: publicDynamicFeature(feature) }}).catch((error) => {{
+      if (dynamicFeatureVersions.get(feature.code) === version) {{
+        if (previous) dynamicFeatures.set(feature.code, previous);
+        else dynamicFeatures.delete(feature.code);
+      }}
+      console.error("iHub compatibility dynamic feature setup failed", error);
+    }});
+  }},
+  removeFeature(code) {{
+    if (typeof code !== "string" || !dynamicFeatures.has(code)) return false;
+    const previous = dynamicFeatures.get(code);
+    const version = nextDynamicFeatureVersion(code);
+    dynamicFeatures.delete(code);
+    void call("compatibility.utools.features.remove", {{ code }}).catch((error) => {{
+      if (dynamicFeatureVersions.get(code) === version && previous) dynamicFeatures.set(code, previous);
+      console.error("iHub compatibility dynamic feature removal failed", error);
+    }});
+    return true;
   }},
   setSubInput(callback, placeholder, isFocus) {{
     if (typeof callback !== "function") return false;
@@ -1149,11 +1236,21 @@ Object.defineProperties(window, {{
   utools: {{ value: utools, configurable: false, writable: false }},
   rubick: {{ value: utools, configurable: false, writable: false }}
 }});
-call("compatibility.utools.dbStorage.snapshot", {{}})
-  .then((snapshot) => {{
-    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
-    for (const [key, value] of Object.entries(snapshot)) {{
-      if (!dbStorageVersions.has(key)) dbStorageState[key] = value;
+Promise.all([
+  call("compatibility.utools.dbStorage.snapshot", {{}}),
+  call("compatibility.utools.features.snapshot", {{}})
+])
+  .then(([snapshot, features]) => {{
+    if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {{
+      for (const [key, value] of Object.entries(snapshot)) {{
+        if (!dbStorageVersions.has(key)) dbStorageState[key] = value;
+      }}
+    }}
+    if (Array.isArray(features)) {{
+      for (const value of features) {{
+        const feature = normalizeDynamicFeature(value);
+        if (feature && !dynamicFeatureVersions.has(feature.code)) dynamicFeatures.set(feature.code, feature);
+      }}
     }}
   }})
   .catch((error) => console.error("iHub compatibility dbStorage restore failed", error))
@@ -1303,6 +1400,13 @@ mod tests {
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        assert!(script.contains("getFeatures"));
+        assert!(script.contains("setFeature"));
+        assert!(script.contains("removeFeature"));
+        assert!(script.contains("compatibility.utools.features.snapshot"));
+        assert!(script.contains("compatibility.utools.features.set"));
+        assert!(script.contains("compatibility.utools.features.remove"));
+        assert!(script.contains("utools-dynamic-"));
         assert!(script.contains("setSubInput"));
         assert!(script.contains("subInputSelect"));
         assert!(script.contains("compatibility.utools.window.hideMain"));
@@ -1321,6 +1425,10 @@ mod tests {
             storage_snapshot < lifecycle_ready,
             "dbStorage must be hydrated before onPluginReady callbacks run"
         );
+        let feature_snapshot = script
+            .find("compatibility.utools.features.snapshot")
+            .expect("bootstrap should hydrate dynamic features");
+        assert!(feature_snapshot < lifecycle_ready);
         assert!(script.contains("utools-color-picker"));
         assert!(!script.contains("require("));
         assert!(!script.contains("electron"));

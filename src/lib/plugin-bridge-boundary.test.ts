@@ -25,6 +25,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.features.snapshot", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.features.set", { feature: { code: "docs", cmds: ["文档"] } })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.features.remove", { code: "docs" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.notification.show", { body: "done" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.openExternal", { url: "https://example.com" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);

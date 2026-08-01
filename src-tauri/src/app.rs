@@ -43,9 +43,9 @@ use crate::{
     models::{
         AppHealth, AutostartStatus, ClipboardFile, ClipboardImage, IndexStatus,
         LauncherHotkeyStatus, OfficialWorkspacePluginProject, PluginAutomaticUpdateReport,
-        PluginCommandResult, PluginInfo, PluginLifecycleUpdate, PluginProjectCreated,
-        PluginSearchResponse, PluginSearchResult, PluginUninstallResult, PluginUpdateCheck,
-        PluginUpdateResult, SearchResult,
+        PluginCommandInfo, PluginCommandResult, PluginInfo, PluginLifecycleUpdate,
+        PluginProjectCreated, PluginSearchResponse, PluginSearchResult, PluginUninstallResult,
+        PluginUpdateCheck, PluginUpdateResult, SearchResult,
     },
     native_icons::NativeIconService,
     plugin_asset_server::{PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose},
@@ -88,6 +88,33 @@ const IHUB_HELP_URL: &str = "https://github.com/neko233-com/ihub#readme";
 const IHUB_FEEDBACK_URL: &str = "https://github.com/neko233-com/ihub/issues";
 const UTOOLS_DB_STORAGE_PREFIX: &str = "utools.db.";
 const MAX_UTOOLS_DB_STORAGE_KEY_BYTES: usize = 48;
+const UTOOLS_DYNAMIC_FEATURE_PREFIX: &str = "utools.feature.";
+const MAX_UTOOLS_DYNAMIC_FEATURES: usize = 64;
+const MAX_UTOOLS_DYNAMIC_COMMANDS: usize = 16;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum UtoolsDynamicPlatforms {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UtoolsDynamicFeature {
+    code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    explain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform: Option<UtoolsDynamicPlatforms>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    main_hide: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    main_push: Option<bool>,
+    cmds: Vec<String>,
+}
 
 /// A small, platform-neutral work-area snapshot used to calculate the next
 /// launcher reveal. Keeping this calculation free of window APIs makes it
@@ -1698,6 +1725,7 @@ pub async fn unpin_launcher_shortcut(
 #[tauri::command]
 pub fn list_plugins(state: State<'_, AppState>) -> Vec<PluginInfo> {
     let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
     state.project_plugin_shortcut_statuses(&mut plugins);
     plugins
 }
@@ -3736,6 +3764,65 @@ fn plugin_host_call_for_active_lease(
                 &request.plugin_id,
                 &utools_db_storage_key(key)?,
             )?;
+            Ok(json!({ "removed": removed }))
+        }
+        "compatibility.utools.features.snapshot" => serde_json::to_value(
+            utools_dynamic_features(&state.plugin_settings, &request.plugin_id),
+        )
+        .map_err(|error| format!("Could not encode uTools dynamic features: {error}")),
+        "compatibility.utools.features.set" => {
+            let feature = validate_utools_dynamic_feature(required_value(
+                &request.params,
+                "feature",
+            )?)?;
+            let key = utools_dynamic_feature_key(&feature.code);
+            let existing = state.plugin_settings.get(&request.plugin_id, &key);
+            if let Some(existing) = existing.as_ref() {
+                let existing = validate_utools_dynamic_feature(existing)?;
+                if existing.code != feature.code {
+                    return Err("uTools dynamic feature identity collision; choose another code."
+                        .to_owned());
+                }
+            } else if utools_dynamic_features(&state.plugin_settings, &request.plugin_id).len()
+                >= MAX_UTOOLS_DYNAMIC_FEATURES
+            {
+                return Err(format!(
+                    "A uTools plugin may store at most {MAX_UTOOLS_DYNAMIC_FEATURES} dynamic features."
+                ));
+            }
+            let value = serde_json::to_value(&feature)
+                .map_err(|error| format!("Could not encode uTools dynamic feature: {error}"))?;
+            state
+                .plugin_settings
+                .set(&request.plugin_id, &key, value)?;
+            let _ = app.emit("ihub://plugin-shortcuts-changed", json!({}));
+            Ok(json!({
+                "feature": feature,
+                "commandId": utools_dynamic_feature_command_id(&feature.code),
+            }))
+        }
+        "compatibility.utools.features.remove" => {
+            let code = required_string(&request.params, "code")?.trim();
+            if code.is_empty()
+                || code.chars().count() > 160
+                || code.chars().any(char::is_control)
+            {
+                return Err("uTools dynamic feature code is invalid.".to_owned());
+            }
+            let key = utools_dynamic_feature_key(code);
+            let Some(existing) = state.plugin_settings.get(&request.plugin_id, &key) else {
+                return Ok(json!({ "removed": false }));
+            };
+            if validate_utools_dynamic_feature(&existing)?.code != code {
+                return Err("uTools dynamic feature identity collision; nothing was removed."
+                    .to_owned());
+            }
+            let removed = state
+                .plugin_settings
+                .remove(&request.plugin_id, &key)?;
+            if removed {
+                let _ = app.emit("ihub://plugin-shortcuts-changed", json!({}));
+            }
             Ok(json!({ "removed": removed }))
         }
         "compatibility.utools.window.hideMain" => {
@@ -6684,6 +6771,170 @@ fn decode_utools_db_storage_key(encoded: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn utools_dynamic_feature_command_id(code: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in code.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("utools-dynamic-{hash:016x}")
+}
+
+fn utools_dynamic_feature_key(code: &str) -> String {
+    format!(
+        "{UTOOLS_DYNAMIC_FEATURE_PREFIX}{}",
+        utools_dynamic_feature_command_id(code)
+            .strip_prefix("utools-dynamic-")
+            .unwrap_or_default()
+    )
+}
+
+fn validate_utools_dynamic_feature(value: &Value) -> Result<UtoolsDynamicFeature, String> {
+    let mut feature = serde_json::from_value::<UtoolsDynamicFeature>(value.clone())
+        .map_err(|_| "uTools dynamic feature fields are malformed or unsupported.".to_owned())?;
+    feature.code = feature.code.trim().to_owned();
+    if feature.code.is_empty()
+        || feature.code.chars().count() > 160
+        || feature.code.chars().any(char::is_control)
+    {
+        return Err(
+            "uTools dynamic feature code must contain 1-160 non-control characters.".to_owned(),
+        );
+    }
+    feature.explain = feature
+        .explain
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if feature
+        .explain
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 240 || value.chars().any(char::is_control))
+    {
+        return Err(
+            "uTools dynamic feature explanations are limited to 240 characters.".to_owned(),
+        );
+    }
+    if feature
+        .icon
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 2_048 || value.chars().any(char::is_control))
+    {
+        return Err("uTools dynamic feature icon metadata is too large or invalid.".to_owned());
+    }
+    let platforms = match feature.platform.as_ref() {
+        None => Vec::new(),
+        Some(UtoolsDynamicPlatforms::One(platform)) => vec![platform.as_str()],
+        Some(UtoolsDynamicPlatforms::Many(platforms)) => {
+            if platforms.is_empty() || platforms.len() > 3 {
+                return Err(
+                    "uTools dynamic feature platform lists must contain 1-3 items.".to_owned(),
+                );
+            }
+            platforms.iter().map(String::as_str).collect()
+        }
+    };
+    if platforms
+        .iter()
+        .any(|platform| !matches!(*platform, "win32" | "darwin" | "linux"))
+    {
+        return Err("uTools dynamic feature platforms must be win32, darwin, or linux.".to_owned());
+    }
+    if feature.cmds.is_empty() || feature.cmds.len() > MAX_UTOOLS_DYNAMIC_COMMANDS {
+        return Err(format!(
+            "uTools dynamic features require 1-{MAX_UTOOLS_DYNAMIC_COMMANDS} direct text commands."
+        ));
+    }
+    let mut commands = Vec::with_capacity(feature.cmds.len());
+    for command in feature.cmds {
+        let command = command.trim().to_owned();
+        if command.is_empty()
+            || command.chars().count() > 80
+            || command.chars().any(char::is_control)
+        {
+            return Err(
+                "uTools dynamic feature commands must contain 1-80 non-control characters."
+                    .to_owned(),
+            );
+        }
+        if !commands.contains(&command) {
+            commands.push(command);
+        }
+    }
+    feature.cmds = commands;
+    Ok(feature)
+}
+
+fn utools_dynamic_features(
+    settings: &PluginSettingsStore,
+    plugin_id: &str,
+) -> Vec<UtoolsDynamicFeature> {
+    settings
+        .snapshot_with_prefix(plugin_id, UTOOLS_DYNAMIC_FEATURE_PREFIX)
+        .into_values()
+        .filter_map(|value| validate_utools_dynamic_feature(&value).ok())
+        .collect()
+}
+
+fn utools_dynamic_feature_matches_platform(feature: &UtoolsDynamicFeature) -> bool {
+    let current = if cfg!(target_os = "windows") {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    match feature.platform.as_ref() {
+        None => true,
+        Some(UtoolsDynamicPlatforms::One(platform)) => platform == current,
+        Some(UtoolsDynamicPlatforms::Many(platforms)) => {
+            platforms.iter().any(|platform| platform == current)
+        }
+    }
+}
+
+fn project_utools_dynamic_features(
+    plugins: &PluginManager,
+    settings: &PluginSettingsStore,
+    plugin_infos: &mut [PluginInfo],
+) {
+    for plugin in plugin_infos {
+        if !plugins
+            .uses_utools_compatibility(&plugin.id)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        for feature in utools_dynamic_features(settings, &plugin.id) {
+            if !utools_dynamic_feature_matches_platform(&feature) {
+                continue;
+            }
+            let command_id = utools_dynamic_feature_command_id(&feature.code);
+            if plugin
+                .commands
+                .iter()
+                .any(|command| command.id == command_id)
+            {
+                continue;
+            }
+            plugin.commands.push(PluginCommandInfo {
+                id: command_id,
+                name: feature
+                    .explain
+                    .clone()
+                    .unwrap_or_else(|| feature.cmds[0].clone()),
+                description: feature.explain.clone(),
+                icon_src: None,
+                execution: "frontend".to_owned(),
+                keywords: feature.cmds,
+                shortcut: None,
+                shortcut_registration: None,
+                shortcut_error: None,
+            });
+        }
+        plugin.command_count = plugin.commands.len();
+    }
+}
+
 fn validate_utools_window_request_params(
     params: &Value,
     allowed_keys: &[&str],
@@ -6847,14 +7098,15 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        validate_external_url, validate_local_search_selection, validate_plugin_clipboard_text,
-        validate_system_icon_request, validate_utools_expend_height,
-        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
-        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
-        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
-        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        utools_dynamic_feature_command_id, utools_dynamic_feature_key, validate_external_url,
+        validate_local_search_selection, validate_plugin_clipboard_text,
+        validate_system_icon_request, validate_utools_dynamic_feature,
+        validate_utools_expend_height, validate_utools_window_request_params, CaptureFocusLease,
+        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
+        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
+        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
+        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
+        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -6878,6 +7130,39 @@ mod tests {
         assert_eq!(decode_utools_db_storage_key("0"), None);
         assert_eq!(decode_utools_db_storage_key("zz"), None);
         assert_eq!(decode_utools_db_storage_key("ff"), None);
+    }
+
+    #[test]
+    fn utools_dynamic_features_are_bounded_normalized_and_stably_identified() {
+        let feature = validate_utools_dynamic_feature(&json!({
+            "code": " docs ",
+            "explain": " Documentation ",
+            "platform": ["win32", "darwin"],
+            "mainHide": true,
+            "cmds": [" Docs ", "Docs", "文档"]
+        }))
+        .expect("bounded direct commands should be accepted");
+        assert_eq!(feature.code, "docs");
+        assert_eq!(feature.explain.as_deref(), Some("Documentation"));
+        assert_eq!(feature.cmds, vec!["Docs", "文档"]);
+        assert_eq!(
+            utools_dynamic_feature_command_id("docs"),
+            "utools-dynamic-dc47fd6761f51d72"
+        );
+        assert_eq!(
+            utools_dynamic_feature_key("docs"),
+            "utools.feature.dc47fd6761f51d72"
+        );
+
+        for invalid in [
+            json!({ "code": "", "cmds": ["Docs"] }),
+            json!({ "code": "docs", "cmds": [] }),
+            json!({ "code": "docs", "cmds": [{ "type": "files" }] }),
+            json!({ "code": "docs", "cmds": ["Docs"], "platform": "android" }),
+            json!({ "code": "docs", "cmds": ["Docs"], "shortcut": "Alt+D" }),
+        ] {
+            assert!(validate_utools_dynamic_feature(&invalid).is_err());
+        }
     }
 
     #[test]
