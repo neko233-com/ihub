@@ -35,6 +35,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LiveColorPicker } from "./LiveColorPicker";
 import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
+import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
 import { RegionCaptureEditor } from "./RegionCaptureEditor";
 import {
@@ -146,19 +147,6 @@ interface ToolboxDrawerProps {
   launchContext?: ToolboxLaunchContext | null;
   open: boolean;
   plugins: PluginInfo[];
-}
-
-interface JsonFormatResult {
-  valid: boolean;
-  formatted?: string;
-  error?: string;
-}
-
-interface JsonQueryResult {
-  valid: boolean;
-  matches: number;
-  formatted?: string;
-  error?: string;
 }
 
 interface BatchRenameItem {
@@ -365,17 +353,6 @@ function revokeScreenshotObjectUrl(value: string | null): void {
   // owned browser object URL.
   if (value?.startsWith("blob:")) {
     URL.revokeObjectURL(value);
-  }
-}
-
-function formatPreviewJson(input: string): JsonFormatResult {
-  try {
-    return { valid: true, formatted: JSON.stringify(JSON.parse(input), null, 2) };
-  } catch (error) {
-    return {
-      valid: false,
-      error: error instanceof Error ? error.message : "JSON 语法无效。",
-    };
   }
 }
 
@@ -797,11 +774,6 @@ export function ToolboxDrawer({
   const [isLoadingClipboardHistory, setIsLoadingClipboardHistory] = useState(false);
   const [clipboardActionId, setClipboardActionId] = useState<string | null>(null);
   const [jsonInput, setJsonInput] = useState('{\n  "name": "iHub",\n  "fast": true\n}');
-  const [jsonResult, setJsonResult] = useState<JsonFormatResult | null>(null);
-  const [isFormattingJson, setIsFormattingJson] = useState(false);
-  const [jsonSelector, setJsonSelector] = useState("$");
-  const [jsonQueryResult, setJsonQueryResult] = useState<JsonQueryResult | null>(null);
-  const [isQueryingJson, setIsQueryingJson] = useState(false);
   const [quickNotes, setQuickNotes] = useState<QuickNote[]>(readQuickNotes);
   const [quickNoteDraft, setQuickNoteDraft] = useState("");
   const [quickNoteQuery, setQuickNoteQuery] = useState("");
@@ -1276,8 +1248,6 @@ export function ToolboxDrawer({
     if (activeTab === "json" && launchContext.jsonInput !== undefined) {
       handledLaunchContextRequestRef.current = launchContext.requestId;
       setJsonInput(launchContext.jsonInput);
-      setJsonResult(null);
-      setJsonQueryResult(null);
       return;
     }
 
@@ -1897,66 +1867,6 @@ export function ToolboxDrawer({
     }
     setQuickNotes((current) => current.filter((item) => item.id !== note.id));
     onToast("便签已删除。");
-  };
-
-  const formatJson = async () => {
-    if (!jsonInput.trim()) {
-      setJsonResult({ valid: false, error: "请先输入 JSON。" });
-      return;
-    }
-
-    setIsFormattingJson(true);
-    try {
-      const result = isDesktop()
-        ? await command<JsonFormatResult>("format_json", { input: jsonInput, indent: 2 })
-        : formatPreviewJson(jsonInput);
-      setJsonResult(result);
-      if (result.valid && result.formatted) {
-        setJsonInput(result.formatted);
-        onToast("JSON 已校验并格式化。");
-      }
-    } catch (error) {
-      setJsonResult({
-        valid: false,
-        error: error instanceof Error ? error.message : "无法格式化 JSON。",
-      });
-    } finally {
-      setIsFormattingJson(false);
-    }
-  };
-
-  const queryJson = async () => {
-    if (!jsonInput.trim()) {
-      setJsonQueryResult({ valid: false, matches: 0, error: "请先输入 JSON。" });
-      return;
-    }
-    if (!jsonSelector.trim()) {
-      setJsonQueryResult({ valid: false, matches: 0, error: "请输入以 $ 开头的 JSON 路径。" });
-      return;
-    }
-
-    setIsQueryingJson(true);
-    try {
-      if (!isDesktop()) {
-        throw new Error("JSON 路径查询仅在 iHub 桌面版中提供。");
-      }
-      const result = await command<JsonQueryResult>("query_json", {
-        input: jsonInput,
-        selector: jsonSelector,
-      });
-      setJsonQueryResult(result);
-      if (result.valid) {
-        onToast(`JSON 路径返回 ${result.matches} 项。`);
-      }
-    } catch (error) {
-      setJsonQueryResult({
-        valid: false,
-        matches: 0,
-        error: error instanceof Error ? error.message : "无法查询 JSON。",
-      });
-    } finally {
-      setIsQueryingJson(false);
-    }
   };
 
   const captureScreenshot = async () => {
@@ -2629,9 +2539,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2646,6 +2556,15 @@ export function ToolboxDrawer({
                 onOpenResult={onOpenSearchResult}
                 onRefreshIndex={onRefreshIndex}
                 onSetIndexRoots={onSetIndexRoots}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : activeTab === "json" ? (
+              <JsonEditorWorkspace
+                input={jsonInput}
+                onClose={closeToolbox}
+                onCopy={copyText}
+                onInputChange={setJsonInput}
                 onStartWindowDrag={onStartWindowDrag}
                 onToast={onToast}
               />
@@ -3002,111 +2921,6 @@ export function ToolboxDrawer({
                       )}
                     </>
                   )}
-                </section>
-              ) : null}
-
-              {activeTab === "json" ? (
-                <section aria-labelledby="toolbox-json-title" id="toolbox-panel-json" role="tabpanel">
-                  <div className="toolbox-section-heading">
-                    <span className="toolbox-section-heading__icon"><Braces size={17} /></span>
-                    <div>
-                      <h3 id="toolbox-json-title">JSON 格式化与校验</h3>
-                      <p>离线解析；输入内容不会上传到网络。</p>
-                    </div>
-                  </div>
-                  <textarea
-                    aria-label="JSON 输入"
-                    className="toolbox-code-input"
-                    onChange={(event) => {
-                      setJsonInput(event.target.value);
-                      setJsonResult(null);
-                      setJsonQueryResult(null);
-                    }}
-                    placeholder='{"name":"iHub"}'
-                    spellCheck="false"
-                    value={jsonInput}
-                  />
-                  <div className="toolbox-action-row">
-                    <button
-                      className="accent-button toolbox-primary-action"
-                      disabled={isFormattingJson}
-                      onClick={() => void formatJson()}
-                      type="button"
-                    >
-                      {isFormattingJson ? <LoaderCircle className="spin" size={15} /> : <Braces size={15} />}
-                      校验并格式化
-                    </button>
-                    {jsonResult?.valid && jsonResult.formatted ? (
-                      <button
-                        className="toolbox-icon-action"
-                        onClick={() => void copyText(jsonResult.formatted ?? "", "格式化 JSON")}
-                        title="复制格式化 JSON"
-                        type="button"
-                      >
-                        <Copy size={15} />
-                      </button>
-                    ) : null}
-                  </div>
-                  {jsonResult ? (
-                    <p className={"toolbox-feedback" + (jsonResult.valid ? " is-success" : " is-error")} role="status">
-                      {jsonResult.valid ? <Check size={14} /> : <CircleAlert size={14} />}
-                      {jsonResult.valid ? "JSON 有效，已按 2 空格缩进。" : jsonResult.error}
-                    </p>
-                  ) : null}
-                  <div className="toolbox-json-query" aria-label="JSON 路径查询">
-                    <label className="toolbox-field" htmlFor="json-selector">
-                      <span>JSON 路径</span>
-                      <input
-                        id="json-selector"
-                        onChange={(event) => {
-                          setJsonSelector(event.target.value);
-                          setJsonQueryResult(null);
-                        }}
-                        placeholder="$.items[*].id"
-                        spellCheck="false"
-                        value={jsonSelector}
-                      />
-                    </label>
-                    <div className="toolbox-action-row">
-                      <button
-                        className="toolbox-secondary-action"
-                        disabled={isQueryingJson}
-                        onClick={() => void queryJson()}
-                        type="button"
-                      >
-                        {isQueryingJson ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}
-                        查询路径
-                      </button>
-                      {jsonQueryResult?.valid && jsonQueryResult.formatted ? (
-                        <button
-                          className="toolbox-icon-action"
-                          onClick={() => void copyText(jsonQueryResult.formatted ?? "", "JSON 查询结果")}
-                          title="复制 JSON 查询结果"
-                          type="button"
-                        >
-                          <Copy size={15} />
-                        </button>
-                      ) : null}
-                    </div>
-                    <p className="toolbox-note">支持 <code>$</code>、<code>.field</code>、<code>['field']</code>、<code>[0]</code> 和 <code>[*]</code>；不会执行脚本或过滤表达式。</p>
-                    {jsonQueryResult ? (
-                      <>
-                        <p className={"toolbox-feedback" + (jsonQueryResult.valid ? " is-success" : " is-error")} role="status">
-                          {jsonQueryResult.valid ? <Check size={14} /> : <CircleAlert size={14} />}
-                          {jsonQueryResult.valid ? `找到 ${jsonQueryResult.matches} 项。` : jsonQueryResult.error}
-                        </p>
-                        {jsonQueryResult.valid && jsonQueryResult.formatted ? (
-                          <textarea
-                            aria-label="JSON 路径查询结果"
-                            className="toolbox-code-input toolbox-code-input--result"
-                            readOnly
-                            spellCheck="false"
-                            value={jsonQueryResult.formatted}
-                          />
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
                 </section>
               ) : null}
 

@@ -167,7 +167,7 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
   {
     id: "ihub-json-tools",
     name: "JSON 工具",
-    description: "离线校验、格式化并复制 JSON；内容不会上传。",
+    description: "双栏离线编辑 JSON、URL Params、XML 与 YAML；支持转换、复制及受限 JSONPath 查询。",
     category: "text",
     distribution: "builtin",
     tags: ["JSON", "格式化", "校验", "开发"],

@@ -31,7 +31,8 @@
     "motion": "^12.42.2",
     "qrcode": "1.5.4",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
