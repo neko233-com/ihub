@@ -33,7 +33,7 @@ iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿
 ### 内置工具（现在可用）
 
 - **本地搜索**：主命令框由 Rust 索引驱动；可在“工具 → 本地搜索”查看、添加或移除索引目录，保存后后台重扫。名称与路径使用 Unicode NFKC 检索键，中文文件名和路径支持无声调全拼、首字母、中文／英文混输与未完成音节（例如 `zhongwenjihua` / `zwjh` → “中文计划”）。多音字按字典中的常见读音保证召回，当前不做词组上下文消歧；原文和直接英文名称优先排序。索引只保存两组有界字符签名并共享一份拼音词典，不保存逐条拼音字符串，也不改写显示路径或磁盘快照。
-- **颜色工具**：通过系统颜色选择器生成并复制 HEX、RGB、HSL；支持 EyeDropper 的 WebView 可从屏幕拾取颜色。
+- **颜色工具**：独立三栏工作台提供可拖动与方向键微调的色相/饱和度色轮、明度与透明度、互补/类似/分裂互补/三角色，以及 HEX、RGB、HSV/HSB、HSL、CMYK、CIE-LAB、OKLCH、CSS 一键复制；内置 Apple 高饱和功能色卡和本机收藏。桌面端还有短时限频的原生 9×9 光标放大取色，支持 EyeDropper 的 WebView 也可直接调用系统吸管。
 - **截图**：每次通过系统选择器明确选择屏幕、窗口或标签页，导出 PNG 并保留当前会话预览。
 - **剪贴板历史**：默认关闭；只有手动开启后才在本机保存纯文本，可固定、复制、删除和清除未固定记录。
 - **JSON**：独立双栏编辑工作台，本地识别 JSON、URL Params、XML 与 YAML；支持格式化、压缩、转义、转 XML、转 TypeScript，以及不执行脚本的受限 JSONPath 查询。输入不会发送到网络。
@@ -154,7 +154,7 @@ GitHub source → resolved immutable commit → manifest / integrity lock
 
 ### 官方插件 catalog
 
-内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入或保存历史。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
+内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入，只有用户明确点“收藏”的颜色才会写入本机收藏。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
 
 [ihub-plugin-window-manager@v1.0.2](https://github.com/neko233-com/ihub-plugin-window-manager/tree/v1.0.2) 只可对 iHub 自己的主启动器执行居中、左右贴靠和切换置顶，不能枚举、读取、聚焦或控制其他应用窗口。图片、OCR 和批量重命名的 `launcherContext` 只交接一次性元数据，仍要求用户重新选择文件／目录；文本工具与翻译只预填显式交接文本，不自动处理或发送。PDF、ZIP 和网页动作均在最小权限下提供正式 Git fallback。完整源码 checkout 中的 18 个官方项目都带固定 ID 的 `workspaceProject` 开发入口：开发安装器验证 `sourceRoot` 后优先链接当前构建产物，普通安装则全部回退到锁定 commit 的 Git 包。
 

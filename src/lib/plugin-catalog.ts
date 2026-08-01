@@ -117,10 +117,10 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
   {
     id: "ihub-color-picker",
     name: "取色器",
-    description: "在本机转换 HEX、RGB、HSL 与 CSS；桌面端还可在明确倒计时后从当前光标位置拾取一次颜色。",
+    description: "离线色轮、配色关系、多颜色空间与本机收藏；桌面端提供短时限频的 9×9 光标放大取色。",
     category: "media",
     distribution: "builtin",
-    tags: ["取色", "颜色", "HEX", "RGB", "HSL", "CSS", "离线"],
+    tags: ["取色", "颜色", "HEX", "RGB", "HSL", "CMYK", "OKLCH", "色卡", "离线"],
     icon: "palette",
     builtinTool: "color",
   },

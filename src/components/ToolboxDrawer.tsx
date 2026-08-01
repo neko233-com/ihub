@@ -33,7 +33,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LiveColorPicker } from "./LiveColorPicker";
+import { ColorWorkbench } from "./ColorWorkbench";
 import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
 import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
@@ -308,43 +308,6 @@ function timeInputKindLabel(kind: TimeInputKind): string {
     case "local-date":
       return "已按本机时区解析日期";
   }
-}
-
-function hexToRgb(hex: string) {
-  const value = hex.replace("#", "");
-  const red = Number.parseInt(value.slice(0, 2), 16);
-  const green = Number.parseInt(value.slice(2, 4), 16);
-  const blue = Number.parseInt(value.slice(4, 6), 16);
-  return { red, green, blue };
-}
-
-function rgbToHsl({ red, green, blue }: ReturnType<typeof hexToRgb>) {
-  const r = red / 255;
-  const g = green / 255;
-  const b = blue / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const lightness = (max + min) / 2;
-  const delta = max - min;
-
-  if (delta === 0) {
-    return "hsl(0 0% " + Math.round(lightness * 100) + "%)";
-  }
-
-  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
-  let hue = 0;
-  if (max === r) {
-    hue = 60 * (((g - b) / delta) % 6);
-  } else if (max === g) {
-    hue = 60 * ((b - r) / delta + 2);
-  } else {
-    hue = 60 * ((r - g) / delta + 4);
-  }
-  if (hue < 0) {
-    hue += 360;
-  }
-
-  return `hsl(${Math.round(hue)} ${Math.round(saturation * 100)}% ${Math.round(lightness * 100)}%)`;
 }
 
 function revokeScreenshotObjectUrl(value: string | null): void {
@@ -858,16 +821,6 @@ export function ToolboxDrawer({
     setRegionCaptureSource(source);
   }, []);
 
-  const rgb = useMemo(() => hexToRgb(color), [color]);
-  const hsl = useMemo(() => rgbToHsl(rgb), [rgb]);
-  const colorValues = useMemo(
-    () => [
-      { label: "HEX", value: color.toUpperCase() },
-      { label: "RGB", value: `rgb(${rgb.red} ${rgb.green} ${rgb.blue})` },
-      { label: "HSL", value: hsl },
-    ],
-    [color, hsl, rgb.blue, rgb.green, rgb.red],
-  );
   const filteredQuickNotes = useMemo(() => {
     const query = quickNoteQuery.trim().toLocaleLowerCase();
     if (!query) {
@@ -2539,9 +2492,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2565,6 +2518,16 @@ export function ToolboxDrawer({
                 onClose={closeToolbox}
                 onCopy={copyText}
                 onInputChange={setJsonInput}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : activeTab === "color" ? (
+              <ColorWorkbench
+                color={color}
+                onClose={closeToolbox}
+                onColorChange={setColor}
+                onCopy={copyText}
+                onPickScreenColor={pickScreenColor}
                 onStartWindowDrag={onStartWindowDrag}
                 onToast={onToast}
               />
@@ -2603,62 +2566,6 @@ export function ToolboxDrawer({
             </div>
 
             <div className="toolbox-content">
-              {activeTab === "color" ? (
-                <section aria-labelledby="toolbox-color-title" id="toolbox-panel-color" role="tabpanel">
-                  <div className="toolbox-section-heading">
-                    <span className="toolbox-section-heading__icon"><Palette size={17} /></span>
-                    <div>
-                      <h3 id="toolbox-color-title">颜色工具</h3>
-                      <p>选择、转换并复制颜色值；无需离开当前工作流。</p>
-                    </div>
-                  </div>
-                  <div className="color-picker-layout">
-                    <label className="color-swatch" style={{ backgroundColor: color }}>
-                      <input
-                        aria-label="选择颜色"
-                        onChange={(event) => setColor(event.target.value)}
-                        type="color"
-                        value={color}
-                      />
-                    </label>
-                    <div>
-                      <strong>{color.toUpperCase()}</strong>
-                      <p>点击色块，使用系统颜色选择器。</p>
-                    </div>
-                  </div>
-                  <LiveColorPicker
-                    onConfirm={async (sample) => {
-                      setColor(sample.hex);
-                      await copyText(sample.hex, "HEX");
-                    }}
-                    onStatus={onToast}
-                  />
-                  <button
-                    className="toolbox-secondary-action"
-                    onClick={() => void pickScreenColor()}
-                    type="button"
-                  >
-                    <Palette size={15} />
-                    使用 WebView 屏幕吸管
-                  </button>
-                  <div className="color-values">
-                    {colorValues.map((entry) => (
-                      <button
-                        className="color-value"
-                        key={entry.label}
-                        onClick={() => void copyText(entry.value, entry.label)}
-                        type="button"
-                      >
-                        <span>{entry.label}</span>
-                        <strong>{entry.value}</strong>
-                        <Copy size={14} />
-                      </button>
-                    ))}
-                  </div>
-                  <p className="toolbox-note">Windows 与 macOS 桌面端使用短时、限频的实时放大镜；macOS 首次取样需要用户授予“屏幕录制”权限。WebView 不支持屏幕吸管时，仍可使用系统颜色面板。</p>
-                </section>
-              ) : null}
-
               {activeTab === "screenshot" ? (
                 <section aria-labelledby="toolbox-screenshot-title" id="toolbox-panel-screenshot" role="tabpanel">
                   <div className="toolbox-section-heading">
