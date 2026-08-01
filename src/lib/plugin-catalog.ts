@@ -36,6 +36,7 @@ export type BuiltinToolId =
   | "qrcode"
   | "cloud"
   | "record"
+  | "network"
   | "rename"
   | "developer";
 
@@ -54,7 +55,8 @@ export type PluginCatalogIcon =
   | "cloud"
   | "window"
   | "note"
-  | "converter";
+  | "converter"
+  | "network";
 
 export interface PluginCatalogEntry {
   id: string;
@@ -228,6 +230,17 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     tags: ["录屏", "视频", "WebM", "屏幕"],
     icon: "video",
     builtinTool: "record",
+  },
+  {
+    id: "ihub-network-diagnostics",
+    name: "IP 与网络测速",
+    description: "用户点击后查询公网 IP，并通过固定 Cloudflare 端点测量延迟、抖动、下载与上传；结果不保存。",
+    category: "system",
+    distribution: "builtin",
+    tags: ["IP", "公网 IP", "内网 IP", "测速", "网络", "延迟", "下载", "上传"],
+    icon: "network",
+    builtinTool: "network",
+    featured: true,
   },
   {
     id: "ihub-batch-rename",

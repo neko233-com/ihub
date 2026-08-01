@@ -14,6 +14,7 @@ mod models;
 mod native_color_picker;
 mod native_icons;
 mod native_screenshot;
+mod network_diagnostics;
 mod ntfs_usn;
 mod plugin_artwork;
 mod plugin_asset_server;

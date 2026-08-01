@@ -21,6 +21,7 @@ const expectedBuiltinTools = [
   "qrcode",
   "cloud",
   "record",
+  "network",
   "rename",
   "developer",
 ] as const satisfies readonly BuiltinToolId[];

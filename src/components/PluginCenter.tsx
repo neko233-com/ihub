@@ -13,6 +13,7 @@ import {
   EllipsisVertical,
   Files,
   FolderSearch,
+  Gauge,
   LoaderCircle,
   NotebookPen,
   Palette,
@@ -166,6 +167,7 @@ const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   window: Settings2,
   note: NotebookPen,
   converter: Binary,
+  network: Gauge,
 };
 
 const pluginCenterStyles = `

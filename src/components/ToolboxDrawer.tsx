@@ -20,6 +20,7 @@ import {
   Languages,
   LoaderCircle,
   NotebookPen,
+  Gauge,
   Palette,
   Pin,
   PinOff,
@@ -36,6 +37,7 @@ import { ColorWorkbench } from "./ColorWorkbench";
 import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
 import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
 import { TranslationWorkbench } from "./TranslationWorkbench";
+import { NetworkWorkbench } from "./NetworkWorkbench";
 import {
   RecordingWorkbench,
   type RecordingPhase,
@@ -118,6 +120,7 @@ export type ToolboxTab =
   | "qrcode"
   | "cloud"
   | "record"
+  | "network"
   | "rename"
   | "developer";
 
@@ -283,6 +286,7 @@ const tabs: Array<{
   { id: "qrcode", label: "二维码", icon: QrCode },
   { id: "cloud", label: "云盘", icon: Cloud },
   { id: "record", label: "录屏", icon: Video },
+  { id: "network", label: "网络", icon: Gauge },
   { id: "rename", label: "重命名", icon: Files },
   { id: "developer", label: "开发者", icon: Code2 },
 ];
@@ -2524,9 +2528,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : activeTab === "network" ? "network-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : activeTab === "network" ? " toolbox-drawer--network" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2593,6 +2597,13 @@ export function ToolboxDrawer({
                 result={recordingResult}
                 sourceName={recordingSourceName}
                 sourcePreference={recordingSourcePreference}
+              />
+            ) : activeTab === "network" ? (
+              <NetworkWorkbench
+                onClose={closeToolbox}
+                onCopy={copyText}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
               />
             ) : (
               <>

@@ -23,6 +23,7 @@ import {
   Search,
   Sparkles,
   Video,
+  Gauge,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -288,6 +289,14 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
     label: "屏幕录制",
     detail: "导出 WebM",
     icon: Video,
+    tone: "blue",
+    badge: "内置",
+  },
+  {
+    id: "ihub.tool.network",
+    label: "IP 与网络测速",
+    detail: "延迟、抖动、下载与上传",
+    icon: Gauge,
     tone: "blue",
     badge: "内置",
   },

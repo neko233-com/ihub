@@ -751,6 +751,13 @@ const builtinTools: Array<{
     tab: "record",
   },
   {
+    commandId: "ihub.tool.network",
+    name: "IP 与网络测速",
+    metadata: "查询本机/公网 IP，测量延迟、抖动与上下行速度",
+    keywords: ["IP", "公网 IP", "内网 IP", "测速", "网速", "speedtest", "网络诊断"],
+    tab: "network",
+  },
+  {
     commandId: "ihub.tool.batch-rename",
     name: "批量重命名",
     metadata: "预览后再安全执行文件改名",
