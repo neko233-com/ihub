@@ -750,10 +750,14 @@ export function PluginFrontendFrame({
       const utoolsWindowMethod = bridgeCall.request.method.startsWith("compatibility.utools.window.")
         ? bridgeCall.request.method
         : null;
+      const utoolsInputMethod = bridgeCall.request.method.startsWith("compatibility.utools.input.")
+        ? bridgeCall.request.method
+        : null;
       if (
-        utoolsWindowMethod
+        (utoolsWindowMethod || utoolsInputMethod)
         && (
           runtimeOnly
+          || (utoolsInputMethod !== null && !onHideMainWindow)
           || (utoolsWindowMethod === "compatibility.utools.window.hideMain" && !onHideMainWindow)
           || (utoolsWindowMethod === "compatibility.utools.window.setHeight" && !onSetExpendHeight)
           || (utoolsWindowMethod === "compatibility.utools.window.showMain" && !onShowMainWindow)
@@ -815,9 +819,13 @@ export function PluginFrontendFrame({
             ok: true,
             result,
           });
-          if (utoolsWindowMethod) {
+          if (utoolsWindowMethod || utoolsInputMethod) {
             window.setTimeout(() => {
-              if (utoolsWindowMethod === "compatibility.utools.window.hideMain") {
+              if (utoolsInputMethod) {
+                void Promise.resolve(onHideMainWindow?.(true)).catch((error) => {
+                  onToast(error instanceof Error ? error.message : "iHub 主窗口未能在输入前隐藏。");
+                });
+              } else if (utoolsWindowMethod === "compatibility.utools.window.hideMain") {
                 const params = bridgeCall.request.params as { isRestorePreWindow?: boolean } | undefined;
                 void Promise.resolve(onHideMainWindow?.(params?.isRestorePreWindow ?? true)).catch((error) => {
                   onToast(error instanceof Error ? error.message : "iHub 主窗口未能隐藏。");

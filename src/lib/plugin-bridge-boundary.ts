@@ -24,6 +24,8 @@ const pluginHostMethods = new Set([
   "compatibility.utools.features.remove",
   "compatibility.utools.features.set",
   "compatibility.utools.features.snapshot",
+  "compatibility.utools.input.pasteText",
+  "compatibility.utools.input.typeString",
   "compatibility.utools.notification.show",
   "compatibility.utools.shell.openExternal",
   "compatibility.utools.window.hideMain",

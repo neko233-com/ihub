@@ -26,6 +26,8 @@ describe("PluginFrontendFrame surface chrome", () => {
     const appSource = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
 
     expect(frameSource).toContain('utoolsWindowMethod === "compatibility.utools.window.setHeight" && !onSetExpendHeight');
+    expect(frameSource).toContain('bridgeCall.request.method.startsWith("compatibility.utools.input.")');
+    expect(frameSource).toContain("onHideMainWindow?.(true)");
     expect(frameSource).toContain("onSetExpendHeight?.(params.height)");
     expect(appSource).toContain("const [pluginExpendHeight, setPluginExpendHeight]");
     expect(appSource).toContain("? (pluginExpendHeight ?? 444) + 60");

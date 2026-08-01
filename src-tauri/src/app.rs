@@ -1356,6 +1356,12 @@ const MAX_PLUGIN_NOTIFICATION_WINDOWS: usize = 128;
 const PLUGIN_NOTIFICATION_WINDOW: Duration = Duration::from_secs(10);
 const PLUGIN_NOTIFICATION_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
 const MAX_PLUGIN_CLIPBOARD_TEXT_BYTES: usize = 48 * 1024;
+const MAX_UTOOLS_TYPED_TEXT_CHARS: usize = 4_096;
+
+enum UtoolsInputAction {
+    PasteText,
+    TypeString(String),
+}
 
 /// The plugin-facing projection deliberately strips the cursor coordinates
 /// from the trusted Toolbox result. A plugin receives a color value only;
@@ -3825,6 +3831,28 @@ fn plugin_host_call_for_active_lease(
             }
             Ok(json!({ "removed": removed }))
         }
+        "compatibility.utools.input.pasteText" => {
+            let value = validate_utools_input_text(
+                &request.params,
+                MAX_PLUGIN_CLIPBOARD_TEXT_BYTES,
+                None,
+            )?;
+            crate::clipboard_access::with_clipboard(|clipboard| clipboard.set_text(value))
+                .map_err(|error| format!("Could not prepare the system clipboard for paste: {error}"))?;
+            hide_main_for_utools_input(app)?;
+            schedule_utools_input(UtoolsInputAction::PasteText)?;
+            Ok(json!({ "accepted": true }))
+        }
+        "compatibility.utools.input.typeString" => {
+            let value = validate_utools_input_text(
+                &request.params,
+                MAX_PLUGIN_CLIPBOARD_TEXT_BYTES,
+                Some(MAX_UTOOLS_TYPED_TEXT_CHARS),
+            )?;
+            hide_main_for_utools_input(app)?;
+            schedule_utools_input(UtoolsInputAction::TypeString(value.to_owned()))?;
+            Ok(json!({ "accepted": true }))
+        }
         "compatibility.utools.window.hideMain" => {
             validate_utools_window_request_params(
                 &request.params,
@@ -4191,9 +4219,12 @@ fn ensure_plugin_host_request_is_allowed(
                 .to_owned(),
         );
     }
-    if request.method.starts_with("compatibility.utools.window.") && !request.surface {
+    if (request.method.starts_with("compatibility.utools.window.")
+        || request.method.starts_with("compatibility.utools.input."))
+        && !request.surface
+    {
         return Err(
-            "uTools window compatibility methods require the plugin's visible active surface."
+            "uTools window and input compatibility methods require the plugin's visible active surface."
                 .to_owned(),
         );
     }
@@ -6742,6 +6773,121 @@ fn validate_plugin_clipboard_text(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_utools_input_text(
+    params: &Value,
+    max_bytes: usize,
+    max_chars: Option<usize>,
+) -> Result<&str, String> {
+    let Some(object) = params.as_object() else {
+        return Err("uTools input parameters must be an object.".to_owned());
+    };
+    if object.keys().any(|key| key != "value") {
+        return Err("uTools input requests accept only a text value.".to_owned());
+    }
+    let value = required_string(params, "value")?;
+    if value.len() > max_bytes || value.contains('\0') {
+        return Err("uTools input text is too large or contains a null character.".to_owned());
+    }
+    if max_chars.is_some_and(|limit| value.chars().count() > limit) {
+        return Err(format!(
+            "uTools typed text is limited to {} characters.",
+            max_chars.unwrap_or_default()
+        ));
+    }
+    Ok(value)
+}
+
+fn hide_main_for_utools_input(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The iHub main window is unavailable for uTools input.".to_owned())?;
+    window
+        .hide()
+        .map_err(|error| format!("Could not hide iHub before uTools input: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_utools_input(action: UtoolsInputAction) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("ihub-utools-input".to_owned())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(180));
+            if let Err(error) = send_utools_windows_input(action) {
+                host_log::warn("plugins", error);
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the deferred uTools input task: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn schedule_utools_input(_action: UtoolsInputAction) -> Result<(), String> {
+    Err("uTools input compatibility has not been runtime-verified on this platform.".to_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn send_utools_windows_input(action: UtoolsInputAction) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    };
+
+    fn keyboard_input(key: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: key,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn send(inputs: &[INPUT]) -> Result<(), String> {
+        let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize == inputs.len() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Windows accepted {sent} of {} deferred uTools input events.",
+                inputs.len()
+            ))
+        }
+    }
+
+    match action {
+        UtoolsInputAction::PasteText => send(&[
+            keyboard_input(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
+            keyboard_input(VK_V, 0, KEYBD_EVENT_FLAGS(0)),
+            keyboard_input(VK_V, 0, KEYEVENTF_KEYUP),
+            keyboard_input(VK_CONTROL, 0, KEYEVENTF_KEYUP),
+        ]),
+        UtoolsInputAction::TypeString(value) => {
+            let mut inputs = Vec::with_capacity(256);
+            for code_unit in value.encode_utf16() {
+                inputs.push(keyboard_input(VIRTUAL_KEY(0), code_unit, KEYEVENTF_UNICODE));
+                inputs.push(keyboard_input(
+                    VIRTUAL_KEY(0),
+                    code_unit,
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                ));
+                if inputs.len() >= 256 {
+                    send(&inputs)?;
+                    inputs.clear();
+                }
+            }
+            if !inputs.is_empty() {
+                send(&inputs)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn utools_db_storage_key(key: &str) -> Result<String, String> {
     if key.len() > MAX_UTOOLS_DB_STORAGE_KEY_BYTES {
         return Err(format!(
@@ -7101,12 +7247,13 @@ mod tests {
         utools_dynamic_feature_command_id, utools_dynamic_feature_key, validate_external_url,
         validate_local_search_selection, validate_plugin_clipboard_text,
         validate_system_icon_request, validate_utools_dynamic_feature,
-        validate_utools_expend_height, validate_utools_window_request_params, CaptureFocusLease,
-        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
-        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
-        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
-        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_utools_expend_height, validate_utools_input_text,
+        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
+        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
+        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
+        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -7179,6 +7326,30 @@ mod tests {
         )
         .is_err());
         assert!(validate_utools_window_request_params(&json!([]), &[]).is_err());
+    }
+
+    #[test]
+    fn utools_text_input_accepts_only_bounded_explicit_values() {
+        assert_eq!(
+            validate_utools_input_text(&json!({ "value": "你好\nworld" }), 64, Some(16))
+                .expect("bounded Unicode input should be accepted"),
+            "你好\nworld"
+        );
+        for params in [
+            json!([]),
+            json!({}),
+            json!({ "value": 42 }),
+            json!({ "value": "ok", "delay": 0 }),
+            json!({ "value": "bad\u{0}value" }),
+        ] {
+            assert!(validate_utools_input_text(&params, 64, Some(16)).is_err());
+        }
+        assert!(
+            validate_utools_input_text(&json!({ "value": "界".repeat(22) }), 64, None).is_err()
+        );
+        assert!(
+            validate_utools_input_text(&json!({ "value": "x".repeat(17) }), 64, Some(16)).is_err()
+        );
     }
 
     #[test]

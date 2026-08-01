@@ -1152,6 +1152,18 @@ const utools = Object.freeze({{
     }});
     return true;
   }},
+  hideMainWindowPasteText(value) {{
+    if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > 49152) return false;
+    void call("compatibility.utools.input.pasteText", {{ value }})
+      .catch((error) => console.error("iHub compatibility text paste failed", error));
+    return true;
+  }},
+  hideMainWindowTypeString(value) {{
+    if (typeof value !== "string" || Array.from(value).length > 4096 || value.includes("\u0000")) return false;
+    void call("compatibility.utools.input.typeString", {{ value }})
+      .catch((error) => console.error("iHub compatibility text input failed", error));
+    return true;
+  }},
   findInPage(text, options) {{
     if (typeof text !== "string" || text.length === 0 || Array.from(text).length > 512) return;
     if (options !== undefined && (!options || typeof options !== "object" || Array.isArray(options))) return;
@@ -1430,6 +1442,10 @@ mod tests {
         assert!(script.contains("findInPage"));
         assert!(script.contains("stopFindInPage"));
         assert!(script.contains("selection.removeAllRanges()"));
+        assert!(script.contains("hideMainWindowPasteText"));
+        assert!(script.contains("compatibility.utools.input.pasteText"));
+        assert!(script.contains("hideMainWindowTypeString"));
+        assert!(script.contains("compatibility.utools.input.typeString"));
         assert!(script.contains("setSubInput"));
         assert!(script.contains("subInputSelect"));
         assert!(script.contains("compatibility.utools.window.hideMain"));
