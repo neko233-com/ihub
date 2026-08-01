@@ -27,6 +27,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.input.pasteText",
   "compatibility.utools.input.typeString",
   "compatibility.utools.notification.show",
+  "compatibility.utools.shell.beep",
   "compatibility.utools.shell.openExternal",
   "compatibility.utools.window.hideMain",
   "compatibility.utools.window.outPlugin",

@@ -1250,6 +1250,10 @@ const utools = Object.freeze({{
     void call("compatibility.utools.shell.openExternal", {{ url }})
       .catch((error) => console.error("iHub compatibility external URL failed", error));
   }},
+  shellBeep() {{
+    void call("compatibility.utools.shell.beep", {{}})
+      .catch((error) => console.error("iHub compatibility system beep failed", error));
+  }},
   screenColorPick(callback) {{
     if (typeof callback !== "function") return;
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
@@ -1425,6 +1429,8 @@ mod tests {
         assert!(script.contains("compatibility.utools.notification.show"));
         assert!(script.contains("shellOpenExternal"));
         assert!(script.contains("compatibility.utools.shell.openExternal"));
+        assert!(script.contains("shellBeep"));
+        assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("invokePluginDetach"));

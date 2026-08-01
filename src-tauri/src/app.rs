@@ -4101,6 +4101,23 @@ fn plugin_host_call_for_active_lease(
             open_external_in_system(required_string(&request.params, "url")?)?;
             Ok(json!({ "opened": true }))
         }
+        "compatibility.utools.shell.beep" => {
+            if request
+                .params
+                .as_object()
+                .map_or(true, |params| !params.is_empty())
+            {
+                return Err("uTools shellBeep does not accept parameters.".to_owned());
+            }
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Plugin beeps and notifications are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            play_utools_system_beep()?;
+            Ok(json!({ "played": true }))
+        }
         _ => Err(format!(
             "Unsupported plugin host method '{}'.",
             request.method
@@ -6743,6 +6760,18 @@ fn open_external_in_system(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Could not open external URL: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn play_utools_system_beep() -> Result<(), String> {
+    use windows::Win32::{System::Diagnostics::Debug::MessageBeep, UI::WindowsAndMessaging::MB_OK};
+    unsafe { MessageBeep(MB_OK) }
+        .map_err(|error| format!("Windows could not play the system notification sound: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn play_utools_system_beep() -> Result<(), String> {
+    Err("uTools shellBeep has not been runtime-verified on this platform.".to_owned())
 }
 
 fn validate_external_url(value: &str) -> Result<(), String> {
