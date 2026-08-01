@@ -4021,16 +4021,21 @@ pub fn invoke_plugin_frontend_command(
             None
         };
         state.plugins.ensure_plugin_enabled(&plugin_id)?;
-        if !state
+        let runtime_registered = state
             .host
             .commands
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(&host_key(&plugin_id, &command_id))
-        {
-            return Err(format!(
-                "Plugin command '{plugin_id}/{command_id}' is not registered."
-            ));
+            .contains_key(&host_key(&plugin_id, &command_id));
+        if !runtime_registered {
+            state
+                .plugins
+                .ensure_frontend_command(&plugin_id, &command_id)?;
+            if !state.plugins.uses_utools_compatibility(&plugin_id)? {
+                return Err(format!(
+                    "Plugin command '{plugin_id}/{command_id}' is not registered."
+                ));
+            }
         }
         let request_id = next_request_id();
         let launcher_context = launcher_context_id

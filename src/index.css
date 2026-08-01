@@ -2478,6 +2478,7 @@ kbd {
 
 .live-color-picker__surface {
   align-items: center;
+  animation: color-picker-reveal 240ms cubic-bezier(0.22, 1.24, 0.36, 1) both;
   display: flex;
   gap: 16px;
   margin-top: 12px;
@@ -2495,7 +2496,19 @@ kbd {
   overflow: hidden;
   padding: 2px;
   position: relative;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
   width: 164px;
+}
+
+.live-color-picker__magnifier:hover,
+.live-color-picker__magnifier:focus-visible {
+  border-color: var(--apple-primary);
+  box-shadow: 0 12px 32px rgba(10, 132, 255, 0.3);
+  transform: scale(1.025);
+}
+
+.live-color-picker[data-phase="sampling"] .live-color-picker__magnifier {
+  animation: color-picker-sample-pulse 1.3s ease-in-out infinite;
 }
 
 .live-color-picker__magnifier > span {
@@ -2566,6 +2579,35 @@ kbd {
 
 .live-color-picker__note {
   margin-top: 7px;
+}
+
+@keyframes color-picker-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes color-picker-sample-pulse {
+  50% {
+    box-shadow: 0 0 0 5px rgba(10, 132, 255, 0.22), 0 12px 32px rgba(10, 132, 255, 0.34);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-color-picker__surface,
+  .live-color-picker[data-phase="sampling"] .live-color-picker__magnifier {
+    animation: none;
+  }
+
+  .live-color-picker__magnifier {
+    transition: none;
+  }
 }
 
 @media (max-width: 620px) {

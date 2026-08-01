@@ -23,7 +23,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::plugins::PluginFrontendAssetBundle;
+use crate::plugins::{PluginFrontendAssetBundle, UtoolsCompatRuntimeConfig};
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_millis(250);
@@ -31,6 +31,8 @@ const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const FRONTEND_LEASE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ASSET_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+const MAX_COMPAT_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+const UTOOLS_COMPAT_SCRIPT_NAME: &str = "__ihub_utools_compat.js";
 /// Must stay distinct from `tauri.conf.json`'s `build.devUrl`. Tauri treats a
 /// URL relative to that development origin as local, which would defeat the
 /// remote-origin boundary if the OS happened to assign this port while dev is
@@ -150,8 +152,10 @@ struct ActiveLease {
 struct ServedBundle {
     asset_root: PathBuf,
     entry: PathBuf,
+    blocked_asset_paths: Vec<PathBuf>,
     route_token: String,
     allows_remote_network: bool,
+    utools_compat_script: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy)]
@@ -306,9 +310,11 @@ impl PluginAssetServer {
             plugin_id,
             asset_root,
             entry,
+            blocked_asset_paths,
             allows_display_capture,
             allows_microphone,
             allows_remote_network,
+            utools_compat,
         } = bundle;
         if self.is_transitioning(&plugin_id) {
             return Err(format!(
@@ -330,11 +336,17 @@ impl PluginAssetServer {
         let worker_shutdown = shutdown.clone();
         let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
         let worker_heartbeat = last_heartbeat.clone();
+        let utools_compat_script = utools_compat
+            .as_ref()
+            .map(render_utools_compat_script)
+            .transpose()?;
         let worker_bundle = ServedBundle {
             asset_root,
             entry,
+            blocked_asset_paths,
             route_token,
             allows_remote_network,
+            utools_compat_script,
         };
         let worker = thread::Builder::new()
             .name("ihub-plugin-assets".to_owned())
@@ -654,6 +666,20 @@ fn handle_connection(
     if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
         return;
     }
+    if is_utools_compat_script_request(bundle, &target) {
+        let Some(script) = bundle.utools_compat_script.as_deref() else {
+            let _ = write_status(stream, "404 Not Found");
+            return;
+        };
+        let _ = serve_memory_asset(
+            stream,
+            method,
+            script,
+            "text/javascript; charset=utf-8",
+            bundle.allows_remote_network,
+        );
+        return;
+    }
     let Some(path) = resolve_asset_path(bundle, &target) else {
         let _ = write_status(stream, "404 Not Found");
         return;
@@ -666,9 +692,20 @@ fn handle_connection(
         method,
         &path,
         bundle.allows_remote_network,
+        bundle
+            .utools_compat_script
+            .as_deref()
+            .filter(|_| path == bundle.entry),
         shutdown,
         last_heartbeat,
     );
+}
+
+fn is_utools_compat_script_request(bundle: &ServedBundle, target: &str) -> bool {
+    let Some(relative) = route_relative_path(bundle, target) else {
+        return false;
+    };
+    relative == UTOOLS_COMPAT_SCRIPT_NAME
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String)>> {
@@ -717,19 +754,12 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<(HttpMethod, String
 }
 
 fn resolve_asset_path(bundle: &ServedBundle, target: &str) -> Option<PathBuf> {
-    let path_without_query = target.split_once('?').map_or(target, |(path, _)| path);
-    let decoded_path = decode_path(path_without_query)?;
-    let route = format!("/v1/{}", bundle.route_token);
-    let relative = if decoded_path == route || decoded_path == format!("{route}/") {
-        ""
-    } else {
-        decoded_path.strip_prefix(&(route + "/"))?
-    };
+    let relative = route_relative_path(bundle, target)?;
     if relative.is_empty() {
         return Some(bundle.entry.clone());
     }
 
-    let relative_path = Path::new(relative);
+    let relative_path = Path::new(&relative);
     if relative_path.is_absolute()
         || relative_path
             .components()
@@ -738,7 +768,24 @@ fn resolve_asset_path(bundle: &ServedBundle, target: &str) -> Option<PathBuf> {
         return None;
     }
     let candidate = bundle.asset_root.join(relative_path).canonicalize().ok()?;
-    (candidate.starts_with(&bundle.asset_root) && candidate.is_file()).then_some(candidate)
+    (candidate.starts_with(&bundle.asset_root)
+        && candidate.is_file()
+        && !bundle
+            .blocked_asset_paths
+            .iter()
+            .any(|blocked| blocked == &candidate))
+    .then_some(candidate)
+}
+
+fn route_relative_path(bundle: &ServedBundle, target: &str) -> Option<String> {
+    let path_without_query = target.split_once('?').map_or(target, |(path, _)| path);
+    let decoded_path = decode_path(path_without_query)?;
+    let route = format!("/v1/{}", bundle.route_token);
+    if decoded_path == route || decoded_path == format!("{route}/") {
+        Some(String::new())
+    } else {
+        decoded_path.strip_prefix(&(route + "/")).map(str::to_owned)
+    }
 }
 
 fn decode_path(path: &str) -> Option<String> {
@@ -786,9 +833,20 @@ fn serve_asset(
     method: HttpMethod,
     path: &Path,
     allows_remote_network: bool,
+    utools_compat_script: Option<&[u8]>,
     shutdown: &AtomicBool,
     last_heartbeat: &Mutex<Instant>,
 ) -> io::Result<()> {
+    if utools_compat_script.is_some() {
+        let document = inject_utools_compat_script(path)?;
+        return serve_memory_asset(
+            stream,
+            method,
+            &document,
+            "text/html; charset=utf-8",
+            allows_remote_network,
+        );
+    }
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -818,6 +876,130 @@ fn serve_asset(
         }
     }
     Ok(())
+}
+
+fn serve_memory_asset(
+    stream: &mut TcpStream,
+    method: HttpMethod,
+    body: &[u8],
+    content_type: &str,
+    allows_remote_network: bool,
+) -> io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        plugin_csp(allows_remote_network),
+    );
+    stream.write_all(header.as_bytes())?;
+    if matches!(method, HttpMethod::Get) {
+        stream.write_all(body)?;
+    }
+    Ok(())
+}
+
+fn inject_utools_compat_script(entry: &Path) -> io::Result<Vec<u8>> {
+    let metadata = entry.metadata()?;
+    if metadata.len() > MAX_COMPAT_ENTRY_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "uTools-compatible plugin HTML entry exceeds the 2 MiB injection limit",
+        ));
+    }
+    let mut document = Vec::with_capacity(metadata.len() as usize + 96);
+    File::open(entry)?.read_to_end(&mut document)?;
+    let bootstrap = format!("<script src=\"{UTOOLS_COMPAT_SCRIPT_NAME}\"></script>").into_bytes();
+    let insertion = document
+        .windows(b"<head".len())
+        .position(|window| window.eq_ignore_ascii_case(b"<head"))
+        .and_then(|head_start| {
+            document[head_start..]
+                .iter()
+                .position(|byte| *byte == b'>')
+                .map(|offset| head_start + offset + 1)
+        })
+        // A malformed-but-renderable page still receives the bootstrap before
+        // any package script instead of silently losing the compatibility API.
+        .unwrap_or(0);
+    document.splice(insertion..insertion, bootstrap);
+    Ok(document)
+}
+
+/// Builds the only script injected into a compatible page. Configuration is
+/// JSON-encoded by serde, so package strings cannot escape into executable
+/// source. The shim intentionally implements only the public entry lifecycle
+/// and one user-confirmed pixel sampler; every call still crosses the existing
+/// origin/lease/permission-checked iHub bridge.
+fn render_utools_compat_script(config: &UtoolsCompatRuntimeConfig) -> Result<Vec<u8>, String> {
+    let config = serde_json::to_string(config)
+        .map_err(|error| format!("Could not encode uTools compatibility configuration: {error}"))?;
+    Ok(format!(
+        r#"(() => {{
+"use strict";
+const config = {config};
+const responseChannel = "ihub-host-bridge/v1";
+const requestChannel = "ihub-plugin-bridge/v1";
+let sequence = 0;
+const pending = new Map();
+const readyCallbacks = [];
+const enterCallbacks = [];
+const outCallbacks = [];
+function call(method, params) {{
+  const id = "utools-compat-" + (++sequence).toString(36);
+  return new Promise((resolve, reject) => {{
+    const timeout = window.setTimeout(() => {{ pending.delete(id); reject(new Error("iHub host bridge timed out.")); }}, 15000);
+    pending.set(id, {{ resolve, reject, timeout }});
+    window.parent.postMessage({{ channel: requestChannel, type: "call", id, request: {{ pluginId: config.pluginId, method, params: params || {{}} }} }}, "*");
+  }});
+}}
+function invoke(callbacks, value) {{
+  for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
+}}
+window.addEventListener("message", (event) => {{
+  if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
+  const message = event.data;
+  if (message.type === "response") {{
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id); window.clearTimeout(request.timeout);
+    message.ok ? request.resolve(message.result) : request.reject(new Error(typeof message.error === "string" ? message.error : "iHub host request failed."));
+    return;
+  }}
+  if (message.type !== "event" || message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
+  const commandId = message.payload && message.payload.commandId;
+  const command = config.commands.find((candidate) => candidate.commandId === commandId);
+  if (!command) return;
+  const input = message.payload && message.payload.input;
+  invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
+}});
+const utools = Object.freeze({{
+  onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
+  onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
+  onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
+  copyText(value) {{
+    if (typeof value !== "string" || !navigator.clipboard || typeof navigator.clipboard.writeText !== "function") return false;
+    void navigator.clipboard.writeText(value).catch((error) => console.error("iHub compatibility clipboard write failed", error));
+    return true;
+  }},
+  screenColorPick(callback) {{
+    if (typeof callback !== "function") return;
+    void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
+  }},
+  getWindowType() {{ return "main"; }},
+  isDarkColors() {{ return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches; }},
+  isWindows() {{ return /\\bwindows?\\b|\\bwin(?:32|64)\\b/.test((navigator.platform + " " + navigator.userAgent).toLowerCase()); }},
+  isMacOS() {{ const platform = (navigator.platform + " " + navigator.userAgent).toLowerCase(); return platform.includes("mac") || platform.includes("darwin"); }},
+  isLinux() {{ return (navigator.platform + " " + navigator.userAgent).toLowerCase().includes("linux"); }}
+}});
+Object.defineProperties(window, {{
+  utools: {{ value: utools, configurable: false, writable: false }},
+  rubick: {{ value: utools, configurable: false, writable: false }}
+}});
+call("lifecycle.ready", {{}}).then(() => invoke(readyCallbacks, undefined)).catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
+window.addEventListener("pagehide", () => {{ invoke(outCallbacks, undefined); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
+}})();
+"#
+    )
+    .into_bytes())
 }
 
 fn heartbeat_is_fresh(last_heartbeat: &Mutex<Instant>) -> bool {
@@ -891,9 +1073,11 @@ mod tests {
     };
 
     use super::{
-        PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose, LOCKED_PLUGIN_CSP,
-        NETWORKED_PLUGIN_CSP,
+        inject_utools_compat_script, render_utools_compat_script, resolve_asset_path,
+        PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose, ServedBundle,
+        LOCKED_PLUGIN_CSP, NETWORKED_PLUGIN_CSP,
     };
+    use crate::plugins::{UtoolsCompatCommand, UtoolsCompatRuntimeConfig};
 
     fn temporary_bundle(
         plugin_id: &str,
@@ -915,11 +1099,87 @@ mod tests {
                 plugin_id: plugin_id.to_owned(),
                 asset_root,
                 entry,
+                blocked_asset_paths: Vec::new(),
                 allows_display_capture: false,
                 allows_microphone: false,
                 allows_remote_network,
+                utools_compat: None,
             },
         )
+    }
+
+    #[test]
+    fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
+        let config = UtoolsCompatRuntimeConfig {
+            plugin_id: "utools-color-picker".to_owned(),
+            commands: vec![UtoolsCompatCommand {
+                command_id: "utools-feature-1".to_owned(),
+                code: "pick-color".to_owned(),
+            }],
+        };
+        let script = String::from_utf8(
+            render_utools_compat_script(&config).expect("compatibility bootstrap should render"),
+        )
+        .expect("bootstrap should be UTF-8");
+        assert!(script.contains("Object.defineProperties(window"));
+        assert!(script.contains("rubick"));
+        assert!(script.contains("copyText"));
+        assert!(script.contains("screenColorPick"));
+        assert!(script.contains("cursorColor.sampleOnce"));
+        assert!(script.contains("utools-color-picker"));
+        assert!(!script.contains("require("));
+        assert!(!script.contains("electron"));
+
+        let root =
+            std::env::temp_dir().join(format!("ihub-utools-bootstrap-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let entry = root.join("index.html");
+        fs::write(
+            &entry,
+            "<!doctype html><html><head><script>window.pluginLoaded=true</script></head><body></body></html>",
+        )
+        .expect("entry should be written");
+        let document = String::from_utf8(
+            inject_utools_compat_script(&entry).expect("entry should receive bootstrap tag"),
+        )
+        .expect("injected entry should stay UTF-8");
+        let bootstrap = document
+            .find("__ihub_utools_compat.js")
+            .expect("entry should include the host bootstrap");
+        let page_script = document
+            .find("window.pluginLoaded")
+            .expect("fixture page script should remain");
+        assert!(
+            bootstrap < page_script,
+            "the compatibility global must exist before package JavaScript evaluates"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn utools_preload_is_not_a_servable_loopback_asset() {
+        let root =
+            std::env::temp_dir().join(format!("ihub-utools-preload-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("fixture root should be created");
+        let entry = root.join("index.html");
+        let preload = root.join("preload.js");
+        fs::write(&entry, "<main>plugin</main>").expect("entry should be written");
+        fs::write(&preload, "require('fs')").expect("preload should be written");
+        let asset_root = root.canonicalize().expect("asset root should canonicalize");
+        let bundle = ServedBundle {
+            asset_root: asset_root.clone(),
+            entry: entry.canonicalize().expect("entry should canonicalize"),
+            blocked_asset_paths: vec![preload.canonicalize().expect("preload should canonicalize")],
+            route_token: "route-token".to_owned(),
+            allows_remote_network: false,
+            utools_compat_script: None,
+        };
+        assert!(resolve_asset_path(&bundle, "/v1/route-token/").is_some());
+        assert!(
+            resolve_asset_path(&bundle, "/v1/route-token/preload.js").is_none(),
+            "an Electron preload must not become executable browser source"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn fetch_lease_response(lease: &super::PluginFrontendLease) -> String {

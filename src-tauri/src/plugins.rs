@@ -232,6 +232,10 @@ pub(crate) struct PluginFrontendAssetBundle {
     pub(crate) plugin_id: String,
     pub(crate) asset_root: PathBuf,
     pub(crate) entry: PathBuf,
+    /// Package files explicitly declared as a uTools Electron preload are not
+    /// assets in iHub. Retain their canonical paths only so the loopback server
+    /// can reject a page attempting to load them as an ordinary script.
+    pub(crate) blocked_asset_paths: Vec<PathBuf>,
     /// True only when the validated manifest explicitly declares
     /// `permissions.screenCapture`. Lease issuance further restricts this to
     /// visible surfaces before the renderer can delegate `display-capture`.
@@ -244,6 +248,41 @@ pub(crate) struct PluginFrontendAssetBundle {
     /// external network destination. The asset server uses this as a coarse
     /// CSP gate; destination strings remain review metadata, not CSP sources.
     pub(crate) allows_remote_network: bool,
+    /// A host-owned compatibility bootstrap for a public uTools `plugin.json`
+    /// package. This is deliberately data rather than a package-provided
+    /// preload: the loopback asset server injects only iHub's fixed shim before
+    /// the page's own scripts run.
+    pub(crate) utools_compat: Option<UtoolsCompatRuntimeConfig>,
+}
+
+/// The small, serializable part of a uTools feature declaration that the
+/// sandboxed iframe needs at runtime. It contains no filesystem path, preload
+/// source, Node/Electron API, or user data.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UtoolsCompatRuntimeConfig {
+    pub(crate) plugin_id: String,
+    pub(crate) commands: Vec<UtoolsCompatCommand>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UtoolsCompatCommand {
+    pub(crate) command_id: String,
+    pub(crate) code: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PluginCompatibility {
+    #[default]
+    Ihub,
+    Utools,
+}
+
+impl PluginCompatibility {
+    fn is_utools(self) -> bool {
+        matches!(self, Self::Utools)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,7 +314,59 @@ struct PluginManifest {
     /// to replace a user's installed native code without review.
     #[serde(default)]
     update: PluginUpdateDeclaration,
+    /// Parsed from the public uTools schema only after regular iHub manifest
+    /// parsing fails. It is not a JSON field in an iHub package.
+    #[serde(skip)]
+    compatibility: PluginCompatibility,
+    /// One iHub frontend command is projected per uTools feature. The runtime
+    /// bootstrap translates that command back into `onPluginEnter` actions.
+    #[serde(skip)]
+    utools_commands: Vec<UtoolsCompatCommand>,
+    #[serde(skip)]
+    utools_preload: Option<String>,
 }
+
+/// Public, deliberately limited uTools manifest projection. `preload` is
+/// decoded only as an ignored field so packages remain importable without ever
+/// evaluating Node/Electron code in iHub.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UtoolsManifest {
+    main: String,
+    logo: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    preload: Option<String>,
+    #[serde(default)]
+    features: Vec<UtoolsFeature>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UtoolsFeature {
+    code: String,
+    #[serde(default)]
+    explain: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    cmds: Vec<UtoolsFeatureCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum UtoolsFeatureCommand {
+    Keyword(String),
+    Matcher(UtoolsFeatureMatcher),
+}
+
+#[derive(Debug, Deserialize)]
+struct UtoolsFeatureMatcher {}
 
 /// The subset of a manifest that can enlarge what a plugin can ask the host
 /// to do or introduce executable code. It is intentionally normalized into
@@ -1065,7 +1156,15 @@ impl PluginManager {
             let manifest_path = find_manifest(&staging).ok_or_else(|| {
                 "The repository does not contain ihub.plugin.json or plugin.json.".to_owned()
             })?;
-            let manifest = read_manifest(&manifest_path)?;
+            let mut manifest = read_manifest(&manifest_path)?;
+            if let Some(expected_plugin_id) = expected_plugin_id {
+                // Public uTools packages do not own an in-manifest install ID.
+                // Their host-generated ID is preserved on refresh so a feature
+                // edit cannot silently fork lifecycle state into a new plugin.
+                if manifest.compatibility.is_utools() {
+                    manifest.id = expected_plugin_id.to_owned();
+                }
+            }
             validate_manifest(&manifest)?;
             let plugin_id = manifest.id.clone();
             if let Some(expected_plugin_id) = expected_plugin_id {
@@ -1758,16 +1857,26 @@ impl PluginManager {
             .canonicalize()
             .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
         ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
-        if asset_root == package_root {
+        if asset_root == package_root && !manifest.compatibility.is_utools() {
             return Err(format!(
                 "Plugin '{plugin_id}' frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
             ));
         }
+        let blocked_asset_paths = manifest
+            .utools_preload
+            .as_deref()
+            .and_then(|preload| {
+                let candidate = package_root.join(preload).canonicalize().ok()?;
+                (candidate.is_file() && candidate.starts_with(&asset_root)).then_some(candidate)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
 
         Ok(PluginFrontendAssetBundle {
             plugin_id: plugin_id.to_owned(),
             asset_root,
             entry: frontend_path,
+            blocked_asset_paths,
             allows_display_capture: manifest.permissions.screen_capture,
             allows_microphone: manifest.permissions.microphone,
             allows_remote_network: manifest
@@ -1775,6 +1884,13 @@ impl PluginManager {
                 .network
                 .as_ref()
                 .is_some_and(|network| !network.allow.is_empty()),
+            utools_compat: manifest
+                .compatibility
+                .is_utools()
+                .then(|| UtoolsCompatRuntimeConfig {
+                    plugin_id: plugin_id.to_owned(),
+                    commands: manifest.utools_commands,
+                }),
         })
     }
 
@@ -1874,7 +1990,13 @@ impl PluginManager {
             "screenCapture.acquireFocusLease" | "screenCapture.releaseFocusLease" => {
                 manifest.permissions.screen_capture
             }
-            "cursorColor.sampleOnce" => manifest.permissions.cursor_color,
+            "cursorColor.sampleOnce" => {
+                // A uTools `screenColorPick` call is never ambient access:
+                // it is intercepted by the visible iHub parent, requires a
+                // fresh person click, waits the fixed native delay, and returns
+                // only HEX/RGB. No other sensitive permission is implied.
+                manifest.permissions.cursor_color || manifest.compatibility.is_utools()
+            }
             "shell.openPath" | "shell.open" => manifest
                 .permissions
                 .shell
@@ -1961,6 +2083,26 @@ impl PluginManager {
             ));
         }
         Ok(())
+    }
+
+    /// Public uTools packages register their available entry features in
+    /// `plugin.json`, not by calling iHub's SDK at runtime. The fixed shim
+    /// still calls `lifecycle.ready`, but declared features may then be
+    /// dispatched without a second dynamic registration step. No ordinary
+    /// iHub plugin can use this path.
+    pub fn uses_utools_compatibility(&self, plugin_id: &str) -> Result<bool, String> {
+        if !is_valid_identifier(plugin_id) {
+            return Err("Plugin ID must contain only letters, digits, '.', '_' or '-'.".to_owned());
+        }
+        self.ensure_plugin_enabled(plugin_id)?;
+        let plugin_root = self.resolve_plugin_root(plugin_id)?;
+        let manifest_path = canonical_manifest_path(&plugin_root)?;
+        let manifest = read_manifest(&manifest_path)?;
+        validate_manifest(&manifest)?;
+        if manifest.id != plugin_id {
+            return Err(format!("Plugin manifest ID does not match '{plugin_id}'."));
+        }
+        Ok(manifest.compatibility.is_utools())
     }
 
     /// Returns whether a manifest-declared setting is secret. Secret settings
@@ -3469,8 +3611,180 @@ fn canonical_manifest_path(plugin_root: &Path) -> Result<PathBuf, String> {
 fn read_manifest(path: &Path) -> Result<PluginManifest, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("Could not read plugin manifest {}: {error}", path.display()))?;
-    serde_json::from_str(&text)
-        .map_err(|error| format!("Invalid plugin manifest {}: {error}", path.display()))
+    match serde_json::from_str::<PluginManifest>(&text) {
+        Ok(manifest) => Ok(manifest),
+        Err(ihub_error) => {
+            // Do not reinterpret a malformed iHub manifest as a different
+            // package kind. uTools packages have no required iHub `id` field;
+            // the presence of one means the author intended iHub's contract.
+            let raw = serde_json::from_str::<Value>(&text)
+                .map_err(|error| format!("Invalid plugin manifest {}: {error}", path.display()))?;
+            if raw.get("id").is_some() {
+                return Err(format!(
+                    "Invalid iHub plugin manifest {}: {ihub_error}",
+                    path.display()
+                ));
+            }
+            let utools = serde_json::from_value::<UtoolsManifest>(raw).map_err(|error| {
+                format!(
+                    "Invalid plugin manifest {}. It is neither a valid iHub manifest nor a supported public uTools manifest: {error}",
+                    path.display()
+                )
+            })?;
+            utools.into_plugin_manifest(path)
+        }
+    }
+}
+
+impl UtoolsManifest {
+    /// Projects the public manifest/feature subset into iHub's existing,
+    /// manifest-locked command model. One feature becomes one command so a
+    /// plugin sees its original `code` when the host dispatches it. Matchers,
+    /// files, images and Electron preloads remain unsupported on purpose: iHub
+    /// local search is native and never delegates its index/context to a
+    /// third-party source-compatibility layer.
+    fn into_plugin_manifest(self, manifest_path: &Path) -> Result<PluginManifest, String> {
+        if self.main.trim().is_empty() {
+            return Err("uTools plugin.json requires a non-empty 'main' HTML entry.".to_owned());
+        }
+        if let Some(preload) = self.preload.as_deref() {
+            // It is never executed or served by iHub, but validate now so a
+            // malformed declaration cannot later become a path-handling edge.
+            validate_relative_path(preload)?;
+        }
+        if self.features.is_empty() {
+            return Err("uTools plugin.json requires at least one feature.".to_owned());
+        }
+        if self.features.len() > MAX_COMMANDS_PER_PLUGIN {
+            return Err(format!(
+                "uTools plugin declares more than {MAX_COMMANDS_PER_PLUGIN} features."
+            ));
+        }
+
+        let mut command_ids = BTreeSet::new();
+        let mut commands = Vec::with_capacity(self.features.len());
+        let mut runtime_commands = Vec::with_capacity(self.features.len());
+        for (index, feature) in self.features.into_iter().enumerate() {
+            if feature.code.trim().is_empty() || feature.code.chars().count() > 160 {
+                return Err(
+                    "Each uTools feature requires a code of at most 160 characters.".to_owned(),
+                );
+            }
+            if feature.cmds.is_empty() {
+                return Err(format!(
+                    "uTools feature '{}' requires at least one command.",
+                    feature.code
+                ));
+            }
+            let command_id = format!("utools-feature-{}", index + 1);
+            debug_assert!(command_ids.insert(command_id.clone()));
+            let mut keywords = Vec::new();
+            for command in &feature.cmds {
+                let candidate = match command {
+                    UtoolsFeatureCommand::Keyword(keyword) => Some(keyword),
+                    // uTools matcher objects depend on uTools-owned text,
+                    // files, images, windows, or regex dispatch. iHub keeps
+                    // its local index and launcher context native, so only
+                    // direct text commands enter this compatibility surface.
+                    UtoolsFeatureCommand::Matcher(_) => None,
+                };
+                if let Some(keyword) = candidate {
+                    let keyword = keyword.trim();
+                    if !keyword.is_empty() && !keywords.iter().any(|existing| existing == keyword) {
+                        keywords.push(keyword.to_owned());
+                    }
+                }
+            }
+            if keywords.is_empty() {
+                return Err(format!(
+                    "uTools feature '{}' has no direct text command; matchers are not imported into iHub local search.",
+                    feature.code
+                ));
+            }
+            let title = feature
+                .explain
+                .clone()
+                .or_else(|| keywords.first().cloned())
+                .unwrap_or_else(|| feature.code.clone());
+            commands.push(PluginCommandDeclaration {
+                id: command_id.clone(),
+                name: Some(title.clone()),
+                title: Some(title),
+                description: feature.explain.clone(),
+                subtitle: None,
+                icon: feature.icon,
+                keywords,
+                shortcut: None,
+                execution: Some("frontend".to_owned()),
+                binary: None,
+                args: Vec::new(),
+                run: None,
+            });
+            runtime_commands.push(UtoolsCompatCommand {
+                command_id,
+                code: feature.code,
+            });
+        }
+
+        let display_name = self
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "uTools compatible plugin".to_owned());
+        let identity = self.name.as_deref().filter(|name| !name.trim().is_empty());
+        let generated_id = utools_plugin_id(manifest_path, identity);
+        let description = self.description.or_else(|| {
+            Some(
+                "通过 iHub 的受限 uTools 兼容层运行：不执行 preload，且不接入本地搜索索引。"
+                    .to_owned(),
+            )
+        });
+
+        Ok(PluginManifest {
+            id: generated_id,
+            name: display_name,
+            version: self
+                .version
+                .filter(|version| !version.trim().is_empty())
+                .unwrap_or_else(|| "0.0.0-utools".to_owned()),
+            description,
+            icon: self.logo,
+            logo: None,
+            frontend: None,
+            entry: Some(EntryDeclaration {
+                frontend: self.main,
+            }),
+            backend: None,
+            contributes: None,
+            commands,
+            permissions: PluginPermissions::default(),
+            update: PluginUpdateDeclaration::default(),
+            compatibility: PluginCompatibility::Utools,
+            utools_commands: runtime_commands,
+            utools_preload: self.preload,
+        })
+    }
+}
+
+/// uTools keeps the published package identity outside of `plugin.json`. iHub
+/// needs a local stable identifier for locks and lifecycle state. Prefer the
+/// optional project name when present; otherwise derive it from the containing
+/// directory. Once managed, the generated `utools-…` directory name itself is
+/// the durable identity, while an update preserves its expected ID.
+fn utools_plugin_id(manifest_path: &Path, declared_name: Option<&str>) -> String {
+    let directory_name = manifest_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .unwrap_or("plugin");
+    if directory_name.starts_with("utools-") && is_valid_identifier(directory_name) {
+        return directory_name.to_owned();
+    }
+    let identity = declared_name.unwrap_or(directory_name);
+    let digest = Sha256::digest(identity.as_bytes());
+    let digest = format!("{digest:x}");
+    format!("utools-{}", &digest[..16])
 }
 
 const SNAPSHOT_HASH_ALGORITHM: &str = "sha256";
@@ -3527,7 +3841,7 @@ fn snapshot_frontend_assets(
         .canonicalize()
         .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
     ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
-    if asset_root == package_root {
+    if asset_root == package_root && !manifest.compatibility.is_utools() {
         return Err(
             "Plugin frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
                 .to_owned(),
@@ -4486,6 +4800,15 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
     let mut declaration = PluginSecurityDeclaration::default();
     let permissions = &manifest.permissions;
 
+    if manifest.compatibility.is_utools() {
+        // The fixed source-compatibility shim has a distinct trust contract:
+        // no preload/Node/Electron bridge, plus only a user-confirmed one-pixel
+        // `screenColorPick` projection. Preserve that boundary across updates.
+        declaration
+            .permissions
+            .insert("compatibility.utools.screenColorPick.confirmed".to_owned());
+    }
+
     if let Some(filesystem) = permissions.filesystem.as_ref() {
         for scope in &filesystem.read {
             declaration
@@ -4934,7 +5257,7 @@ mod tests {
         automatic_update_skip_reason, command_execution, command_timeout,
         configure_git_command_environment, ensure_update_security_declaration_matches,
         is_trusted_official_auto_update_source, load_manifest_artwork,
-        normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response,
+        normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response, read_manifest,
         read_source_metadata, resolve_official_workspace_plugin_at, snapshot_integrity,
         validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
         ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
@@ -4982,6 +5305,68 @@ mod tests {
         let keywords =
             normalized_shortcut_keywords(&super::declared_commands(&manifest)[0].keywords);
         assert_eq!(keywords, vec!["pdf", "合并"]);
+    }
+
+    #[test]
+    fn public_utools_manifest_projects_features_without_a_preload_or_search_grant() {
+        let storage = temporary_directory("utools-manifest-projection");
+        let source = storage.join("source");
+        fs::create_dir_all(&source).expect("uTools source should be created");
+        fs::write(source.join("index.html"), "<main>compatible</main>")
+            .expect("uTools entry should be written");
+        fs::write(source.join("preload.js"), "require('fs')")
+            .expect("uTools preload fixture should be written");
+        write_test_png(&source.join("logo.png"), [10, 132, 255, 255]);
+        fs::write(
+            source.join("plugin.json"),
+            r#"{
+  "name": "utools-color-picker",
+  "version": "1.0.0",
+  "main": "index.html",
+  "logo": "logo.png",
+  "preload": "preload.js",
+  "features": [{
+    "code": "pick-color",
+    "explain": "屏幕取色",
+    "cmds": ["取色", { "type": "regex", "label": "从文本取色" }]
+  }]
+}"#,
+        )
+        .expect("uTools manifest should be written");
+
+        let manifest = read_manifest(&source.join("plugin.json"))
+            .expect("public uTools manifest should project safely");
+        validate_manifest(&manifest).expect("projected manifest should validate");
+        assert!(manifest.compatibility.is_utools());
+        assert_eq!(manifest.commands.len(), 1);
+        assert_eq!(manifest.commands[0].id, "utools-feature-1");
+        assert_eq!(manifest.utools_commands[0].code, "pick-color");
+        assert_eq!(manifest.commands[0].keywords, vec!["取色"]);
+
+        let plugin_id = manifest.id.clone();
+        let installed = storage.join(&plugin_id);
+        fs::rename(&source, &installed).expect("fixture should move under its managed identifier");
+        let manager = manager_at(storage.clone());
+        let bundle = manager
+            .frontend_asset_bundle(&plugin_id)
+            .expect("uTools root-level HTML should receive a bounded asset bundle");
+        assert_eq!(
+            bundle.asset_root,
+            installed.canonicalize().expect("fixture root")
+        );
+        assert!(bundle.utools_compat.is_some());
+        assert_eq!(bundle.blocked_asset_paths.len(), 1);
+        assert!(manager
+            .uses_utools_compatibility(&plugin_id)
+            .expect("compatibility marker should be readable"));
+        assert!(manager
+            .allows_host_method(&plugin_id, "cursorColor.sampleOnce")
+            .expect("screenColorPick should be confirmation-gated rather than ambient"));
+        assert!(!manager
+            .allows_host_method(&plugin_id, "clipboard.readText")
+            .expect("uTools compatibility must not grant clipboard read"));
+
+        let _ = fs::remove_dir_all(storage);
     }
 
     fn write_plugin(root: &Path, id: &str, name: &str, frontend: &str) {

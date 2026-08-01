@@ -37,6 +37,12 @@ flowchart LR
 
 包是独立 Git 仓库或本地目录。包内 canonical `plugin.json` 是作者的声明；导入器也接受旧包使用的 `ihub.plugin.json` 兼容文件名，但生成器、SDK 文档与新发布都以 `plugin.json` 为准。构建后 `dist/` 和可选 `bin/` 是可执行内容。包本身不应依赖主仓的 node_modules，也不应通过相对路径读取主应用的源码。
 
+### 公开 uTools manifest 兼容层
+
+导入器也识别公开 uTools `plugin.json` 的受限 UI 子集：`main`、`logo` 和带文本 `cmds` 的 `features`。每个 feature 会投影为一个 iHub 前端命令；宿主在被激活时以原 feature `code` 调用 iframe 中固定注入的 `window.utools.onPluginEnter` 回调。`onPluginReady`、`onPluginOut` 与 `screenColorPick` 同样可用；取色始终走可见 iHub 宿主的逐次确认、固定延迟和单像素 HEX/RGB 投影，不能取得截图、坐标或持续采样句柄。
+
+这不是 Electron 兼容层：iHub 从不执行或提供 `preload`、Node、Electron、系统输入、动态 tools、文件/图片/正则匹配器，uTools package 的 preload 路径还会被 loopback 资源服务器显式拒绝。uTools 包常把 HTML/CSS/JS 与 manifest 同级；这一例外仍会对整个可服务目录写入完整性哈希，但不接入 iHub 的本地搜索索引、搜索 provider 或 launcher context。原生 iHub 插件继续使用下面的专用 `dist/` 资源根约束。
+
 ### `plugins/registry.json`
 
 官方 registry 是可提交、可审计的目录，不是私有服务数据库。每个条目至少描述：插件 ID、显示信息、Git URL、默认 ref、清单路径、支持平台与更新通道。iHub 可以读取此文件发现官方插件，也可以读取任意符合相同格式的 registry URL/文件。
@@ -56,7 +62,7 @@ lock 文件是解析结果，不是仅有版本号的缓存。每项固定：
 
 ## 前端与宿主
 
-已安装或显式链接的插件，其 `entry.frontend` 会先被解析为包内 canonical 文件；入口必须位于清单所在目录下的专用构建子目录（通常是 `dist/`），宿主仅将该入口所在目录作为只读资源根。这样清单、源码、`.env`、Git 元数据与 `bin/` 不会被 iframe 同源读取。每个 iframe 绑定随机 `127.0.0.1` 端口和随机路径令牌；服务只接受 `GET` / `HEAD`，拒绝路径穿越、符号链接逃逸、目录列举和跨目录访问，并以 `no-store`、`no-referrer`、`nosniff` 与最小 CSP 返回资源。iframe 还带 `sandbox="allow-scripts allow-same-origin"` 和 `no-referrer`，不开放 top navigation、popup、download、form 或 modal。Tauri `asset:` 协议已不用于插件前端，本地开发链接也不会扩大 Tauri 的 asset scope；loopback iframe 不匹配任何本地或 remote Tauri capability，不能把自身当作 Tauri IPC 调用方。
+已安装或显式链接的 iHub 原生插件，其 `entry.frontend` 会先被解析为包内 canonical 文件；入口必须位于清单所在目录下的专用构建子目录（通常是 `dist/`），宿主仅将该入口所在目录作为只读资源根。这样清单、源码、`.env`、Git 元数据与 `bin/` 不会被 iframe 同源读取。公开 uTools 兼容包允许其文档规定的同级 HTML 静态资源根，但仍拒绝 manifest 声明的 Electron preload，并保持完整目录 hash lock。每个 iframe 绑定随机 `127.0.0.1` 端口和随机路径令牌；服务只接受 `GET` / `HEAD`，拒绝路径穿越、符号链接逃逸、目录列举和跨目录访问，并以 `no-store`、`no-referrer`、`nosniff` 与最小 CSP 返回资源。iframe 还带 `sandbox="allow-scripts allow-same-origin"` 和 `no-referrer`，不开放 top navigation、popup、download、form 或 modal。Tauri `asset:` 协议已不用于插件前端，本地开发链接也不会扩大 Tauri 的 asset scope；loopback iframe 不匹配任何本地或 remote Tauri capability，不能把自身当作 Tauri IPC 调用方。
 
 网络声明目前是明确的粗粒度执行门。没有非空 `permissions.network.allow` 时，CSP 的 `connect-src` 只有 `'self'`，`img-src` / `media-src` 只有本地、`data:` / `blob:`，因此外部 connect、image 和 media 都被阻断；存在任意非空声明时，CSP 才开放 `connect-src https: wss:` 以及 HTTPS image/media。`network.allow` 中的 destination 会进入安装告知、source/integrity lock 和例行更新的安全比较，但当前 CSP 尚未按每个声明 destination 生成逐 origin 白名单；不能把它描述成完整的 egress 防火墙。原生 worker 也不受这条 iframe CSP 约束。
 
