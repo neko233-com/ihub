@@ -48,7 +48,9 @@ use crate::{
         PluginUpdateCheck, PluginUpdateResult, SearchResult,
     },
     native_icons::NativeIconService,
-    plugin_asset_server::{PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose},
+    plugin_asset_server::{
+        PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose, UtoolsDialogRequest,
+    },
     plugin_settings::PluginSettingsStore,
     plugin_shortcuts::{
         apply_plugin_shortcut_statuses, binding_is_current, binding_targets_frontend_command,
@@ -1389,6 +1391,7 @@ const MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW: usize = 5;
 const MAX_PLUGIN_NOTIFICATION_WINDOWS: usize = 128;
 const PLUGIN_NOTIFICATION_WINDOW: Duration = Duration::from_secs(10);
 const PLUGIN_NOTIFICATION_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
+const MAX_UTOOLS_DIALOG_SELECTIONS: usize = 64;
 const MAX_PLUGIN_CLIPBOARD_TEXT_BYTES: usize = 48 * 1024;
 const MAX_UTOOLS_TYPED_TEXT_CHARS: usize = 4_096;
 
@@ -6169,6 +6172,269 @@ fn remaining_launcher_context_millis(expires_at: Instant) -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UtoolsDialogFilter {
+    name: String,
+    extensions: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UtoolsDialogOptions {
+    title: Option<String>,
+    default_path: Option<String>,
+    button_label: Option<String>,
+    #[serde(default)]
+    filters: Vec<UtoolsDialogFilter>,
+    #[serde(default)]
+    properties: Vec<String>,
+    message: Option<String>,
+    name_field_label: Option<String>,
+    shows_tag_field: Option<Value>,
+    security_scoped_bookmarks: Option<bool>,
+}
+
+fn validate_utools_dialog_text(
+    value: Option<String>,
+    field: &str,
+    max_chars: usize,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.chars().count() > max_chars || value.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "uTools dialog {field} must contain 1-{max_chars} non-control characters."
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn validate_utools_dialog_options(kind: &str, value: Value) -> Result<UtoolsDialogOptions, String> {
+    if !matches!(kind, "open" | "save") {
+        return Err("uTools dialog kind must be open or save.".to_owned());
+    }
+    let mut options = serde_json::from_value::<UtoolsDialogOptions>(value)
+        .map_err(|error| format!("uTools dialog options are invalid: {error}"))?;
+    options.title = validate_utools_dialog_text(options.title, "title", 240)?;
+    options.button_label = validate_utools_dialog_text(options.button_label, "buttonLabel", 80)?;
+    options.message = validate_utools_dialog_text(options.message, "message", 240)?;
+    options.name_field_label =
+        validate_utools_dialog_text(options.name_field_label, "nameFieldLabel", 80)?;
+    options.default_path = validate_utools_dialog_text(options.default_path, "defaultPath", 1024)?;
+    if let Some(path) = options.default_path.as_ref() {
+        if !Path::new(path).is_absolute() || path.len() > MAX_UTOOLS_COPY_FILE_PATH_BYTES {
+            return Err("uTools dialog defaultPath must be a bounded absolute path.".to_owned());
+        }
+    }
+    if options.filters.len() > 16 {
+        return Err("uTools dialogs accept at most 16 file filters.".to_owned());
+    }
+    for filter in &options.filters {
+        if filter.name.is_empty()
+            || filter.name.chars().count() > 80
+            || filter.name.chars().any(char::is_control)
+            || filter.extensions.is_empty()
+            || filter.extensions.len() > 16
+            || filter.extensions.iter().any(|extension| {
+                extension != "*"
+                    && (extension.is_empty()
+                        || extension.len() > 16
+                        || !extension.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'_' | b'-')
+                        }))
+            })
+        {
+            return Err("A uTools dialog file filter is invalid or too large.".to_owned());
+        }
+    }
+    if options.properties.len() > 12 {
+        return Err("uTools dialog properties are too numerous.".to_owned());
+    }
+    let mut seen = HashSet::new();
+    if options.properties.iter().any(|property| {
+        property.is_empty() || property.chars().count() > 40 || !seen.insert(property.clone())
+    }) {
+        return Err("uTools dialog properties must be unique bounded strings.".to_owned());
+    }
+    let supported: &[&str] = if kind == "open" {
+        &[
+            "openFile",
+            "openDirectory",
+            "multiSelections",
+            "createDirectory",
+        ]
+    } else {
+        &["showOverwriteConfirmation", "createDirectory"]
+    };
+    if options
+        .properties
+        .iter()
+        .any(|property| !supported.contains(&property.as_str()))
+    {
+        return Err(
+            "This uTools dialog property is not runtime-verified by the iHub native picker yet."
+                .to_owned(),
+        );
+    }
+    if kind == "open"
+        && options.properties.iter().any(|value| value == "openFile")
+        && options
+            .properties
+            .iter()
+            .any(|value| value == "openDirectory")
+    {
+        return Err("iHub does not mix files and folders in one uTools dialog.".to_owned());
+    }
+    if options.security_scoped_bookmarks == Some(true)
+        || options.message.is_some()
+        || options.name_field_label.is_some()
+        || options.shows_tag_field.is_some()
+        || options.button_label.is_some()
+    {
+        return Err(
+            "This platform-specific uTools dialog option is not runtime-verified by iHub yet."
+                .to_owned(),
+        );
+    }
+    Ok(options)
+}
+
+fn configure_utools_file_dialog(
+    app: &AppHandle,
+    plugin_id: &str,
+    kind: &str,
+    options: &UtoolsDialogOptions,
+) -> rfd::FileDialog {
+    let title = options.title.as_deref().unwrap_or(if kind == "open" {
+        "选择文件"
+    } else {
+        "保存文件"
+    });
+    let mut dialog = rfd::FileDialog::new().set_title(format!("iHub · {plugin_id} · {title}"));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    if let Some(default_path) = options.default_path.as_ref() {
+        let path = Path::new(default_path);
+        if kind == "save" {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                dialog = dialog.set_directory(parent);
+            }
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                dialog = dialog.set_file_name(name);
+            }
+        } else {
+            dialog = dialog.set_directory(path);
+        }
+    }
+    for filter in &options.filters {
+        dialog = dialog.add_filter(&filter.name, &filter.extensions);
+    }
+    dialog
+}
+
+fn canonical_utools_dialog_selection(path: PathBuf, folder: bool) -> Result<String, String> {
+    if folder {
+        canonical_selected_directory(path)
+    } else {
+        canonical_selected_file(path).map(|file| file.path.to_string_lossy().into_owned())
+    }
+}
+
+fn validate_utools_save_selection(path: PathBuf) -> Result<String, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "The selected save path has no valid file name.".to_owned())?;
+    if file_name.chars().any(char::is_control) {
+        return Err("The selected save file name contains control characters.".to_owned());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "The selected save path has no parent folder.".to_owned())?;
+    let prepared = crate::system_open::prepare_local_open(parent, Some(LocalOpenKind::Folder))?;
+    let result = prepared
+        .path()
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned();
+    if result.is_empty() || result.len() > MAX_UTOOLS_COPY_FILE_PATH_BYTES {
+        return Err("The selected save path is invalid or too long.".to_owned());
+    }
+    Ok(result)
+}
+
+fn show_utools_dialog_on_main_thread(
+    app: &AppHandle,
+    request: UtoolsDialogRequest,
+) -> Result<Value, String> {
+    let state = app.state::<AppState>();
+    state.plugins.ensure_plugin_enabled(&request.plugin_id)?;
+    if !state
+        .plugins
+        .uses_utools_compatibility(&request.plugin_id)?
+    {
+        return Err("Native uTools dialogs require a verified uTools package.".to_owned());
+    }
+    let options = validate_utools_dialog_options(&request.kind, request.options)?;
+    let dialog = configure_utools_file_dialog(app, &request.plugin_id, &request.kind, &options);
+    let _dialog_guard = NativeDialogGuard::begin(&state.host);
+    if request.kind == "save" {
+        return dialog
+            .save_file()
+            .map(validate_utools_save_selection)
+            .transpose()
+            .map(|path| path.map_or(Value::Null, Value::String));
+    }
+    let folder = options
+        .properties
+        .iter()
+        .any(|property| property == "openDirectory");
+    let multiple = options
+        .properties
+        .iter()
+        .any(|property| property == "multiSelections");
+    let paths = match (folder, multiple) {
+        (true, true) => dialog.pick_folders(),
+        (true, false) => dialog.pick_folder().map(|path| vec![path]),
+        (false, true) => dialog.pick_files(),
+        (false, false) => dialog.pick_file().map(|path| vec![path]),
+    };
+    let Some(paths) = paths else {
+        return Ok(Value::Null);
+    };
+    if paths.is_empty() || paths.len() > MAX_UTOOLS_DIALOG_SELECTIONS {
+        return Err(format!(
+            "uTools dialogs accept at most {MAX_UTOOLS_DIALOG_SELECTIONS} selections."
+        ));
+    }
+    paths
+        .into_iter()
+        .map(|path| canonical_utools_dialog_selection(path, folder).map(Value::String))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
+fn dispatch_utools_dialog(app: &AppHandle, request: UtoolsDialogRequest) -> Result<Value, String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback_app = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(show_utools_dialog_on_main_thread(&callback_app, request));
+    })
+    .map_err(|error| format!("Could not schedule the native uTools dialog: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "The native uTools dialog closed without a result.".to_owned())?
+}
+
 fn select_directory_with_native_dialog(
     app: &AppHandle,
     host: &PluginHostState,
@@ -6775,6 +7041,12 @@ pub fn run() {
             let clipboard_history = state.clipboard_history.clone();
             app.manage(state);
             app.manage(DetachedPluginWindowRegistry::default());
+            let dialog_app = app.handle().clone();
+            app.state::<AppState>()
+                .plugin_assets
+                .set_utools_dialog_handler(Arc::new(move |request| {
+                    dispatch_utools_dialog(&dialog_app, request)
+                }));
             if app.state::<AppState>().super_panel.enabled() {
                 if let Err(error) = ensure_super_panel_listener(app.handle()) {
                     host_log::error(
@@ -8186,7 +8458,8 @@ mod tests {
         utools_notification_click_feature_code, validate_external_url,
         validate_local_search_selection, validate_plugin_clipboard_text,
         validate_system_icon_request, validate_utools_copy_file_paths,
-        validate_utools_dynamic_feature, validate_utools_expend_height, validate_utools_input_text,
+        validate_utools_dialog_options, validate_utools_dynamic_feature,
+        validate_utools_expend_height, validate_utools_input_text,
         validate_utools_shell_local_path, validate_utools_window_request_params, CaptureFocusLease,
         CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
         LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
@@ -8265,6 +8538,43 @@ mod tests {
         )
         .is_err());
         assert!(validate_utools_window_request_params(&json!([]), &[]).is_err());
+    }
+
+    #[test]
+    fn utools_dialog_options_are_bounded_and_platform_explicit() {
+        let open = validate_utools_dialog_options(
+            "open",
+            json!({
+                "title": "选择 JSON",
+                "defaultPath": r"C:\Users\Tester\Downloads",
+                "filters": [{ "name": "JSON", "extensions": ["json"] }],
+                "properties": ["openFile", "multiSelections"]
+            }),
+        )
+        .expect("supported open dialog options");
+        assert_eq!(open.filters.len(), 1);
+        assert_eq!(open.properties, ["openFile", "multiSelections"]);
+
+        let save = validate_utools_dialog_options(
+            "save",
+            json!({
+                "defaultPath": r"C:\Users\Tester\Downloads\result.json",
+                "properties": ["showOverwriteConfirmation"]
+            }),
+        )
+        .expect("supported save dialog options");
+        assert!(save.default_path.is_some());
+
+        for value in [
+            json!({ "defaultPath": "relative.json" }),
+            json!({ "filters": [{ "name": "Bad", "extensions": ["../exe"] }] }),
+            json!({ "properties": ["openFile", "openDirectory"] }),
+            json!({ "properties": ["showHiddenFiles"] }),
+            json!({ "securityScopedBookmarks": true }),
+            json!({ "unknown": true }),
+        ] {
+            assert!(validate_utools_dialog_options("open", value).is_err());
+        }
     }
 
     #[test]

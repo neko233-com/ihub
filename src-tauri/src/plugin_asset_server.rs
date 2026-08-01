@@ -41,8 +41,11 @@ const UTOOLS_SYNC_DB_HEADER: &str = "x-ihub-utools-db";
 const UTOOLS_SYNC_SCREEN_ROUTE: &str = "__ihub_utools_screen_sync";
 const UTOOLS_SYNC_ICON_ROUTE: &str = "__ihub_utools_icon_sync";
 const UTOOLS_SYNC_ICON_HEADER: &str = "x-ihub-utools-icon";
+const UTOOLS_SYNC_DIALOG_ROUTE: &str = "__ihub_utools_dialog_sync";
+const UTOOLS_SYNC_DIALOG_HEADER: &str = "x-ihub-utools-dialog";
 const MAX_UTOOLS_SYNC_DB_REQUEST_BYTES: usize = 15 * 1024 * 1024;
 const MAX_UTOOLS_SYNC_ICON_REQUEST_BYTES: usize = 12 * 1024;
+const MAX_UTOOLS_SYNC_DIALOG_REQUEST_BYTES: usize = 32 * 1024;
 #[cfg(not(test))]
 const UTOOLS_SYNC_ICON_TIMEOUT: Duration = Duration::from_millis(650);
 // Parallel Windows Shell tests can starve the process-wide STA briefly on a
@@ -107,6 +110,16 @@ pub enum PluginFrontendPurpose {
     Runtime,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct UtoolsDialogRequest {
+    pub(crate) plugin_id: String,
+    pub(crate) kind: String,
+    pub(crate) options: Value,
+}
+
+type UtoolsDialogHandler =
+    Arc<dyn Fn(UtoolsDialogRequest) -> Result<Value, String> + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub(crate) struct PluginAssetServer {
     inner: Arc<PluginAssetServerInner>,
@@ -128,6 +141,11 @@ struct PluginAssetServerInner {
     /// transitions reject while this is non-empty instead of waiting behind a
     /// worker for its full command timeout.
     native_commands: Mutex<HashMap<String, usize>>,
+    /// Synchronous uTools dialogs originate on a per-plugin loopback worker,
+    /// but native pickers must be created on Tauri's UI thread. The app
+    /// installs one trusted dispatcher during setup; package code can only
+    /// reach it through a current visible lease and a bounded JSON request.
+    utools_dialog_handler: Mutex<Option<UtoolsDialogHandler>>,
 }
 
 /// Keeps one host-native reservation active until its operation returns. The
@@ -167,6 +185,8 @@ struct ActiveLease {
 
 struct ServedBundle {
     plugin_id: String,
+    lease_id: String,
+    purpose: PluginFrontendPurpose,
     asset_root: PathBuf,
     entry: PathBuf,
     blocked_asset_paths: Vec<PathBuf>,
@@ -198,8 +218,17 @@ impl PluginAssetServer {
                 operation: RwLock::new(()),
                 transitions: Mutex::new(HashMap::new()),
                 native_commands: Mutex::new(HashMap::new()),
+                utools_dialog_handler: Mutex::new(None),
             }),
         }
+    }
+
+    pub(crate) fn set_utools_dialog_handler(&self, handler: UtoolsDialogHandler) {
+        *self
+            .inner
+            .utools_dialog_handler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handler);
     }
 
     /// Runs a source/lifecycle transition exclusively. Issuing, releasing or
@@ -384,6 +413,8 @@ impl PluginAssetServer {
             .transpose()?;
         let worker_bundle = ServedBundle {
             plugin_id: plugin_id.clone(),
+            lease_id: lease_id.clone(),
+            purpose,
             asset_root,
             entry,
             blocked_asset_paths,
@@ -712,13 +743,60 @@ fn handle_connection(
     bundle: &ServedBundle,
     shutdown: &AtomicBool,
     last_heartbeat: &Mutex<Instant>,
-    server: &PluginAssetServerInner,
+    server: &Arc<PluginAssetServerInner>,
 ) {
     let Some(request) = read_request(stream).ok().flatten() else {
         let _ = write_status(stream, "400 Bad Request");
         return;
     };
     if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+        return;
+    }
+    if is_utools_sync_dialog_request(bundle, &request.target) {
+        let reservation = {
+            let _guard = server
+                .operation
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+                return;
+            }
+            let active = server
+                .leases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let is_current_surface = active.get(&bundle.lease_id).is_some_and(|lease| {
+                lease.plugin_id == bundle.plugin_id
+                    && lease.purpose == PluginFrontendPurpose::Surface
+                    && bundle.purpose == PluginFrontendPurpose::Surface
+            });
+            drop(active);
+            if !is_current_surface {
+                let _ = write_status(stream, "403 Forbidden");
+                return;
+            }
+            let server_handle = PluginAssetServer {
+                inner: Arc::clone(server),
+            };
+            match server_handle.begin_native_command(&bundle.plugin_id) {
+                Ok(reservation) => reservation,
+                Err(_) => {
+                    let _ = write_status(stream, "429 Too Many Requests");
+                    return;
+                }
+            }
+        };
+        let handler = server
+            .utools_dialog_handler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(handler) = handler else {
+            let _ = write_status(stream, "503 Service Unavailable");
+            return;
+        };
+        handle_utools_sync_dialog_request(stream, bundle, request, handler);
+        drop(reservation);
         return;
     }
     if is_utools_sync_screen_request(bundle, &request.target) {
@@ -814,6 +892,154 @@ fn is_utools_sync_screen_request(bundle: &ServedBundle, target: &str) -> bool {
 fn is_utools_sync_icon_request(bundle: &ServedBundle, target: &str) -> bool {
     bundle.utools_compat_script.is_some()
         && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_ICON_ROUTE)
+}
+
+fn is_utools_sync_dialog_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_compat_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_DIALOG_ROUTE)
+}
+
+fn handle_utools_sync_dialog_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    request: HttpRequest,
+    handler: UtoolsDialogHandler,
+) {
+    let result = execute_utools_sync_dialog_request(stream, bundle, request, &handler);
+    let (status, payload) = match result {
+        Ok(value) => ("200 OK", value),
+        Err(error) => ("400 Bad Request", json!({ "error": error })),
+    };
+    let encoded = serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"error":"Could not encode dialog response."}"#.to_vec());
+    let _ = write_json_response(stream, status, &encoded, bundle.allows_remote_network);
+}
+
+fn execute_utools_sync_dialog_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    mut request: HttpRequest,
+    handler: &UtoolsDialogHandler,
+) -> Result<Value, String> {
+    if !matches!(request.method, HttpMethod::Post) {
+        return Err("The synchronous uTools dialog endpoint accepts only POST.".to_owned());
+    }
+    if request
+        .headers
+        .get(UTOOLS_SYNC_DIALOG_HEADER)
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Err("The synchronous uTools dialog request header is missing.".to_owned());
+    }
+    if request
+        .headers
+        .get("content-type")
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        != Some(true)
+    {
+        return Err("The synchronous uTools dialog request must be JSON.".to_owned());
+    }
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value != "same-origin")
+    {
+        return Err("The synchronous uTools dialog request is not same-origin.".to_owned());
+    }
+    let host = request
+        .headers
+        .get("host")
+        .ok_or_else(|| "The synchronous uTools dialog request has no loopback host.".to_owned())?;
+    let valid_host = host
+        .strip_prefix("127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0);
+    if !valid_host {
+        return Err("The synchronous uTools dialog request host is invalid.".to_owned());
+    }
+    if request
+        .headers
+        .get("origin")
+        .is_some_and(|origin| origin != &format!("http://{host}"))
+    {
+        return Err("The synchronous uTools dialog request origin is invalid.".to_owned());
+    }
+    if request.headers.contains_key("transfer-encoding") {
+        return Err("Chunked synchronous uTools dialog requests are not accepted.".to_owned());
+    }
+    let content_length = request
+        .headers
+        .get("content-length")
+        .ok_or_else(|| "The synchronous uTools dialog request has no content length.".to_owned())?
+        .parse::<usize>()
+        .map_err(|_| "The synchronous uTools dialog content length is invalid.".to_owned())?;
+    if content_length == 0 || content_length > MAX_UTOOLS_SYNC_DIALOG_REQUEST_BYTES {
+        return Err(format!(
+            "Synchronous uTools dialog requests are limited to {MAX_UTOOLS_SYNC_DIALOG_REQUEST_BYTES} bytes."
+        ));
+    }
+    if request.buffered_body.len() > content_length {
+        return Err("The synchronous uTools dialog request contains trailing bytes.".to_owned());
+    }
+    let already_read = request.buffered_body.len();
+    request.buffered_body.resize(content_length, 0);
+    if already_read < content_length {
+        stream
+            .read_exact(&mut request.buffered_body[already_read..])
+            .map_err(|error| format!("Could not read the synchronous dialog body: {error}"))?;
+    }
+    let payload = serde_json::from_slice::<Value>(&request.buffered_body)
+        .map_err(|error| format!("The synchronous dialog request is invalid JSON: {error}"))?;
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "The synchronous dialog request must be an object.".to_owned())?;
+    if object.len() != 2 || !object.contains_key("kind") || !object.contains_key("options") {
+        return Err("The synchronous dialog request accepts only kind and options.".to_owned());
+    }
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "open" | "save"))
+        .ok_or_else(|| "The synchronous dialog kind must be open or save.".to_owned())?;
+    let options = object
+        .get("options")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "The synchronous dialog options must be an object.".to_owned())?;
+    let result = handler(UtoolsDialogRequest {
+        plugin_id: bundle.plugin_id.clone(),
+        kind: kind.to_owned(),
+        options,
+    })?;
+    match kind {
+        "open" if result.is_null() => Ok(result),
+        "open"
+            if result.as_array().is_some_and(|paths| {
+                !paths.is_empty()
+                    && paths.len() <= 64
+                    && paths.iter().all(|path| {
+                        path.as_str().is_some_and(|path| {
+                            !path.is_empty()
+                                && path.len() <= 8192
+                                && !path.chars().any(char::is_control)
+                        })
+                    })
+            }) =>
+        {
+            Ok(result)
+        }
+        "save"
+            if result.is_null()
+                || result.as_str().is_some_and(|path| {
+                    !path.is_empty() && path.len() <= 8192 && !path.chars().any(char::is_control)
+                }) =>
+        {
+            Ok(result)
+        }
+        _ => Err("The native uTools dialog returned an invalid result.".to_owned()),
+    }
 }
 
 fn handle_utools_sync_icon_request(
@@ -1506,6 +1732,7 @@ const attachmentMaxBytes = 10485760;
 const syncDbRoute = "__ihub_utools_db_sync";
 const syncScreenRoute = "__ihub_utools_screen_sync";
 const syncIconRoute = "__ihub_utools_icon_sync";
+const syncDialogRoute = "__ihub_utools_dialog_sync";
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -1591,6 +1818,48 @@ function syncFileIcon(path) {{
   catch {{ throw new Error("iHub returned an invalid synchronous icon response."); }}
   if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous icon request failed.");
   return typeof result === "string" ? result : "";
+}}
+function normalizedDialogOptions(kind, value) {{
+  if (value === undefined) return {{}};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("uTools dialog options must be an object.");
+  const openKeys = new Set(["title", "defaultPath", "buttonLabel", "filters", "properties", "message", "securityScopedBookmarks"]);
+  const saveKeys = new Set(["title", "defaultPath", "buttonLabel", "filters", "message", "nameFieldLabel", "showsTagField", "properties", "securityScopedBookmarks"]);
+  const allowed = kind === "open" ? openKeys : saveKeys;
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("uTools dialog options contain an unsupported field.");
+  const result = {{}};
+  for (const key of ["title", "defaultPath", "buttonLabel", "message", "nameFieldLabel", "showsTagField"]) {{
+    if (value[key] === undefined) continue;
+    if (typeof value[key] !== "string" || value[key].length === 0 || Array.from(value[key]).length > (key === "defaultPath" ? 1024 : 240) || /[\u0000-\u001f\u007f]/.test(value[key])) throw new TypeError("uTools dialog " + key + " is invalid.");
+    result[key] = value[key];
+  }}
+  if (value.securityScopedBookmarks !== undefined) {{
+    if (typeof value.securityScopedBookmarks !== "boolean") throw new TypeError("uTools dialog securityScopedBookmarks must be boolean.");
+    result.securityScopedBookmarks = value.securityScopedBookmarks;
+  }}
+  if (value.filters !== undefined) {{
+    if (!Array.isArray(value.filters) || value.filters.length > 16) throw new TypeError("uTools dialog filters must be a bounded array.");
+    result.filters = value.filters.map((filter) => {{
+      if (!filter || typeof filter !== "object" || Array.isArray(filter) || Object.keys(filter).some((key) => key !== "name" && key !== "extensions") || typeof filter.name !== "string" || filter.name.length === 0 || Array.from(filter.name).length > 80 || /[\u0000-\u001f\u007f]/.test(filter.name) || !Array.isArray(filter.extensions) || filter.extensions.length === 0 || filter.extensions.length > 16 || filter.extensions.some((extension) => typeof extension !== "string" || !/^(?:\*|[A-Za-z0-9][A-Za-z0-9+_-]{{0,15}})$/.test(extension))) throw new TypeError("uTools dialog filter is invalid.");
+      return {{ name: filter.name, extensions: Array.from(new Set(filter.extensions)) }};
+    }});
+  }}
+  if (value.properties !== undefined) {{
+    if (!Array.isArray(value.properties) || value.properties.length > 12 || value.properties.some((property) => typeof property !== "string" || Array.from(property).length > 40)) throw new TypeError("uTools dialog properties must be a bounded string array.");
+    result.properties = Array.from(new Set(value.properties));
+  }}
+  return result;
+}}
+function syncDialog(kind, options) {{
+  const request = new XMLHttpRequest();
+  request.open("POST", syncDialogRoute, false);
+  request.setRequestHeader("Content-Type", "application/json");
+  request.setRequestHeader("X-IHub-Utools-Dialog", "1");
+  request.send(JSON.stringify({{ kind, options: normalizedDialogOptions(kind, options) }}));
+  let result;
+  try {{ result = JSON.parse(request.responseText); }}
+  catch {{ throw new Error("iHub returned an invalid synchronous dialog response."); }}
+  if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous dialog request failed.");
+  return result === null ? undefined : result;
 }}
 function screenPoint(value, label) {{
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y)) throw new TypeError(label + " requires finite x and y coordinates.");
@@ -2042,6 +2311,8 @@ const utools = Object.freeze({{
     }}
     if (action === "clearSelection") selection.removeAllRanges();
   }},
+  showOpenDialog(options) {{ return syncDialog("open", options); }},
+  showSaveDialog(options) {{ return syncDialog("save", options); }},
   setSubInput(callback, placeholder, isFocus) {{
     if (typeof callback !== "function") return false;
     if (placeholder !== undefined && typeof placeholder !== "string") return false;
@@ -2383,7 +2654,7 @@ mod tests {
         fs,
         io::{Read, Write},
         net::TcpStream,
-        sync::mpsc,
+        sync::{mpsc, Arc, Mutex},
         thread,
         time::Duration,
     };
@@ -2565,6 +2836,56 @@ mod tests {
         (status, payload)
     }
 
+    fn send_sync_dialog_request(
+        lease: &super::PluginFrontendLease,
+        body: serde_json::Value,
+        include_capability_header: bool,
+    ) -> (String, serde_json::Value) {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease host");
+        let port = url.port().expect("lease port");
+        let target = format!("{}{}", url.path(), super::UTOOLS_SYNC_DIALOG_ROUTE);
+        let body = serde_json::to_vec(&body).expect("dialog request JSON");
+        let capability_header = if include_capability_header {
+            "X-IHub-Utools-Dialog: 1\r\n"
+        } else {
+            ""
+        };
+        let request = format!(
+            "POST {target} HTTP/1.1\r\nHost: {host}:{port}\r\nOrigin: http://{host}:{port}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n{capability_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut stream = TcpStream::connect((host, port)).expect("dialog endpoint should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("dialog response timeout");
+        stream
+            .write_all(request.as_bytes())
+            .expect("dialog request header");
+        stream.write_all(&body).expect("dialog request body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete dialog response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("complete response header");
+        let status = std::str::from_utf8(&response[..header_end])
+            .expect("UTF-8 response header")
+            .lines()
+            .next()
+            .expect("response status")
+            .to_owned();
+        let payload = if response.len() == header_end {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&response[header_end..]).expect("dialog response JSON")
+        };
+        (status, payload)
+    }
+
     #[test]
     fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
         let config = UtoolsCompatRuntimeConfig {
@@ -2612,6 +2933,11 @@ mod tests {
         assert!(script.contains("compatibility.utools.system.readCurrentFolderPath"));
         assert!(script.contains("readCurrentBrowserUrl()"));
         assert!(script.contains("compatibility.utools.system.readCurrentBrowserUrl"));
+        assert!(script.contains("showOpenDialog(options)"));
+        assert!(script.contains("showSaveDialog(options)"));
+        assert!(script.contains("X-IHub-Utools-Dialog"));
+        assert!(script.contains("syncDialog(\"open\", options)"));
+        assert!(script.contains("syncDialog(\"save\", options)"));
         assert!(script.contains("shellBeep"));
         assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));
@@ -2794,6 +3120,76 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_utools_dialog_endpoint_requires_a_visible_current_lease() {
+        let server = PluginAssetServer::new();
+        let seen = Arc::new(Mutex::new(Vec::<super::UtoolsDialogRequest>::new()));
+        let callback_seen = Arc::clone(&seen);
+        server.set_utools_dialog_handler(Arc::new(move |request| {
+            callback_seen
+                .lock()
+                .expect("dialog requests lock")
+                .push(request.clone());
+            Ok(if request.kind == "open" {
+                serde_json::json!([r"C:\Users\Tester\selected.txt"])
+            } else {
+                serde_json::Value::Null
+            })
+        }));
+
+        let plugin_id = "utools-sync-dialog-test";
+        let (root, mut bundle) = temporary_bundle(plugin_id, false);
+        bundle.utools_compat = Some(utools_runtime_config(plugin_id));
+        let documents = UtoolsDocumentStore::new(root.join("app-data"));
+        let lease = server
+            .issue_with_utools_documents(bundle, PluginFrontendPurpose::Surface, Some(documents))
+            .expect("uTools dialog surface lease should issue");
+        let request = serde_json::json!({
+            "kind": "open",
+            "options": { "title": "Choose one" }
+        });
+        let (status, result) = send_sync_dialog_request(&lease, request.clone(), true);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(result, serde_json::json!([r"C:\Users\Tester\selected.txt"]));
+        let observed = seen.lock().expect("dialog requests lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].plugin_id, plugin_id);
+        assert_eq!(observed[0].kind, "open");
+        assert_eq!(observed[0].options["title"], "Choose one");
+        drop(observed);
+
+        let (status, rejection) = send_sync_dialog_request(&lease, request, false);
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        assert!(rejection["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("header is missing")));
+        assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
+        let _ = fs::remove_dir_all(root);
+
+        let runtime_id = "utools-sync-dialog-runtime";
+        let (runtime_root, mut runtime_bundle) = temporary_bundle(runtime_id, false);
+        runtime_bundle.utools_compat = Some(utools_runtime_config(runtime_id));
+        let runtime_documents = UtoolsDocumentStore::new(runtime_root.join("app-data"));
+        let runtime_lease = server
+            .issue_with_utools_documents(
+                runtime_bundle,
+                PluginFrontendPurpose::Runtime,
+                Some(runtime_documents),
+            )
+            .expect("uTools dialog runtime lease should issue");
+        let (status, _) = send_sync_dialog_request(
+            &runtime_lease,
+            serde_json::json!({ "kind": "save", "options": {} }),
+            true,
+        );
+        assert_eq!(status, "HTTP/1.1 403 Forbidden");
+        assert_eq!(
+            server.release(&runtime_lease.lease_id).as_deref(),
+            Some(runtime_id)
+        );
+        let _ = fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
     fn utools_preload_is_not_a_servable_loopback_asset() {
         let root =
             std::env::temp_dir().join(format!("ihub-utools-preload-{}", uuid::Uuid::new_v4()));
@@ -2805,6 +3201,8 @@ mod tests {
         let asset_root = root.canonicalize().expect("asset root should canonicalize");
         let bundle = ServedBundle {
             plugin_id: "utools-preload-test".to_owned(),
+            lease_id: "utools-preload-test-lease".to_owned(),
+            purpose: PluginFrontendPurpose::Surface,
             asset_root: asset_root.clone(),
             entry: entry.canonicalize().expect("entry should canonicalize"),
             blocked_asset_paths: vec![preload.canonicalize().expect("preload should canonicalize")],

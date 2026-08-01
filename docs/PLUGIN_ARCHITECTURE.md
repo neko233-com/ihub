@@ -43,6 +43,8 @@ flowchart LR
 
 这不是 Electron 兼容层：iHub 从不执行或提供 `preload`、Node、Electron、系统输入、动态 tools、文件/图片/正则匹配器，uTools package 的 preload 路径还会被 loopback 资源服务器显式拒绝。uTools 包常把 HTML/CSS/JS 与 manifest 同级；这一例外仍会对整个可服务目录写入完整性哈希，但不接入 iHub 的本地搜索索引、搜索 provider 或 launcher context。原生 iHub 插件继续使用下面的专用 `dist/` 资源根约束。
 
+uTools 同步文件对话框不经过异步 iframe Bridge：兼容脚本只向本插件随机 origin 下的固定 POST 路由发送同步 XHR，服务器重新确认该 lease 仍是当前可见 surface、保留一个宿主原生操作槽，再调用 setup 时安装的可信 UI-thread dispatcher。请求具有专用 capability header、same-origin/Host/Origin 检查、32 KiB JSON 上限与严格选项白名单；返回值也重新检查为有界路径数组、单一路径或取消值。dispatcher 仍会复核插件启用状态与 uTools 来源，并只把系统选择器中由用户明确选定的路径投影回该插件。
+
 ### `plugins/registry.json`
 
 官方 registry 是可提交、可审计的目录，不是私有服务数据库。每个条目至少描述：插件 ID、显示信息、Git URL、默认 ref、清单路径、支持平台与更新通道。iHub 可以读取此文件发现官方插件，也可以读取任意符合相同格式的 registry URL/文件。
