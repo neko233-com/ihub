@@ -954,6 +954,56 @@ function call(method, params) {{
 function invoke(callbacks, value) {{
   for (const callback of callbacks.slice()) {{ try {{ callback(value); }} catch (error) {{ console.error("uTools compatibility callback failed", error); }} }}
 }}
+const dbStorageState = Object.create(null);
+const dbStorageVersions = new Map();
+function dbStorageKey(key) {{
+  if (typeof key !== "string") throw new TypeError("uTools dbStorage keys must be strings.");
+  if (new TextEncoder().encode(key).byteLength > 48) throw new RangeError("uTools dbStorage keys must not exceed 48 UTF-8 bytes.");
+  return key;
+}}
+function cloneDbStorageValue(value) {{
+  const serialized = JSON.stringify(value);
+  if (typeof serialized !== "string") throw new TypeError("uTools dbStorage values must be JSON-serializable.");
+  if (new TextEncoder().encode(serialized).byteLength > 65536) throw new RangeError("uTools dbStorage values must not exceed 64 KiB.");
+  return JSON.parse(serialized);
+}}
+function nextDbStorageVersion(key) {{
+  const version = (dbStorageVersions.get(key) || 0) + 1;
+  dbStorageVersions.set(key, version);
+  return version;
+}}
+const dbStorage = Object.freeze({{
+  setItem(rawKey, value) {{
+    const key = dbStorageKey(rawKey);
+    const storedValue = cloneDbStorageValue(value);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(dbStorageState, key);
+    const previous = dbStorageState[key];
+    const version = nextDbStorageVersion(key);
+    dbStorageState[key] = storedValue;
+    void call("compatibility.utools.dbStorage.set", {{ key, value: storedValue }}).catch((error) => {{
+      if (dbStorageVersions.get(key) === version) {{
+        if (hadPrevious) dbStorageState[key] = previous;
+        else delete dbStorageState[key];
+      }}
+      console.error("iHub compatibility dbStorage write failed", error);
+    }});
+  }},
+  getItem(rawKey) {{
+    const key = dbStorageKey(rawKey);
+    return Object.prototype.hasOwnProperty.call(dbStorageState, key) ? cloneDbStorageValue(dbStorageState[key]) : null;
+  }},
+  removeItem(rawKey) {{
+    const key = dbStorageKey(rawKey);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(dbStorageState, key);
+    const previous = dbStorageState[key];
+    const version = nextDbStorageVersion(key);
+    delete dbStorageState[key];
+    void call("compatibility.utools.dbStorage.remove", {{ key }}).catch((error) => {{
+      if (hadPrevious && dbStorageVersions.get(key) === version) dbStorageState[key] = previous;
+      console.error("iHub compatibility dbStorage remove failed", error);
+    }});
+  }}
+}});
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -972,6 +1022,7 @@ window.addEventListener("message", (event) => {{
   invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
 }});
 const utools = Object.freeze({{
+  dbStorage,
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
@@ -994,7 +1045,17 @@ Object.defineProperties(window, {{
   utools: {{ value: utools, configurable: false, writable: false }},
   rubick: {{ value: utools, configurable: false, writable: false }}
 }});
-call("lifecycle.ready", {{}}).then(() => invoke(readyCallbacks, undefined)).catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
+call("compatibility.utools.dbStorage.snapshot", {{}})
+  .then((snapshot) => {{
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
+    for (const [key, value] of Object.entries(snapshot)) {{
+      if (!dbStorageVersions.has(key)) dbStorageState[key] = value;
+    }}
+  }})
+  .catch((error) => console.error("iHub compatibility dbStorage restore failed", error))
+  .then(() => call("lifecycle.ready", {{}}))
+  .then(() => invoke(readyCallbacks, undefined))
+  .catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
 window.addEventListener("pagehide", () => {{ invoke(outCallbacks, undefined); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
 }})();
 "#
@@ -1126,6 +1187,19 @@ mod tests {
         assert!(script.contains("copyText"));
         assert!(script.contains("screenColorPick"));
         assert!(script.contains("cursorColor.sampleOnce"));
+        assert!(script.contains("dbStorage"));
+        assert!(script.contains("compatibility.utools.dbStorage.set"));
+        assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        let storage_snapshot = script
+            .find("compatibility.utools.dbStorage.snapshot")
+            .expect("bootstrap should hydrate the compatibility storage cache");
+        let lifecycle_ready = script
+            .find("call(\"lifecycle.ready\"")
+            .expect("bootstrap should announce readiness");
+        assert!(
+            storage_snapshot < lifecycle_ready,
+            "dbStorage must be hydrated before onPluginReady callbacks run"
+        );
         assert!(script.contains("utools-color-picker"));
         assert!(!script.contains("require("));
         assert!(!script.contains("electron"));

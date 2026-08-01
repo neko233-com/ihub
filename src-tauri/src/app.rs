@@ -84,6 +84,8 @@ const MAX_TEMPORARY_PATH_OPEN_ID_BYTES: usize = 96;
 const MAX_FIRST_PARTY_INDEX_ROOTS: usize = 32;
 const IHUB_HELP_URL: &str = "https://github.com/neko233-com/ihub#readme";
 const IHUB_FEEDBACK_URL: &str = "https://github.com/neko233-com/ihub/issues";
+const UTOOLS_DB_STORAGE_PREFIX: &str = "utools.db.";
+const MAX_UTOOLS_DB_STORAGE_KEY_BYTES: usize = 48;
 
 /// A small, platform-neutral work-area snapshot used to calculate the next
 /// launcher reveal. Keeping this calculation free of window APIs makes it
@@ -3526,6 +3528,35 @@ fn plugin_host_call_for_active_lease(
                 Ok(json!({ "saved": true, "persistent": true }))
             }
         }
+        "compatibility.utools.dbStorage.snapshot" => {
+            let values = state
+                .plugin_settings
+                .snapshot_with_prefix(&request.plugin_id, UTOOLS_DB_STORAGE_PREFIX)
+                .into_iter()
+                .filter_map(|(encoded_key, value)| {
+                    decode_utools_db_storage_key(&encoded_key).map(|key| (key, value))
+                })
+                .collect::<serde_json::Map<String, Value>>();
+            Ok(Value::Object(values))
+        }
+        "compatibility.utools.dbStorage.set" => {
+            let key = required_string(&request.params, "key")?;
+            let value = required_value(&request.params, "value")?.clone();
+            state.plugin_settings.set(
+                &request.plugin_id,
+                &utools_db_storage_key(key)?,
+                value,
+            )?;
+            Ok(json!({ "saved": true, "persistent": true }))
+        }
+        "compatibility.utools.dbStorage.remove" => {
+            let key = required_string(&request.params, "key")?;
+            let removed = state.plugin_settings.remove(
+                &request.plugin_id,
+                &utools_db_storage_key(key)?,
+            )?;
+            Ok(json!({ "removed": removed }))
+        }
         "lifecycle.ready" => Ok(json!({ "ok": true })),
         "lifecycle.dispose" => {
             clear_plugin_runtime_state(&state.host, &request.plugin_id);
@@ -3753,6 +3784,16 @@ fn ensure_plugin_host_request_is_allowed(
     state: &AppState,
 ) -> Result<(), String> {
     state.plugins.ensure_plugin_enabled(&request.plugin_id)?;
+    if request.method.starts_with("compatibility.utools.")
+        && !state
+            .plugins
+            .uses_utools_compatibility(&request.plugin_id)?
+    {
+        return Err(
+            "uTools compatibility host methods are available only to validated imported uTools packages."
+                .to_owned(),
+        );
+    }
     if request.method == "cursorColor.sampleOnce" && !request.surface {
         return Err(
             "Cursor color sampling is available only from the plugin's visible active surface."
@@ -6258,6 +6299,35 @@ fn open_external_in_system(url: &str) -> Result<(), String> {
         .map_err(|error| format!("Could not open external URL: {error}"))
 }
 
+fn utools_db_storage_key(key: &str) -> Result<String, String> {
+    if key.len() > MAX_UTOOLS_DB_STORAGE_KEY_BYTES {
+        return Err(format!(
+            "uTools dbStorage keys must not exceed {MAX_UTOOLS_DB_STORAGE_KEY_BYTES} UTF-8 bytes."
+        ));
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(UTOOLS_DB_STORAGE_PREFIX.len() + key.len() * 2);
+    encoded.push_str(UTOOLS_DB_STORAGE_PREFIX);
+    for byte in key.as_bytes() {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    Ok(encoded)
+}
+
+fn decode_utools_db_storage_key(encoded: &str) -> Option<String> {
+    if encoded.len() > MAX_UTOOLS_DB_STORAGE_KEY_BYTES * 2 || encoded.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn required_value<'a>(params: &'a Value, key: &str) -> Result<&'a Value, String> {
     params
         .get(key)
@@ -6381,28 +6451,44 @@ mod tests {
         build_plugin_launcher_context_payload, canonical_selected_file, clear_plugin_runtime_state,
         clear_plugin_session_secrets, clipboard_files_from_paths, clipboard_image_from_rgba,
         complete_plugin_search, create_plugin_project_for_grant,
-        create_plugin_project_with_open_grant, cursor_color_approval_id, directory_for_grant,
-        get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
-        issue_plugin_launcher_context_transfer, launcher_visibility_action,
-        native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
-        optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
-        plugin_search_providers_changed_payload, prepare_directory_for_grant,
-        renderer_display_path, resolve_issued_plugin_search_selection,
+        create_plugin_project_with_open_grant, cursor_color_approval_id,
+        decode_utools_db_storage_key, directory_for_grant, get_plugin_session_secret,
+        issue_file_grant, issue_filesystem_grant, issue_plugin_launcher_context_transfer,
+        launcher_visibility_action, native_plugin_command_input, normalize_plugin_search_results,
+        normalized_host_target, optional_u32, optional_u8, physical_point_in_monitor,
+        plugin_clipboard_history_snapshot, plugin_search_providers_changed_payload,
+        prepare_directory_for_grant, renderer_display_path, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
-        take_plugin_launcher_context_transfer, truncate_utf8_bytes, validate_system_icon_request,
-        CaptureFocusLease, CursorColorApproval, DetachedPluginFrontendEventRequest,
-        IssuedPluginSearchResults, LauncherFocusGate, LauncherHotkeyToggleGate,
-        LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
-        LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PluginBatchRenamePreview,
-        PluginCursorColor, PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
-        PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
-        TemporaryPathOpenKind, TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL,
-        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
-        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
-        MAX_PLUGIN_LOGS_PER_WINDOW, MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW,
-        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
+        take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
+        validate_system_icon_request, CaptureFocusLease, CursorColorApproval,
+        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
+        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
+        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
+        TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
+        LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
+        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_LOGS_PER_WINDOW,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_SEARCH_SELECTION_TTL,
+        TEMPORARY_PATH_OPEN_TTL,
     };
+
+    #[test]
+    fn utools_db_storage_keys_are_bounded_and_reversible() {
+        for key in ["", "theme", "窗口.位置", "punctuation /?=#"] {
+            let stored = utools_db_storage_key(key).expect("valid compatibility storage key");
+            let encoded = stored
+                .strip_prefix(super::UTOOLS_DB_STORAGE_PREFIX)
+                .expect("compatibility namespace prefix");
+            assert_eq!(decode_utools_db_storage_key(encoded).as_deref(), Some(key));
+        }
+        assert!(utools_db_storage_key(&"界".repeat(17)).is_err());
+        assert_eq!(decode_utools_db_storage_key("0"), None);
+        assert_eq!(decode_utools_db_storage_key("zz"), None);
+        assert_eq!(decode_utools_db_storage_key("ff"), None);
+    }
 
     #[test]
     fn system_icon_requests_are_bounded_unique_ids_not_renderer_paths() {

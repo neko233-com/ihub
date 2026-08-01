@@ -131,7 +131,7 @@ bash /tmp/ihub-install.sh
 
 用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会解析 <code>owner/repo@tag</code> 或 URL <code>#ref</code>，在下载前锁定远端的实际 commit，并为 canonical <code>plugin.json</code>、整个可服务前端目录、声明图标和原生二进制写入并复核 SHA-256，绝不执行仓库脚本。同一插件 ID 首次安装后会绑定其来源与 ref，其他仓库不能借同名 ID 覆盖它；更新必须走已安装来源的只读检查与用户确认。<code>ihub.plugin.json</code> 仅作为旧包的导入兼容别名，新插件与生成模板都使用 <code>plugin.json</code>。发布者签名、界面中的逐字段权限／哈希 diff 和锁定版本回滚尚未实现，属于后续安装器能力。
 
-也可导入公开 uTools <code>plugin.json</code> 的受限子集：<code>main</code>、<code>logo</code> 与文本型 <code>features</code> 会投影为 iHub 前端命令，并提供 <code>onPluginEnter</code> / <code>onPluginOut</code> / <code>screenColorPick</code>。后者始终经过 iHub 可见确认，仅返回一个延时采样的 HEX/RGB 值。iHub 不执行或提供 <code>preload</code>、Node、Electron、文件/图片匹配器、动态工具、系统输入或本地搜索索引；uTools 同级目录中的预加载脚本也不会作为 loopback 资源提供。iHub 的本地搜索继续完全由 Rust 原生索引实现。
+也可导入公开 uTools <code>plugin.json</code> 的受限子集：<code>main</code>、<code>logo</code> 与文本型 <code>features</code> 会投影为 iHub 前端命令，并提供 <code>onPluginReady</code> / <code>onPluginEnter</code> / <code>onPluginOut</code>、每插件隔离且持久化的同步 <code>dbStorage</code>，以及 <code>screenColorPick</code>。存储快照会在 ready 回调前恢复，写入仍受 iHub 的数量、键长和 64 KiB 单值上限约束；取色始终经过 iHub 可见确认，仅返回一个延时采样的 HEX/RGB 值。iHub 不执行或提供 <code>preload</code>、Node、Electron、文件/图片匹配器、动态工具、系统输入或本地搜索索引；uTools 同级目录中的预加载脚本也不会作为 loopback 资源提供。iHub 的本地搜索继续完全由 Rust 原生索引实现。
 
 ~~~text
 GitHub source → resolved immutable commit → manifest / integrity lock

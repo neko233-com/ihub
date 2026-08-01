@@ -82,6 +82,25 @@ impl PluginSettingsStore {
             .cloned()
     }
 
+    /// Returns a cloned view of one host-owned sub-namespace. Compatibility
+    /// adapters use this to hydrate a synchronous page-side cache without
+    /// exposing unrelated plugin settings.
+    pub fn snapshot_with_prefix(&self, plugin_id: &str, prefix: &str) -> BTreeMap<String, Value> {
+        self.lock_state()
+            .plugins
+            .get(plugin_id)
+            .map(|settings| {
+                settings
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        key.strip_prefix(prefix)
+                            .map(|suffix| (suffix.to_owned(), value.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn set(&self, plugin_id: &str, key: &str, value: Value) -> Result<(), String> {
         Self::validate_entry(key, &value)?;
 
@@ -433,6 +452,7 @@ fn validate_setting_key(key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -498,6 +518,30 @@ mod tests {
         assert!(settings
             .set("ihub-plugin-one", "large", json!("x".repeat(64 * 1024)))
             .is_err());
+        if directory.exists() {
+            fs::remove_dir_all(directory).expect("cleanup test directory");
+        }
+    }
+
+    #[test]
+    fn prefixed_snapshots_do_not_expose_neighboring_settings() {
+        let directory = temporary_directory("plugin-settings-prefix");
+        let settings = PluginSettingsStore::new(directory.clone());
+        settings
+            .set("ihub-plugin-one", "utools.db.7468656d65", json!("blue"))
+            .expect("save compatibility value");
+        settings
+            .set("ihub-plugin-one", "language", json!("zh-CN"))
+            .expect("save ordinary setting");
+        settings
+            .set("ihub-plugin-two", "utools.db.7468656d65", json!("red"))
+            .expect("save neighboring plugin value");
+
+        assert_eq!(
+            settings.snapshot_with_prefix("ihub-plugin-one", "utools.db."),
+            BTreeMap::from([("7468656d65".to_owned(), json!("blue"))])
+        );
+
         if directory.exists() {
             fs::remove_dir_all(directory).expect("cleanup test directory");
         }
