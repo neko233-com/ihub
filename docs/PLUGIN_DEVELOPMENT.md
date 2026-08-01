@@ -189,6 +189,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `screenCapture(callback)` 使用官方的无参数、异步回调签名。调用先停在可信父层；用户点击“开始截图”后，原生宿主在活动 surface 租约与插件权限仍有效时保留一次 native-operation reservation，隐藏当前 iHub 窗口并截取主显示器。恢复窗口后，完整 PNG 只进入父层内存选区编辑器；取消不会调用回调，完成时只返回用户裁剪的 PNG Data URL。选区至少 2 × 2、单边最多 8192 px、总计最多 2400 万像素且编码最多 16 MiB。插件不能传显示器、坐标、矩形或延迟参数，隐藏搜索 runtime 不能调用，关闭/reload/更新/停用/卸载会使等待中的请求失效。
 
+Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDisplays/getCursorScreenPoint/getDisplayNearestPoint/getDisplayMatching` 与 `screenToDipPoint/dipToScreenPoint/screenToDipRect/dipToScreenRect`。它们通过当前随机 loopback 租约的只读同步端点取得实时显示器和光标快照，不使用异步 Promise 冒充同步返回。显示器包含 Electron `Display` 的标准形状、DIP bounds/work area、原生像素 origin、有效 DPI scale 与稳定的设备名派生 ID；坐标转换始终选择包含或最近的显示器，并按该显示器缩放相对坐标。端点只接受同源、无请求体的 GET，最多投影 32 个活动显示器，不返回窗口句柄、窗口清单或屏幕像素；未在真机验证的平台明确抛错。
+
 `copyImage(value)` 当前接受 PNG Data URL 或 PNG `Uint8Array`，同步 `true` 仍只表示本地校验通过并已排队。压缩数据最多 4 MiB，宿主在写入剪贴板前重新验证 PNG 签名、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。字符串文件路径暂不接受，后续只能通过系统选择器签发的路径授权接入，不能直接开放任意本机路径。
 
 `copyFile(value)` 接受一个路径或最多 16 个路径，且只允许当前可见活动 surface 调用。确认前只检查路径字符串的绝对形式、去重、控制字符和 8 KiB 总上限，不访问文件系统，因此拒绝确认不会成为文件存在性探针；原生警告框会逐项展示插件提交的原始目标。用户明确允许后，宿主才解析对象，并拒绝网络/设备命名空间、符号链接、缺失项和非普通文件/文件夹；通过校验的对象会保持身份防护直到写入系统剪贴板。该确认与通知、系统提示音共用每插件每 10 秒 5 次的可见提醒限流，避免插件连续弹窗。
@@ -197,7 +199,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `utools.db` 及其 `promises` 成员均提供 `get(id)`、`put(doc)`、`remove(idOrDoc)`、`bulkDocs(docs)`、`allDocs(prefixOrIds)`、`postAttachment(id, bytes, mime)`、`getAttachment(id)` 与 `getAttachmentType(id)`。同步版通过当前插件随机 loopback origin 内的固定协议直接取得真实宿主结果；只接受随机租约路径、自定义同源请求头、固定 JSON 形状和 15 MiB 请求上限，不使用“页面缓存后异步落盘”模拟同步成功。文档按已验证的插件 ID 分库持久化，写入使用 `_rev` 乐观并发控制和原子文件替换；单文档（包含宿主写入的 `_id/_rev`）最多 1 MiB，每库最多 2,048 个文档、32 MiB，单次 bulk 最多 16 个文档且输入最多 8 MiB。`allDocs()` 按 `_id` 排序，无参数返回全部，字符串选择器匹配前缀，字符串数组按请求顺序去重取回。附件接受 1 byte–10 MiB 的 `Uint8Array`，只允许在新 ID 上创建，使用独立原子文件和 SHA-256 元数据校验，随对应文档删除；插件卸载时会清除该插件的数据库与附件。iHub 不提供 uTools 云同步，因此同步及 Promise 版 `replicateStateFromCloud()` 均如实返回 `null`。
 
-这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
+这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、键鼠模拟或其他应用窗口枚举；上述有界显示器元数据也不包含窗口、句柄或像素。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 

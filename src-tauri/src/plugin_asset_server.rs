@@ -38,6 +38,7 @@ const MAX_COMPAT_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const UTOOLS_COMPAT_SCRIPT_NAME: &str = "__ihub_utools_compat.js";
 const UTOOLS_SYNC_DB_ROUTE: &str = "__ihub_utools_db_sync";
 const UTOOLS_SYNC_DB_HEADER: &str = "x-ihub-utools-db";
+const UTOOLS_SYNC_SCREEN_ROUTE: &str = "__ihub_utools_screen_sync";
 const MAX_UTOOLS_SYNC_DB_REQUEST_BYTES: usize = 15 * 1024 * 1024;
 /// Must stay distinct from `tauri.conf.json`'s `build.devUrl`. Tauri treats a
 /// URL relative to that development origin as local, which would defeat the
@@ -711,6 +712,17 @@ fn handle_connection(
     if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
         return;
     }
+    if is_utools_sync_screen_request(bundle, &request.target) {
+        let _guard = server
+            .operation
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+            return;
+        }
+        handle_utools_sync_screen_request(stream, bundle, request);
+        return;
+    }
     if is_utools_sync_db_request(bundle, &request.target) {
         let _guard = server
             .operation
@@ -772,6 +784,65 @@ fn is_utools_sync_db_request(bundle: &ServedBundle, target: &str) -> bool {
     bundle.utools_documents.is_some()
         && bundle.utools_compat_script.is_some()
         && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_DB_ROUTE)
+}
+
+fn is_utools_sync_screen_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_compat_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_SCREEN_ROUTE)
+}
+
+fn handle_utools_sync_screen_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    request: HttpRequest,
+) {
+    let result = execute_utools_sync_screen_request(request);
+    let (status, payload) = match result {
+        Ok(value) => ("200 OK", value),
+        Err(error) => ("400 Bad Request", json!({ "error": error })),
+    };
+    let encoded = serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"error":"Could not encode screen response."}"#.to_vec());
+    let _ = write_json_response(stream, status, &encoded, bundle.allows_remote_network);
+}
+
+fn execute_utools_sync_screen_request(request: HttpRequest) -> Result<Value, String> {
+    if !matches!(request.method, HttpMethod::Get) {
+        return Err("The synchronous uTools screen endpoint accepts only GET.".to_owned());
+    }
+    if !request.buffered_body.is_empty()
+        || request.headers.contains_key("content-length")
+        || request.headers.contains_key("transfer-encoding")
+    {
+        return Err("The synchronous uTools screen request accepts no body.".to_owned());
+    }
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value != "same-origin")
+    {
+        return Err("The synchronous uTools screen request is not same-origin.".to_owned());
+    }
+    let host = request
+        .headers
+        .get("host")
+        .ok_or_else(|| "The synchronous uTools screen request has no loopback host.".to_owned())?;
+    let valid_host = host
+        .strip_prefix("127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0);
+    if !valid_host {
+        return Err("The synchronous uTools screen request host is invalid.".to_owned());
+    }
+    if request
+        .headers
+        .get("origin")
+        .is_some_and(|origin| origin != &format!("http://{host}"))
+    {
+        return Err("The synchronous uTools screen request origin is invalid.".to_owned());
+    }
+    serde_json::to_value(crate::utools_screen::screen_snapshot()?)
+        .map_err(|error| format!("Could not encode the uTools screen snapshot: {error}"))
 }
 
 fn handle_utools_sync_db_request(
@@ -1276,6 +1347,7 @@ const copyImageMaxPngBytes = 4194304;
 const copyImageMaxDataUrlChars = 5592430;
 const attachmentMaxBytes = 10485760;
 const syncDbRoute = "__ihub_utools_db_sync";
+const syncScreenRoute = "__ihub_utools_screen_sync";
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
@@ -1336,6 +1408,66 @@ function syncDbCall(op, payload) {{
   catch {{ throw new Error("iHub returned an invalid synchronous database response."); }}
   if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous database request failed.");
   return result;
+}}
+function syncScreenSnapshot() {{
+  const request = new XMLHttpRequest();
+  request.open("GET", syncScreenRoute, false);
+  request.send();
+  let result;
+  try {{ result = JSON.parse(request.responseText); }}
+  catch {{ throw new Error("iHub returned an invalid synchronous screen response."); }}
+  if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous screen request failed.");
+  if (!result || !Array.isArray(result.displays) || !Array.isArray(result.metrics)) throw new Error("iHub returned an invalid screen snapshot.");
+  return result;
+}}
+function screenPoint(value, label) {{
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y)) throw new TypeError(label + " requires finite x and y coordinates.");
+  return {{ x: Math.round(value.x), y: Math.round(value.y) }};
+}}
+function screenRect(value, label) {{
+  const point = screenPoint(value, label);
+  if (!Number.isFinite(value.width) || !Number.isFinite(value.height) || value.width < 0 || value.height < 0) throw new TypeError(label + " requires non-negative finite width and height.");
+  return {{ ...point, width: Math.round(value.width), height: Math.round(value.height) }};
+}}
+function publicDisplay(value) {{ return JSON.parse(JSON.stringify(value)); }}
+function rectDistanceSquared(point, rect) {{
+  const dx = point.x < rect.x ? rect.x - point.x : point.x >= rect.x + rect.width ? point.x - (rect.x + rect.width) : 0;
+  const dy = point.y < rect.y ? rect.y - point.y : point.y >= rect.y + rect.height ? point.y - (rect.y + rect.height) : 0;
+  return dx * dx + dy * dy;
+}}
+function nearestMetric(snapshot, point, field) {{
+  let selected = snapshot.metrics[0];
+  let selectedDistance = Number.POSITIVE_INFINITY;
+  for (const metric of snapshot.metrics) {{
+    const rect = metric && metric[field];
+    if (!rect) continue;
+    const distance = rectDistanceSquared(point, rect);
+    if (distance < selectedDistance) {{ selected = metric; selectedDistance = distance; }}
+  }}
+  if (!selected) throw new Error("No active display is available.");
+  return selected;
+}}
+function displayForMetric(snapshot, metric) {{
+  const display = snapshot.displays.find((candidate) => candidate && candidate.id === metric.id);
+  if (!display) throw new Error("The display snapshot is inconsistent.");
+  return publicDisplay(display);
+}}
+function displayMatchingRect(snapshot, rect) {{
+  let selected = null;
+  let selectedArea = -1;
+  for (const display of snapshot.displays) {{
+    const bounds = display && display.bounds;
+    if (!bounds) continue;
+    const width = Math.max(0, Math.min(rect.x + rect.width, bounds.x + bounds.width) - Math.max(rect.x, bounds.x));
+    const height = Math.max(0, Math.min(rect.y + rect.height, bounds.y + bounds.height) - Math.max(rect.y, bounds.y));
+    const area = width * height;
+    if (area > selectedArea) {{ selected = display; selectedArea = area; }}
+  }}
+  if (selectedArea <= 0) {{
+    const center = {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
+    return displayForMetric(snapshot, nearestMetric(snapshot, center, "dipBounds"));
+  }}
+  return publicDisplay(selected);
 }}
 function projectedDbRemoveTarget(target) {{
   if (typeof target === "string") return target;
@@ -1749,6 +1881,66 @@ const utools = Object.freeze({{
     if (typeof callback !== "function") return;
     void call("compatibility.utools.screen.capture", {{}}).then((image) => callback(image)).catch((error) => console.error("iHub compatibility screen capture failed", error));
   }},
+  getPrimaryDisplay() {{
+    const snapshot = syncScreenSnapshot();
+    const display = snapshot.displays.find((candidate) => candidate && candidate.id === snapshot.primaryDisplayId) || snapshot.displays[0];
+    if (!display) throw new Error("No active display is available.");
+    return publicDisplay(display);
+  }},
+  getAllDisplays() {{ return syncScreenSnapshot().displays.map(publicDisplay); }},
+  getCursorScreenPoint() {{
+    const point = syncScreenSnapshot().cursorScreenPoint;
+    return screenPoint(point, "getCursorScreenPoint");
+  }},
+  getDisplayNearestPoint(value) {{
+    const point = screenPoint(value, "getDisplayNearestPoint");
+    const snapshot = syncScreenSnapshot();
+    return displayForMetric(snapshot, nearestMetric(snapshot, point, "dipBounds"));
+  }},
+  getDisplayMatching(value) {{
+    const rect = screenRect(value, "getDisplayMatching");
+    return displayMatchingRect(syncScreenSnapshot(), rect);
+  }},
+  screenToDipPoint(value) {{
+    const point = screenPoint(value, "screenToDipPoint");
+    const snapshot = syncScreenSnapshot();
+    const metric = nearestMetric(snapshot, point, "physicalBounds");
+    return {{
+      x: metric.dipBounds.x + Math.round((point.x - metric.physicalBounds.x) / metric.scaleFactor),
+      y: metric.dipBounds.y + Math.round((point.y - metric.physicalBounds.y) / metric.scaleFactor)
+    }};
+  }},
+  dipToScreenPoint(value) {{
+    const point = screenPoint(value, "dipToScreenPoint");
+    const snapshot = syncScreenSnapshot();
+    const metric = nearestMetric(snapshot, point, "dipBounds");
+    return {{
+      x: metric.physicalBounds.x + Math.round((point.x - metric.dipBounds.x) * metric.scaleFactor),
+      y: metric.physicalBounds.y + Math.round((point.y - metric.dipBounds.y) * metric.scaleFactor)
+    }};
+  }},
+  screenToDipRect(value) {{
+    const rect = screenRect(value, "screenToDipRect");
+    const snapshot = syncScreenSnapshot();
+    const metric = nearestMetric(snapshot, rect, "physicalBounds");
+    return {{
+      x: metric.dipBounds.x + Math.round((rect.x - metric.physicalBounds.x) / metric.scaleFactor),
+      y: metric.dipBounds.y + Math.round((rect.y - metric.physicalBounds.y) / metric.scaleFactor),
+      width: Math.round(rect.width / metric.scaleFactor),
+      height: Math.round(rect.height / metric.scaleFactor)
+    }};
+  }},
+  dipToScreenRect(value) {{
+    const rect = screenRect(value, "dipToScreenRect");
+    const snapshot = syncScreenSnapshot();
+    const metric = nearestMetric(snapshot, rect, "dipBounds");
+    return {{
+      x: metric.physicalBounds.x + Math.round((rect.x - metric.dipBounds.x) * metric.scaleFactor),
+      y: metric.physicalBounds.y + Math.round((rect.y - metric.dipBounds.y) * metric.scaleFactor),
+      width: Math.round(rect.width * metric.scaleFactor),
+      height: Math.round(rect.height * metric.scaleFactor)
+    }};
+  }},
   getWindowType() {{ return currentWindowType; }},
   getNativeId() {{ return config.nativeId; }},
   getPath(name) {{
@@ -1960,6 +2152,43 @@ mod tests {
         (status, payload)
     }
 
+    fn send_sync_screen_request(
+        lease: &super::PluginFrontendLease,
+        method: &str,
+    ) -> (String, serde_json::Value) {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease host");
+        let port = url.port().expect("lease port");
+        let target = format!("{}{}", url.path(), super::UTOOLS_SYNC_SCREEN_ROUTE);
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\nOrigin: http://{host}:{port}\r\nSec-Fetch-Site: same-origin\r\nConnection: close\r\n\r\n"
+        );
+        let mut stream = TcpStream::connect((host, port)).expect("screen endpoint should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("screen response timeout");
+        stream
+            .write_all(request.as_bytes())
+            .expect("screen request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete screen response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("complete response header");
+        let status = std::str::from_utf8(&response[..header_end])
+            .expect("UTF-8 response header")
+            .lines()
+            .next()
+            .expect("response status")
+            .to_owned();
+        let payload = serde_json::from_slice(&response[header_end..]).expect("response JSON");
+        (status, payload)
+    }
+
     #[test]
     fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
         let config = UtoolsCompatRuntimeConfig {
@@ -1998,6 +2227,16 @@ mod tests {
         assert!(script.contains("screenColorPick"));
         assert!(script.contains("screenCapture(callback)"));
         assert!(script.contains("compatibility.utools.screen.capture"));
+        assert!(script.contains("getPrimaryDisplay()"));
+        assert!(script.contains("getAllDisplays()"));
+        assert!(script.contains("getCursorScreenPoint()"));
+        assert!(script.contains("getDisplayNearestPoint(value)"));
+        assert!(script.contains("getDisplayMatching(value)"));
+        assert!(script.contains("screenToDipPoint(value)"));
+        assert!(script.contains("dipToScreenPoint(value)"));
+        assert!(script.contains("screenToDipRect(value)"));
+        assert!(script.contains("dipToScreenRect(value)"));
+        assert!(script.contains("request.open(\"GET\", syncScreenRoute, false)"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("invokePluginDetach"));
         assert!(script.contains("cursorColor.sampleOnce"));
@@ -2090,6 +2329,40 @@ mod tests {
             bootstrap < page_script,
             "the compatibility global must exist before package JavaScript evaluates"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn synchronous_utools_screen_endpoint_is_random_origin_scoped_and_current() {
+        let server = PluginAssetServer::new();
+        let plugin_id = "utools-sync-screen-test";
+        let (root, mut bundle) = temporary_bundle(plugin_id, false);
+        bundle.utools_compat = Some(utools_runtime_config(plugin_id));
+        let documents = UtoolsDocumentStore::new(root.join("app-data"));
+        let lease = server
+            .issue_with_utools_documents(bundle, PluginFrontendPurpose::Surface, Some(documents))
+            .expect("uTools screen lease should issue");
+
+        let (status, snapshot) = send_sync_screen_request(&lease, "GET");
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert!(snapshot["displays"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
+        assert_eq!(
+            snapshot["displays"].as_array().map(Vec::len),
+            snapshot["metrics"].as_array().map(Vec::len)
+        );
+        assert!(snapshot["cursorScreenPoint"]["x"].is_number());
+        assert!(snapshot["primaryDisplayId"].is_number());
+
+        let (status, rejection) = send_sync_screen_request(&lease, "POST");
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        assert!(rejection["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("only GET")));
+
+        assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
         let _ = fs::remove_dir_all(root);
     }
 
