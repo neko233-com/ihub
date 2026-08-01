@@ -40,6 +40,7 @@ export type BuiltinToolId =
   | "ocr"
   | "share"
   | "hosts"
+  | "wifi"
   | "rename"
   | "developer";
 
@@ -61,7 +62,8 @@ export type PluginCatalogIcon =
   | "converter"
   | "network"
   | "share"
-  | "hosts";
+  | "hosts"
+  | "wifi";
 
 export interface PluginCatalogEntry {
   id: string;
@@ -278,6 +280,16 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     tags: ["hosts", "DNS", "域名映射", "Windows", "UAC", "备份"],
     icon: "hosts",
     builtinTool: "hosts",
+  },
+  {
+    id: "ihub-wifi-password-viewer",
+    name: "Wi-Fi 密码查看器",
+    description: "用 Windows Native Wi-Fi API 枚举保存配置；单项 UAC 后经 PID 校验命名管道返回密钥，60 秒自动清除。",
+    category: "system",
+    distribution: "builtin",
+    tags: ["Wi-Fi", "WLAN", "密码", "Windows", "UAC", "Native Wi-Fi"],
+    icon: "wifi",
+    builtinTool: "wifi",
   },
   {
     id: "ihub-batch-rename",

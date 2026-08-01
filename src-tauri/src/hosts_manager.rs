@@ -174,7 +174,7 @@ fn snapshot_from_disk() -> Result<HostsSnapshot, String> {
         } else {
             "LF".to_owned()
         },
-        can_write_directly: can_write_hosts_directly(),
+        can_write_directly: process_is_elevated(),
         backup_available: hosts_backup_path()?.is_file(),
     })
 }
@@ -529,7 +529,7 @@ fn hosts_backup_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn can_write_hosts_directly() -> bool {
+pub(crate) fn process_is_elevated() -> bool {
     use std::{ffi::c_void, mem::size_of};
     use windows_sys::Win32::{
         Foundation::CloseHandle,
@@ -559,7 +559,7 @@ fn can_write_hosts_directly() -> bool {
 }
 
 #[cfg(not(windows))]
-fn can_write_hosts_directly() -> bool {
+pub(crate) fn process_is_elevated() -> bool {
     false
 }
 
@@ -575,7 +575,7 @@ fn apply_with_privilege(
         expected_fingerprint: expected_fingerprint.to_owned(),
         action,
     };
-    if can_write_hosts_directly() {
+    if process_is_elevated() {
         execute_helper_request(request).map_err(|failure| match failure {
             HelperFailure::Stale => "hosts 文件已发生变化；iHub 未覆盖它。".to_owned(),
             HelperFailure::Backup => "hosts 备份不存在或无法读取。".to_owned(),

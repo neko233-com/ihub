@@ -5646,6 +5646,8 @@ pub fn run() {
             get_hosts_snapshot,
             apply_hosts_entries,
             restore_hosts_backup,
+            crate::wifi_profiles::list_wifi_profiles,
+            crate::wifi_profiles::reveal_wifi_password,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
             preview_batch_rename,

@@ -8216,3 +8216,78 @@ kbd {
 .hosts-workbench__footer span:last-child { margin-left: auto; }
 @media (max-width: 950px) { .hosts-workbench__body { grid-template-columns: 190px minmax(410px, 1fr); grid-template-rows: 650px auto; overflow: auto; } .hosts-workbench__editor { min-height: 650px; } .hosts-workbench__system { border-left: 0; border-top: 1px solid rgba(94, 92, 230, .14); grid-column: 2; } }
 @media (max-width: 700px) { .hosts-workbench__header { grid-template-columns: 1fr auto; } .hosts-workbench__privacy { display: none; } .hosts-workbench__body { display: block; overflow: auto; } .hosts-workbench__managed, .hosts-workbench__system { border: 0; overflow: visible; } .hosts-workbench__editor { min-height: 650px; } .hosts-workbench__footer span:nth-child(2) { display: none; } }
+
+/* Wi-Fi credentials are an intentionally narrow Windows surface: metadata on
+ * the left, one explicitly revealed secret in the center, trust boundaries on
+ * the right. */
+.toolbox-drawer.toolbox-drawer--wifi { background: radial-gradient(circle at 8% 10%, rgba(100, 210, 255, .27), transparent 31%), radial-gradient(circle at 92% 88%, rgba(191, 90, 242, .17), transparent 37%), rgba(247, 251, 255, .97); border-color: rgba(10, 132, 255, .3); overflow: hidden; padding: 0; }
+.wifi-password-workbench { color: #17181b; display: grid; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; grid-template-rows: 64px minmax(0, 1fr) 38px; height: 100%; min-height: 0; }
+.wifi-password-workbench button, .wifi-password-workbench input { font: inherit; }
+.wifi-password-workbench__header { align-items: center; backdrop-filter: blur(24px) saturate(1.35); background: rgba(255, 255, 255, .77); border-bottom: 1px solid rgba(10, 132, 255, .14); display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); padding: 0 18px; }
+.wifi-password-workbench__identity, .wifi-password-workbench__privacy, .wifi-password-workbench__header > button { align-items: center; display: flex; }
+.wifi-password-workbench__identity { gap: 10px; }
+.wifi-password-workbench__identity > span { align-items: center; background: linear-gradient(145deg, #0a84ff, #64d2ff); border-radius: 10px; box-shadow: 0 7px 18px rgba(10, 132, 255, .25); color: #fff; display: flex; height: 34px; justify-content: center; width: 34px; }
+.wifi-password-workbench__identity strong { display: block; font-size: 15px; }
+.wifi-password-workbench__identity small { color: #747984; display: block; font-size: 9px; margin-top: 1px; }
+.wifi-password-workbench__privacy { background: rgba(48, 209, 88, .1); border: 1px solid rgba(48, 209, 88, .22); border-radius: 99px; color: #16833a; font-size: 9px; gap: 6px; padding: 6px 10px; }
+.wifi-password-workbench__header > button { background: rgba(255, 255, 255, .68); border: 1px solid rgba(10, 132, 255, .15); border-radius: 8px; color: #656a74; cursor: pointer; height: 30px; justify-content: center; justify-self: end; width: 30px; }
+.wifi-password-workbench__body { display: grid; grid-template-columns: minmax(220px, 24%) minmax(380px, 1fr) minmax(275px, 29%); min-height: 0; }
+.wifi-password-workbench__profiles, .wifi-password-workbench__details { min-height: 0; overflow: auto; padding: 20px 18px; }
+.wifi-password-workbench__profiles { border-right: 1px solid rgba(10, 132, 255, .13); }
+.wifi-password-workbench__details { border-left: 1px solid rgba(94, 92, 230, .14); }
+.wifi-password-workbench__search { align-items: center; background: rgba(255, 255, 255, .72); border: 1px solid rgba(10, 132, 255, .13); border-radius: 9px; display: flex; min-height: 36px; padding: 0 6px 0 10px; }
+.wifi-password-workbench__search > svg { color: #0a84ff; }
+.wifi-password-workbench__search input { background: transparent; border: 0; color: #343840; font-size: 8px; min-width: 0; outline: 0; padding: 0 7px; width: 100%; }
+.wifi-password-workbench__search button { align-items: center; background: rgba(10, 132, 255, .08); border: 0; border-radius: 6px; color: #0a84ff; cursor: pointer; display: flex; height: 25px; justify-content: center; width: 25px; }
+.wifi-password-workbench__profile-count { align-items: center; color: #666d78; display: flex; font-size: 8px; font-weight: 700; margin-top: 17px; text-transform: uppercase; }
+.wifi-password-workbench__profile-count strong { color: #0a84ff; margin-left: auto; }
+.wifi-password-workbench__profile-list { display: grid; gap: 6px; margin-top: 9px; }
+.wifi-password-workbench__profile-list > button { align-items: center; background: rgba(255, 255, 255, .6); border: 1px solid transparent; border-radius: 9px; color: #343840; cursor: pointer; display: flex; gap: 9px; min-height: 49px; padding: 7px 9px; text-align: left; width: 100%; }
+.wifi-password-workbench__profile-list > button.is-selected { background: rgba(10, 132, 255, .1); border-color: rgba(10, 132, 255, .24); }
+.wifi-password-workbench__profile-list > button > span { align-items: center; background: linear-gradient(145deg, rgba(10, 132, 255, .13), rgba(100, 210, 255, .17)); border-radius: 8px; color: #0a84ff; display: flex; height: 31px; justify-content: center; width: 31px; }
+.wifi-password-workbench__profile-list button > div { min-width: 0; }
+.wifi-password-workbench__profile-list strong, .wifi-password-workbench__profile-list small { display: block; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wifi-password-workbench__profile-list strong { font-size: 9px; }
+.wifi-password-workbench__profile-list small { color: #7a808a; font-size: 7px; margin-top: 3px; }
+.wifi-password-workbench__profile-list i { background: rgba(191, 90, 242, .09); border-radius: 99px; color: #9b42c4; font-size: 7px; font-style: normal; margin-left: auto; padding: 3px 6px; }
+.wifi-password-workbench__profiles > p { color: #747984; font-size: 8px; line-height: 1.55; margin: 18px 2px 0; }
+.wifi-password-workbench__empty { align-items: center; color: #5e5ce6; display: flex; flex-direction: column; font-size: 8px; gap: 9px; padding: 32px 8px; text-align: center; }
+.wifi-password-workbench__stage { align-content: center; background: radial-gradient(circle at 50% 43%, rgba(100, 210, 255, .17), transparent 45%), rgba(249, 252, 255, .56); display: grid; justify-items: center; min-height: 0; overflow: auto; padding: 25px; text-align: center; }
+.wifi-password-workbench__network-icon { align-items: center; background: linear-gradient(145deg, #0a84ff, #5e5ce6); border-radius: 24px; box-shadow: 0 18px 45px rgba(10, 132, 255, .25); color: #fff; display: flex; height: 92px; justify-content: center; width: 92px; }
+.wifi-password-workbench__stage > small { color: #0a84ff; font-size: 8px; font-weight: 800; letter-spacing: .12em; margin-top: 19px; }
+.wifi-password-workbench__stage h3 { font-size: 19px; margin: 5px 0 0; }
+.wifi-password-workbench__stage > p:not(.wifi-password-workbench__uac-note):not(.wifi-password-workbench__browser-note):not(.wifi-password-workbench__error) { color: #747984; font-size: 8px; margin: 4px 0 0; }
+.wifi-password-workbench__secret { margin-top: 21px; max-width: 470px; width: 100%; }
+.wifi-password-workbench__secret > div:first-child { align-items: center; background: rgba(255, 255, 255, .82); border: 1px solid rgba(94, 92, 230, .18); border-radius: 11px; display: flex; gap: 9px; min-height: 48px; padding: 0 9px 0 13px; text-align: left; }
+.wifi-password-workbench__secret > div:first-child > svg { color: #5e5ce6; }
+.wifi-password-workbench__secret > div:first-child > span { flex: 1; font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wifi-password-workbench__secret > div:first-child > button { align-items: center; background: rgba(10, 132, 255, .09); border: 0; border-radius: 7px; color: #0a84ff; cursor: pointer; display: flex; height: 30px; justify-content: center; width: 30px; }
+.wifi-password-workbench__secret-actions { align-items: center; display: flex; gap: 7px; margin-top: 9px; }
+.wifi-password-workbench__secret-actions button { align-items: center; background: rgba(10, 132, 255, .09); border: 1px solid rgba(10, 132, 255, .14); border-radius: 7px; color: #086abd; cursor: pointer; display: flex; font-size: 8px; gap: 5px; min-height: 30px; padding: 0 9px; }
+.wifi-password-workbench__secret-actions span { align-items: center; color: #b66a00; display: flex; font-size: 8px; gap: 5px; margin-left: auto; }
+.wifi-password-workbench__reveal { align-items: center; background: linear-gradient(135deg, #0a84ff, #5e5ce6); border: 0; border-radius: 10px; box-shadow: 0 10px 24px rgba(10, 132, 255, .22); color: #fff; cursor: pointer; display: flex; font-size: 10px; font-weight: 700; gap: 7px; justify-content: center; margin-top: 17px; min-height: 41px; padding: 0 18px; }
+.wifi-password-workbench button:disabled { cursor: default; opacity: .5; }
+.wifi-password-workbench__uac-note, .wifi-password-workbench__browser-note, .wifi-password-workbench__error { align-items: flex-start; display: flex; font-size: 8px; gap: 6px; line-height: 1.45; margin: 13px 0 0; max-width: 470px; text-align: left; }
+.wifi-password-workbench__uac-note, .wifi-password-workbench__browser-note { color: #b66a00; }
+.wifi-password-workbench__error { color: #d2264f; }
+.wifi-password-workbench__stage-empty { align-items: center; color: #5e5ce6; display: flex; flex-direction: column; text-align: center; }
+.wifi-password-workbench__stage-empty strong { color: #2c3037; font-size: 14px; margin-top: 14px; }
+.wifi-password-workbench__stage-empty small { color: #7a808a; font-size: 8px; margin-top: 5px; }
+.wifi-password-workbench__section-title { align-items: center; color: #525862; display: flex; font-size: 9px; font-weight: 800; gap: 7px; letter-spacing: .08em; text-transform: uppercase; }
+.wifi-password-workbench__facts { display: grid; gap: 7px; margin-top: 15px; }
+.wifi-password-workbench__facts article { background: rgba(255, 255, 255, .68); border: 1px solid rgba(10, 132, 255, .1); border-radius: 8px; padding: 9px; }
+.wifi-password-workbench__facts small, .wifi-password-workbench__facts strong { display: block; }
+.wifi-password-workbench__facts small { color: #7a808a; font-size: 7px; }
+.wifi-password-workbench__facts strong { font-size: 9px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wifi-password-workbench__boundary { align-items: flex-start; background: rgba(48, 209, 88, .08); border: 1px solid rgba(48, 209, 88, .17); border-radius: 10px; color: #16833a; display: flex; gap: 8px; margin-top: 16px; padding: 10px; }
+.wifi-password-workbench__boundary.is-warning { background: rgba(255, 159, 10, .08); border-color: rgba(255, 159, 10, .18); color: #a45e00; }
+.wifi-password-workbench__boundary strong, .wifi-password-workbench__boundary small { display: block; }
+.wifi-password-workbench__boundary strong { font-size: 9px; }
+.wifi-password-workbench__boundary small { color: #637568; font-size: 8px; line-height: 1.5; margin-top: 3px; }
+.wifi-password-workbench__boundary.is-warning small { color: #7c6a50; }
+.wifi-password-workbench__footer { align-items: center; background: rgba(255, 255, 255, .74); border-top: 1px solid rgba(10, 132, 255, .12); color: #767c86; display: flex; font-size: 8px; gap: 22px; padding: 0 18px; }
+.wifi-password-workbench__footer span { align-items: center; display: flex; gap: 5px; }
+.wifi-password-workbench__footer svg { color: #30d158; }
+.wifi-password-workbench__footer span:last-child { margin-left: auto; }
+@media (max-width: 950px) { .wifi-password-workbench__body { grid-template-columns: 195px minmax(400px, 1fr); grid-template-rows: 640px auto; overflow: auto; } .wifi-password-workbench__stage { min-height: 640px; } .wifi-password-workbench__details { border-left: 0; border-top: 1px solid rgba(94, 92, 230, .14); grid-column: 2; } }
+@media (max-width: 700px) { .wifi-password-workbench__header { grid-template-columns: 1fr auto; } .wifi-password-workbench__privacy { display: none; } .wifi-password-workbench__body { display: block; overflow: auto; } .wifi-password-workbench__profiles, .wifi-password-workbench__details { border: 0; overflow: visible; } .wifi-password-workbench__stage { min-height: 640px; } .wifi-password-workbench__footer span:nth-child(2) { display: none; } }

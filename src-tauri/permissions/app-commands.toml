@@ -58,6 +58,8 @@ commands.allow = [
   "get_hosts_snapshot",
   "apply_hosts_entries",
   "restore_hosts_backup",
+  "list_wifi_profiles",
+  "reveal_wifi_password",
   "format_json",
   "query_json",
   "preview_batch_rename",

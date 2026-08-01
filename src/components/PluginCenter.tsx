@@ -30,6 +30,7 @@ import {
   Sparkles,
   Trash2,
   Video,
+  Wifi,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -173,6 +174,7 @@ const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   network: Gauge,
   share: Share2,
   hosts: ServerCog,
+  wifi: Wifi,
 };
 
 const pluginCenterStyles = `

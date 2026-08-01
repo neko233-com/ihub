@@ -779,6 +779,13 @@ const builtinTools: Array<{
     tab: "hosts",
   },
   {
+    commandId: "ihub.tool.wifi-password",
+    name: "Wi-Fi 密码查看器",
+    metadata: "按配置请求 Windows UAC，仅在内存显示 60 秒",
+    keywords: ["Wi-Fi 密码", "wifi password", "WLAN", "无线密码", "查看密码"],
+    tab: "wifi",
+  },
+  {
     commandId: "ihub.tool.batch-rename",
     name: "批量重命名",
     metadata: "预览后再安全执行文件改名",

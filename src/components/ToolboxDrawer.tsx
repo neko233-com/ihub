@@ -33,6 +33,7 @@ import {
   ServerCog,
   Trash2,
   Video,
+  Wifi,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,6 +45,7 @@ import { NetworkWorkbench } from "./NetworkWorkbench";
 import { OcrWorkbench } from "./OcrWorkbench";
 import { LanShareWorkbench } from "./LanShareWorkbench";
 import { HostsWorkbench } from "./HostsWorkbench";
+import { WifiPasswordWorkbench } from "./WifiPasswordWorkbench";
 import {
   RecordingWorkbench,
   type RecordingPhase,
@@ -130,6 +132,7 @@ export type ToolboxTab =
   | "ocr"
   | "share"
   | "hosts"
+  | "wifi"
   | "rename"
   | "developer";
 
@@ -299,6 +302,7 @@ const tabs: Array<{
   { id: "ocr", label: "OCR", icon: ScanText },
   { id: "share", label: "内网分享", icon: Share2 },
   { id: "hosts", label: "hosts", icon: ServerCog },
+  { id: "wifi", label: "Wi-Fi 密码", icon: Wifi },
   { id: "rename", label: "重命名", icon: Files },
   { id: "developer", label: "开发者", icon: Code2 },
 ];
@@ -2540,9 +2544,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : activeTab === "network" ? "network-workbench-title" : activeTab === "ocr" ? "ocr-workbench-title" : activeTab === "share" ? "lan-share-workbench-title" : activeTab === "hosts" ? "hosts-workbench-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : activeTab === "network" ? "network-workbench-title" : activeTab === "ocr" ? "ocr-workbench-title" : activeTab === "share" ? "lan-share-workbench-title" : activeTab === "hosts" ? "hosts-workbench-title" : activeTab === "wifi" ? "wifi-password-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : activeTab === "network" ? " toolbox-drawer--network" : activeTab === "ocr" ? " toolbox-drawer--ocr" : activeTab === "share" ? " toolbox-drawer--share" : activeTab === "hosts" ? " toolbox-drawer--hosts" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : activeTab === "network" ? " toolbox-drawer--network" : activeTab === "ocr" ? " toolbox-drawer--ocr" : activeTab === "share" ? " toolbox-drawer--share" : activeTab === "hosts" ? " toolbox-drawer--hosts" : activeTab === "wifi" ? " toolbox-drawer--wifi" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2634,6 +2638,13 @@ export function ToolboxDrawer({
             ) : activeTab === "hosts" ? (
               <HostsWorkbench
                 onClose={closeToolbox}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : activeTab === "wifi" ? (
+              <WifiPasswordWorkbench
+                onClose={closeToolbox}
+                onCopy={copyText}
                 onStartWindowDrag={onStartWindowDrag}
                 onToast={onToast}
               />

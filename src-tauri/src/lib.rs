@@ -27,10 +27,14 @@ mod plugins;
 mod project_template;
 mod super_panel;
 pub mod system_open;
+mod wifi_profiles;
 mod window_management;
 
 pub fn run() {
     if let Some(code) = hosts_manager::elevated_helper_exit_code_from_args() {
+        std::process::exit(code);
+    }
+    if let Some(code) = wifi_profiles::elevated_helper_exit_code_from_args() {
         std::process::exit(code);
     }
     app::run();
