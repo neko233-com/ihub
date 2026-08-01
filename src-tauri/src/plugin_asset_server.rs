@@ -1358,6 +1358,8 @@ let pluginOutDispatched = false;
 let pluginDetachDispatched = false;
 let subInputChangeCallback = null;
 let currentWindowType = "main";
+let desktopCaptureSlot = null;
+let desktopCaptureSequence = 0;
 function call(method, params) {{
   const id = "utools-compat-" + (++sequence).toString(36);
   return new Promise((resolve, reject) => {{
@@ -1468,6 +1470,96 @@ function displayMatchingRect(snapshot, rect) {{
     return displayForMetric(snapshot, nearestMetric(snapshot, center, "dipBounds"));
   }}
   return publicDisplay(selected);
+}}
+function desktopCaptureOptions(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("desktopCaptureSources requires an options object.");
+  const allowed = new Set(["types", "thumbnailSize", "fetchWindowIcons"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("desktopCaptureSources options contain an unsupported field.");
+  if (!Array.isArray(value.types) || value.types.length === 0 || value.types.length > 2 || value.types.some((type) => type !== "screen" && type !== "window")) throw new TypeError("desktopCaptureSources types must contain screen or window.");
+  const types = Array.from(new Set(value.types));
+  if (value.fetchWindowIcons !== undefined && typeof value.fetchWindowIcons !== "boolean") throw new TypeError("desktopCaptureSources fetchWindowIcons must be boolean.");
+  const rawSize = value.thumbnailSize === undefined ? {{ width: 150, height: 150 }} : value.thumbnailSize;
+  if (!rawSize || typeof rawSize !== "object" || Array.isArray(rawSize) || Object.keys(rawSize).some((key) => key !== "width" && key !== "height") || !Number.isInteger(rawSize.width) || !Number.isInteger(rawSize.height) || rawSize.width < 0 || rawSize.height < 0 || rawSize.width > 512 || rawSize.height > 512) throw new TypeError("desktopCaptureSources thumbnailSize must be 0-512 integer pixels.");
+  return {{ types, thumbnailSize: {{ width: rawSize.width, height: rawSize.height }} }};
+}}
+function nativeImageBytes(dataUrl) {{
+  if (!dataUrl) return new Uint8Array();
+  const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}}
+function nativeImageCompat(dataUrl, width, height) {{
+  return Object.freeze({{
+    isEmpty() {{ return !dataUrl; }},
+    getSize() {{ return {{ width, height }}; }},
+    getAspectRatio() {{ return height > 0 ? width / height : 1; }},
+    toDataURL() {{ return dataUrl; }},
+    toPNG() {{ return nativeImageBytes(dataUrl); }}
+  }});
+}}
+async function desktopCaptureThumbnail(stream, size) {{
+  if (size.width === 0 || size.height === 0) return nativeImageCompat("", 0, 0);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  try {{
+    await new Promise((resolve, reject) => {{
+      const timeout = window.setTimeout(() => reject(new Error("Screen source thumbnail timed out.")), 3000);
+      video.onloadedmetadata = () => {{ window.clearTimeout(timeout); resolve(); }};
+      video.onerror = () => {{ window.clearTimeout(timeout); reject(new Error("Screen source thumbnail failed.")); }};
+    }});
+    await video.play();
+    await new Promise((resolve) => {{
+      if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(() => resolve());
+      else window.setTimeout(resolve, 80);
+    }});
+    const canvas = document.createElement("canvas");
+    canvas.width = size.width;
+    canvas.height = size.height;
+    const context = canvas.getContext("2d", {{ alpha: false }});
+    if (!context) throw new Error("Screen source thumbnail canvas is unavailable.");
+    context.drawImage(video, 0, 0, size.width, size.height);
+    const dataUrl = canvas.toDataURL("image/png");
+    if (!dataUrl.startsWith("data:image/png;base64,")) throw new Error("Screen source thumbnail is invalid.");
+    return nativeImageCompat(dataUrl, size.width, size.height);
+  }} finally {{
+    video.pause();
+    video.srcObject = null;
+  }}
+}}
+function stopDesktopCaptureSlot() {{
+  const slot = desktopCaptureSlot;
+  desktopCaptureSlot = null;
+  if (!slot) return;
+  window.clearTimeout(slot.timeout);
+  for (const track of slot.stream.getTracks()) track.stop();
+}}
+const mediaDevices = navigator.mediaDevices;
+const originalGetUserMedia = mediaDevices && typeof mediaDevices.getUserMedia === "function" ? mediaDevices.getUserMedia.bind(mediaDevices) : null;
+let legacyDesktopCaptureBridgeAvailable = false;
+if (mediaDevices && originalGetUserMedia) {{
+  try {{
+    Object.defineProperty(mediaDevices, "getUserMedia", {{
+      configurable: true,
+      value(constraints) {{
+        const mandatory = constraints && constraints.video && typeof constraints.video === "object" && constraints.video.mandatory;
+        const sourceId = mandatory && mandatory.chromeMediaSource === "desktop" && mandatory.chromeMediaSourceId;
+        if (typeof sourceId === "string" && desktopCaptureSlot && desktopCaptureSlot.id === sourceId) {{
+          const slot = desktopCaptureSlot;
+          desktopCaptureSlot = null;
+          window.clearTimeout(slot.timeout);
+          if (!constraints.audio) {{
+            for (const track of slot.stream.getAudioTracks()) {{ slot.stream.removeTrack(track); track.stop(); }}
+          }}
+          return Promise.resolve(slot.stream);
+        }}
+        return originalGetUserMedia(constraints);
+      }}
+    }});
+    legacyDesktopCaptureBridgeAvailable = true;
+  }} catch {{ legacyDesktopCaptureBridgeAvailable = false; }}
 }}
 function projectedDbRemoveTarget(target) {{
   if (typeof target === "string") return target;
@@ -1941,6 +2033,49 @@ const utools = Object.freeze({{
       height: Math.round(rect.height * metric.scaleFactor)
     }};
   }},
+  async desktopCaptureSources(value) {{
+    const options = desktopCaptureOptions(value);
+    if (!legacyDesktopCaptureBridgeAvailable || !mediaDevices || typeof mediaDevices.getDisplayMedia !== "function") throw new Error("This WebView does not support the secure display picker compatibility bridge.");
+    stopDesktopCaptureSlot();
+    const focusLeasePromise = call("screenCapture.acquireFocusLease", {{}}).catch(() => null);
+    let stream;
+    try {{
+      const streamPromise = mediaDevices.getDisplayMedia({{ video: true, audio: true }});
+      stream = await streamPromise;
+    }} finally {{
+      const focusLease = await focusLeasePromise;
+      if (focusLease && typeof focusLease.leaseId === "string") await call("screenCapture.releaseFocusLease", {{ leaseId: focusLease.leaseId }}).catch(() => undefined);
+    }}
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {{ for (const track of stream.getTracks()) track.stop(); throw new Error("The selected desktop source has no video track."); }}
+    const settings = typeof videoTrack.getSettings === "function" ? videoTrack.getSettings() : {{}};
+    const sourceKind = settings.displaySurface === "monitor"
+      ? "screen"
+      : settings.displaySurface === "window" || settings.displaySurface === "browser"
+        ? "window"
+        : options.types.length === 1 ? options.types[0] : "screen";
+    if (!options.types.includes(sourceKind)) {{
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error("The selected source type was not requested by desktopCaptureSources.");
+    }}
+    let thumbnail;
+    try {{ thumbnail = await desktopCaptureThumbnail(stream, options.thumbnailSize); }}
+    catch (error) {{ for (const track of stream.getTracks()) track.stop(); throw error; }}
+    const id = sourceKind + ":" + (9000000 + (++desktopCaptureSequence)).toString(10) + ":0";
+    const slot = {{ id, stream, timeout: 0 }};
+    slot.timeout = window.setTimeout(() => {{ if (desktopCaptureSlot === slot) stopDesktopCaptureSlot(); }}, 60000);
+    desktopCaptureSlot = slot;
+    videoTrack.addEventListener("ended", () => {{
+      if (desktopCaptureSlot === slot) {{ window.clearTimeout(slot.timeout); desktopCaptureSlot = null; }}
+    }}, {{ once: true }});
+    return [Object.freeze({{
+      id,
+      name: videoTrack.label || (sourceKind === "screen" ? "Selected Screen" : "Selected Window"),
+      thumbnail,
+      display_id: "",
+      appIcon: null
+    }})];
+  }},
   getWindowType() {{ return currentWindowType; }},
   getNativeId() {{ return config.nativeId; }},
   getPath(name) {{
@@ -1982,7 +2117,7 @@ Promise.all([
   .then(() => call("lifecycle.ready", {{}}))
   .then(() => invoke(readyCallbacks, undefined))
   .catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
-window.addEventListener("pagehide", () => {{ invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
+window.addEventListener("pagehide", () => {{ stopDesktopCaptureSlot(); invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
 }})();
 "#
     )
@@ -2237,6 +2372,10 @@ mod tests {
         assert!(script.contains("screenToDipRect(value)"));
         assert!(script.contains("dipToScreenRect(value)"));
         assert!(script.contains("request.open(\"GET\", syncScreenRoute, false)"));
+        assert!(script.contains("desktopCaptureSources(value)"));
+        assert!(script.contains("mediaDevices.getDisplayMedia"));
+        assert!(script.contains("chromeMediaSourceId"));
+        assert!(script.contains("stopDesktopCaptureSlot()"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("invokePluginDetach"));
         assert!(script.contains("cursorColor.sampleOnce"));

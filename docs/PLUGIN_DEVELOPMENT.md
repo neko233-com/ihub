@@ -191,6 +191,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDisplays/getCursorScreenPoint/getDisplayNearestPoint/getDisplayMatching` 与 `screenToDipPoint/dipToScreenPoint/screenToDipRect/dipToScreenRect`。它们通过当前随机 loopback 租约的只读同步端点取得实时显示器和光标快照，不使用异步 Promise 冒充同步返回。显示器包含 Electron `Display` 的标准形状、DIP bounds/work area、原生像素 origin、有效 DPI scale 与稳定的设备名派生 ID；坐标转换始终选择包含或最近的显示器，并按该显示器缩放相对坐标。端点只接受同源、无请求体的 GET，最多投影 32 个活动显示器，不返回窗口句柄、窗口清单或屏幕像素；未在真机验证的平台明确抛错。
 
+`desktopCaptureSources(options)` 通过 Chromium/WebView2 的系统屏幕选择器兼容旧式录屏调用，而不是静默枚举所有窗口。它验证官方的 `types`、`thumbnailSize`（最大 512 × 512）与 `fetchWindowIcons` 形状，在同一用户手势内启动 `getDisplayMedia({ video: true, audio: true })`，并用活动 focus lease 防止系统选择器夺焦时隐藏启动器。用户只会得到自己选中的一个 source；其 ID 在当前页面内一次有效、60 秒过期，带有内存 PNG thumbnail 和 `NativeImage` 常用只读方法。随后以该 ID 调用旧式 `getUserMedia({ video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId }}})` 会消费已经授权的同一条 `MediaStream`，不会再次枚举或切换来源；未消费、页面退出、重新选择或超时都会停止 tracks。隐藏 runtime 不获得 `display-capture` Permissions Policy，取消系统选择器会按浏览器错误拒绝 Promise。该兼容层不会伪造所有窗口列表、窗口句柄、应用图标或未被用户选择的缩略图。
+
 `copyImage(value)` 当前接受 PNG Data URL 或 PNG `Uint8Array`，同步 `true` 仍只表示本地校验通过并已排队。压缩数据最多 4 MiB，宿主在写入剪贴板前重新验证 PNG 签名、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。字符串文件路径暂不接受，后续只能通过系统选择器签发的路径授权接入，不能直接开放任意本机路径。
 
 `copyFile(value)` 接受一个路径或最多 16 个路径，且只允许当前可见活动 surface 调用。确认前只检查路径字符串的绝对形式、去重、控制字符和 8 KiB 总上限，不访问文件系统，因此拒绝确认不会成为文件存在性探针；原生警告框会逐项展示插件提交的原始目标。用户明确允许后，宿主才解析对象，并拒绝网络/设备命名空间、符号链接、缺失项和非普通文件/文件夹；通过校验的对象会保持身份防护直到写入系统剪贴板。该确认与通知、系统提示音共用每插件每 10 秒 5 次的可见提醒限流，避免插件连续弹窗。

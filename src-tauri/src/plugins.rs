@@ -1880,7 +1880,8 @@ impl PluginManager {
             asset_root,
             entry: frontend_path,
             blocked_asset_paths,
-            allows_display_capture: manifest.permissions.screen_capture,
+            allows_display_capture: manifest.permissions.screen_capture
+                || manifest.compatibility.is_utools(),
             allows_microphone: manifest.permissions.microphone,
             allows_remote_network: manifest
                 .permissions
@@ -1994,7 +1995,7 @@ impl PluginManager {
                 .as_ref()
                 .is_some_and(|clipboard| clipboard.history),
             "screenCapture.acquireFocusLease" | "screenCapture.releaseFocusLease" => {
-                manifest.permissions.screen_capture
+                manifest.permissions.screen_capture || manifest.compatibility.is_utools()
             }
             "compatibility.utools.screen.capture" => {
                 // The compatibility call never receives native pixels
@@ -4822,6 +4823,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.screenCapture.confirmedCrop".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.desktopCaptureSources.systemPicker".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5370,6 +5374,7 @@ mod tests {
             installed.canonicalize().expect("fixture root")
         );
         assert!(bundle.utools_compat.is_some());
+        assert!(bundle.allows_display_capture);
         assert_eq!(bundle.blocked_asset_paths.len(), 1);
         assert!(manager
             .uses_utools_compatibility(&plugin_id)
@@ -5380,6 +5385,9 @@ mod tests {
         assert!(manager
             .allows_host_method(&plugin_id, "compatibility.utools.screen.capture")
             .expect("screenCapture should be host-confirmed for a compatible package"));
+        assert!(manager
+            .allows_host_method(&plugin_id, "screenCapture.acquireFocusLease")
+            .expect("desktopCaptureSources should protect the system picker focus"));
         assert!(!manager
             .allows_host_method(&plugin_id, "clipboard.readText")
             .expect("uTools compatibility must not grant clipboard read"));
