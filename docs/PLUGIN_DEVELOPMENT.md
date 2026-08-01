@@ -172,7 +172,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 | `cursorColor.sampleOnce` | `cursorColor: true` | 仅当前可见插件页可请求。iHub 宿主必须先由用户确认，再固定等待 2 秒读取光标下一个像素；只返回 `hex`/`rgb`，不返回坐标、截图、显示器/窗口信息，也不支持后台轮询。 |
 | `launcherContext.consume` | `launcherContext.text/files/image` | 仅在用户明确选择一次已声明的前端插件命令后，按该次动作签发的不透明 `contextId` 可消费一次。文本有上限；文件只有 canonical 名称/类型/大小与无路径 handle；图片只有 PNG 元数据与无像素 handle。不会读取剪贴板、解析路径或变成文件授权。 |
 | `windowManagement.manageLauncher` | `windowManagement: true` | 仅对 iHub 标签为 `main` 的主启动器执行固定动作：居中、贴靠左侧、贴靠右侧或切换置顶。不会读取、枚举、聚焦或控制其他应用窗口，也不接受任意坐标。 |
-| `notifications.show` | `notifications` | 显示本机通知。 |
+| `notifications.show` | `notifications` | 通过原生系统通道显示本机通知；宿主固定标出插件 ID 来源，并限制为每插件每 10 秒最多 5 条。 |
 | `shell.openExternal/openPath` | `shell.*` | 打开 URL 或文件路径。 |
 | `filesystem.selectDirectory` | `filesystem.read: ["user-selected"]` | 打开原生文件夹选择器，返回当前插件专属、15 分钟过期的 `grantId`。 |
 | `filesystem.selectFiles` | `filesystem.read: ["user-selected"]` | 打开原生多文件选择器；网页只获得文件名/大小与短期 `grantId`，不会获得本地路径。 |
@@ -184,7 +184,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `bootstrapPlugin` 运行期间还会安装一个冻结的最小兼容对象，并让 `window.utools === window.rubick`。兼容对象提供 `setSubInput`、`removeSubInput`、`setSubInputValue`，以及映射到上表既有权限检查的 `copyText`、`showNotification`、`shellOpenExternal`、`shellOpenPath`、`screenColorPick`；另有只读的主题、平台和 `"main"` 窗口类型查询。同步 `boolean` 返回值只表示参数已通过 SDK 本地校验且异步宿主请求已排队，真正的权限或租约拒绝仍写入 `BootstrapOptions.onError`。兼容层不会覆盖页面已有的同名全局，并在 runtime dispose 时恢复原值。
 
-直接导入的公开 uTools 包使用另一套宿主固定注入层：除 ready/enter/out、`dbStorage` 和逐次确认取色外，还提供官方签名一致的 `setSubInput`、`removeSubInput`、`setSubInputValue`、`subInputFocus/Blur/Select`，以及仅限当前可见活动 surface 的 `hideMainWindow`、`showMainWindow`、`outPlugin` 和 `setExpendHeight`。高度请求只接受 100–900 的整数内容像素；iHub 可信标题栏另占 60 像素，切换插件会恢复默认内容高度。窗口请求先经过原生侧“已验证 uTools 包 + 活动租约”复核，响应成功后才由可信 React 父层隐藏/显示 iHub、调整主窗口高度或退出当前插件。`getAppName/getAppVersion` 返回 iHub 的真实产品信息，未接入 uTools 账号体系时 `getUser()` 明确返回 `null`。
+直接导入的公开 uTools 包使用另一套宿主固定注入层：除 ready/enter/out、`dbStorage` 和逐次确认取色外，还提供单参数 `showNotification(body)`、官方签名一致的 `setSubInput`、`removeSubInput`、`setSubInputValue`、`subInputFocus/Blur/Select`，以及仅限当前可见活动 surface 的 `hideMainWindow`、`showMainWindow`、`outPlugin` 和 `setExpendHeight`。兼容通知正文最多 1000 字符，并与 SDK 通知共用每插件每 10 秒 5 条的原生限流；`clickFeatureCode` 尚未接入，因此传入时明确拒绝。高度请求只接受 100–900 的整数内容像素；iHub 可信标题栏另占 60 像素，切换插件会恢复默认内容高度。窗口请求先经过原生侧“已验证 uTools 包 + 活动租约”复核，响应成功后才由可信 React 父层隐藏/显示 iHub、调整主窗口高度或退出当前插件。`getAppName/getAppVersion` 返回 iHub 的真实产品信息，未接入 uTools 账号体系时 `getUser()` 明确返回 `null`。
 
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、数据库、未授权本机路径、键鼠模拟、屏幕或其他窗口枚举。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 

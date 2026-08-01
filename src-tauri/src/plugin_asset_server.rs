@@ -1096,6 +1096,17 @@ const utools = Object.freeze({{
     void navigator.clipboard.writeText(value).catch((error) => console.error("iHub compatibility clipboard write failed", error));
     return true;
   }},
+  showNotification(body, clickFeatureCode) {{
+    if (typeof body !== "string") return;
+    const trimmedBody = body.trim();
+    if (trimmedBody.length === 0 || Array.from(trimmedBody).length > 1000) return;
+    if (clickFeatureCode !== undefined) {{
+      console.error("iHub compatibility notification click routing is not supported yet.");
+      return;
+    }}
+    void call("compatibility.utools.notification.show", {{ body: trimmedBody }})
+      .catch((error) => console.error("iHub compatibility notification failed", error));
+  }},
   screenColorPick(callback) {{
     if (typeof callback !== "function") return;
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
@@ -1255,6 +1266,9 @@ mod tests {
         assert!(script.contains("Object.defineProperties(window"));
         assert!(script.contains("rubick"));
         assert!(script.contains("copyText"));
+        assert!(script.contains("showNotification"));
+        assert!(script.contains("Array.from(trimmedBody).length > 1000"));
+        assert!(script.contains("compatibility.utools.notification.show"));
         assert!(script.contains("screenColorPick"));
         assert!(script.contains("cursorColor.sampleOnce"));
         assert!(script.contains("dbStorage"));

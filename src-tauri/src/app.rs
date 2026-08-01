@@ -23,6 +23,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
 
 use crate::{
@@ -745,6 +746,10 @@ struct PluginHostState {
     /// denial of service. Keep one small fixed-window counter per active
     /// plugin and aggregate drops without retaining message text.
     plugin_log_windows: Mutex<HashMap<String, PluginLogWindow>>,
+    /// Native notifications are visible outside the plugin surface. Bound
+    /// each plugin to a small fixed window so a broken or hostile iframe
+    /// cannot flood Windows Action Center after receiving permission.
+    plugin_notification_windows: Mutex<HashMap<String, PluginNotificationWindow>>,
 }
 
 impl Default for PluginHostState {
@@ -764,6 +769,7 @@ impl Default for PluginHostState {
             cursor_color_sampled_at: Mutex::new(HashMap::new()),
             cursor_color_approvals: Mutex::new(HashMap::new()),
             plugin_log_windows: Mutex::new(HashMap::new()),
+            plugin_notification_windows: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -914,6 +920,12 @@ struct PluginLogWindow {
     started_at: Instant,
     accepted: usize,
     dropped: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PluginNotificationWindow {
+    started_at: Instant,
+    accepted: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,6 +1116,52 @@ impl PluginHostState {
         }
     }
 
+    fn admit_plugin_notification(&self, plugin_id: &str) -> bool {
+        self.admit_plugin_notification_at(plugin_id, Instant::now())
+    }
+
+    fn admit_plugin_notification_at(&self, plugin_id: &str, now: Instant) -> bool {
+        let mut windows = self
+            .plugin_notification_windows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        windows.retain(|_, window| {
+            now.checked_duration_since(window.started_at)
+                .unwrap_or_default()
+                < PLUGIN_NOTIFICATION_WINDOW_RETENTION
+        });
+        if let Some(window) = windows.get_mut(plugin_id) {
+            if now
+                .checked_duration_since(window.started_at)
+                .unwrap_or_default()
+                >= PLUGIN_NOTIFICATION_WINDOW
+            {
+                *window = PluginNotificationWindow {
+                    started_at: now,
+                    accepted: 1,
+                };
+                return true;
+            }
+            if window.accepted >= MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW {
+                return false;
+            }
+            window.accepted += 1;
+            return true;
+        }
+
+        windows.insert(
+            plugin_id.to_owned(),
+            PluginNotificationWindow {
+                started_at: now,
+                accepted: 1,
+            },
+        );
+        trim_oldest_records(&mut windows, MAX_PLUGIN_NOTIFICATION_WINDOWS, |window| {
+            window.started_at
+        });
+        true
+    }
+
     /// Reserves one fixed-delay cursor sample for a plugin. The reservation is
     /// made before the native call so concurrent iframe messages cannot race
     /// into a high-frequency cursor/screen sampling loop.
@@ -1264,6 +1322,12 @@ const MAX_PLUGIN_LOGS_PER_WINDOW: usize = 32;
 const MAX_PLUGIN_LOG_WINDOWS: usize = 128;
 const PLUGIN_LOG_WINDOW: Duration = Duration::from_secs(10);
 const PLUGIN_LOG_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
+const MAX_PLUGIN_NOTIFICATION_TITLE_CHARS: usize = 120;
+const MAX_PLUGIN_NOTIFICATION_BODY_CHARS: usize = 1_000;
+const MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW: usize = 5;
+const MAX_PLUGIN_NOTIFICATION_WINDOWS: usize = 128;
+const PLUGIN_NOTIFICATION_WINDOW: Duration = Duration::from_secs(10);
+const PLUGIN_NOTIFICATION_WINDOW_RETENTION: Duration = Duration::from_secs(5 * 60);
 
 /// The plugin-facing projection deliberately strips the cursor coordinates
 /// from the trusted Toolbox result. A plugin receives a color value only;
@@ -3909,19 +3973,112 @@ fn plugin_host_call_for_active_lease(
         // a real allow-list executor rather than an acknowledgement-only API.
         "log" => handle_plugin_log_call(&request, state),
         "notifications.show" => {
-            let event_name = format!("ihub://plugin/{}/host-call", request.plugin_id);
-            app.emit(
-                &event_name,
-                json!({ "method": request.method, "params": request.params }),
-            )
-            .map_err(|error| format!("Could not forward plugin host call: {error}"))?;
-            Ok(json!({ "accepted": true }))
+            show_plugin_notification(app, &request, state, false)
+        }
+        "compatibility.utools.notification.show" => {
+            show_plugin_notification(app, &request, state, true)
         }
         _ => Err(format!(
             "Unsupported plugin host method '{}'.",
             request.method
         )),
     }
+}
+
+fn show_plugin_notification(
+    app: &AppHandle,
+    request: &PluginHostRequest,
+    state: &AppState,
+    compatibility_body_only: bool,
+) -> Result<Value, String> {
+    let body = plugin_notification_body(&request.params, compatibility_body_only)?;
+    if !state.host.admit_plugin_notification(&request.plugin_id) {
+        return Err(format!(
+            "Plugin notifications are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+            PLUGIN_NOTIFICATION_WINDOW.as_secs()
+        ));
+    }
+    app.notification()
+        .builder()
+        .title(format!("iHub · {}", request.plugin_id))
+        .body(body)
+        .show()
+        .map_err(|error| format!("Could not show the system notification: {error}"))?;
+    Ok(json!({ "accepted": true }))
+}
+
+fn plugin_notification_body(
+    params: &Value,
+    compatibility_body_only: bool,
+) -> Result<String, String> {
+    let Some(object) = params.as_object() else {
+        return Err("Plugin notification parameters must be an object.".to_owned());
+    };
+    let allowed_keys: &[&str] = if compatibility_body_only {
+        &["body"]
+    } else {
+        &["title", "body", "level"]
+    };
+    if object
+        .keys()
+        .any(|key| !allowed_keys.contains(&key.as_str()))
+    {
+        return Err("Plugin notification parameters contain unsupported fields.".to_owned());
+    }
+
+    if compatibility_body_only {
+        let body = required_string(params, "body")?.trim();
+        validate_plugin_notification_text(body, "body", MAX_PLUGIN_NOTIFICATION_BODY_CHARS)?;
+        return Ok(body.to_owned());
+    }
+
+    let title = required_string(params, "title")?.trim();
+    validate_plugin_notification_text(title, "title", MAX_PLUGIN_NOTIFICATION_TITLE_CHARS)?;
+    let body = match params.get("body") {
+        None => None,
+        Some(Value::String(body)) => {
+            let body = body.trim();
+            if body.is_empty() {
+                None
+            } else {
+                validate_plugin_notification_text(
+                    body,
+                    "body",
+                    MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
+                )?;
+                Some(body)
+            }
+        }
+        Some(_) => return Err("Plugin notification body must be a string.".to_owned()),
+    };
+    if let Some(level) = params.get("level") {
+        let Some(level) = level.as_str() else {
+            return Err("Plugin notification level must be a string.".to_owned());
+        };
+        if !matches!(level, "info" | "success" | "warning" | "error") {
+            return Err("Plugin notification level is unsupported.".to_owned());
+        }
+    }
+    Ok(match body {
+        Some(body) => format!("{title}\n{body}"),
+        None => title.to_owned(),
+    })
+}
+
+fn validate_plugin_notification_text(
+    value: &str,
+    field: &str,
+    max_chars: usize,
+) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("Plugin notification {field} must not be empty."));
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!(
+            "Plugin notification {field} exceeds the {max_chars}-character limit."
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_plugin_host_request_is_allowed(
@@ -5525,6 +5682,7 @@ pub fn run() {
             show_launcher(app);
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--ihub-autostart"]),
@@ -6650,8 +6808,9 @@ mod tests {
         issue_file_grant, issue_filesystem_grant, issue_plugin_launcher_context_transfer,
         launcher_visibility_action, native_plugin_command_input, normalize_plugin_search_results,
         normalized_host_target, optional_u32, optional_u8, physical_point_in_monitor,
-        plugin_clipboard_history_snapshot, plugin_search_providers_changed_payload,
-        prepare_directory_for_grant, renderer_display_path, resolve_issued_plugin_search_selection,
+        plugin_clipboard_history_snapshot, plugin_notification_body,
+        plugin_search_providers_changed_payload, prepare_directory_for_grant,
+        renderer_display_path, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
@@ -6666,8 +6825,9 @@ mod tests {
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
         MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_LOGS_PER_WINDOW,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_SEARCH_SELECTION_TTL,
-        TEMPORARY_PATH_OPEN_TTL,
+        MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_NOTIFICATION_WINDOW,
+        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
     #[test]
@@ -8728,6 +8888,65 @@ mod tests {
             PluginLogAdmission::Accept {
                 previously_dropped: 3
             }
+        );
+    }
+
+    #[test]
+    fn plugin_notifications_are_bounded_and_source_safe() {
+        assert_eq!(
+            plugin_notification_body(
+                &json!({ "title": "Build complete", "body": "12 files", "level": "success" }),
+                false,
+            )
+            .expect("valid SDK notification"),
+            "Build complete\n12 files"
+        );
+        assert_eq!(
+            plugin_notification_body(&json!({ "title": "Build complete", "body": "  " }), false)
+                .expect("blank optional body is omitted"),
+            "Build complete"
+        );
+        assert_eq!(
+            plugin_notification_body(&json!({ "body": "兼容通知" }), true)
+                .expect("valid compatibility notification"),
+            "兼容通知"
+        );
+
+        for params in [
+            json!({}),
+            json!({ "title": "" }),
+            json!({ "title": 7 }),
+            json!({ "title": "ok", "body": 7 }),
+            json!({ "title": "ok", "level": "critical" }),
+            json!({ "title": "ok", "action": "spoof" }),
+        ] {
+            assert!(plugin_notification_body(&params, false).is_err());
+        }
+        assert!(plugin_notification_body(
+            &json!({ "body": "x".repeat(MAX_PLUGIN_NOTIFICATION_BODY_CHARS + 1) }),
+            true,
+        )
+        .is_err());
+        assert!(plugin_notification_body(
+            &json!({ "body": "ok", "clickFeatureCode": "unsafe" }),
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn plugin_notifications_remain_rate_limited_across_runtime_disposal() {
+        let host = PluginHostState::default();
+        let plugin_id = "bounded-notifier";
+        let started_at = Instant::now();
+        for _ in 0..MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW {
+            assert!(host.admit_plugin_notification_at(plugin_id, started_at));
+        }
+        assert!(!host.admit_plugin_notification_at(plugin_id, started_at));
+        clear_plugin_runtime_state(&host, plugin_id);
+        assert!(!host.admit_plugin_notification_at(plugin_id, started_at));
+        assert!(
+            host.admit_plugin_notification_at(plugin_id, started_at + PLUGIN_NOTIFICATION_WINDOW,)
         );
     }
 
