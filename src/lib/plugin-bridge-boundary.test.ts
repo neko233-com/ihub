@@ -68,6 +68,10 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.system.readCurrentBrowserUrl", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.outPlugin", { isKill: false })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.redirect", {
+      label: ["Translate", "翻译"],
+      action: { type: "text", payload: "hello" },
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call(), "com.example.safe").ok).toBe(true);
     expect(validatePluginBridgeCall(call(), "com.example.other").ok).toBe(false);
     expect(validatePluginBridgeCall(call("process.spawn")).ok).toBe(false);
@@ -94,6 +98,18 @@ describe("plugin iframe Bridge boundary", () => {
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "data:image/jpeg;base64,/9j/",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.redirect", {
+      label: "OCR",
+      action: { type: "img", payload: boundedImage },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.redirect", {
+      label: "OCR",
+      action: { type: "img", payload: `${boundedImage}A` },
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.redirect", {
+      label: [],
+      action: { type: "files", payload: [] },
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("log", {
       message: "A".repeat(PLUGIN_BRIDGE_MAX_JSON_BYTES),
@@ -123,6 +139,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.db.allDocs")).toBe(false);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.postAttachment")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.input.pasteImage")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.window.redirect")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",
       dataBase64: "c2FmZQ==",

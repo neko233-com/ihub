@@ -81,7 +81,10 @@ import {
   onPluginShortcutsChanged,
   onSuperPanel,
   onTrayNavigation,
+  onUtoolsRedirect,
   readHostLog,
+  type UtoolsRedirectAction,
+  type UtoolsRedirectEventPayload,
 } from "./lib/desktop";
 import {
   browserHostLogSnapshot,
@@ -831,7 +834,11 @@ function toolboxTabForCommand(commandId?: string): ToolboxTab | null {
   return builtinTools.find((tool) => tool.commandId === commandId)?.tab ?? null;
 }
 
-function createFrontendCommandEvent(pluginId: string, commandId: string): PluginFrontendEvent {
+function createFrontendCommandEvent(
+  pluginId: string,
+  commandId: string,
+  utoolsAction?: UtoolsRedirectAction,
+): PluginFrontendEvent {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -847,6 +854,7 @@ function createFrontendCommandEvent(pluginId: string, commandId: string): Plugin
       commandId,
       input: null,
       context: null,
+      ...(utoolsAction ? { utoolsAction } : {}),
     },
   };
 }
@@ -1129,6 +1137,7 @@ export function App() {
   const [pluginExpendHeight, setPluginExpendHeight] = useState<number | null>(null);
   const [pendingPluginEvent, setPendingPluginEvent] = useState<PluginFrontendEvent | null>(null);
   const [pendingPluginShortcut, setPendingPluginShortcut] = useState<PluginGlobalShortcutEvent | null>(null);
+  const [pendingUtoolsRedirect, setPendingUtoolsRedirect] = useState<UtoolsRedirectEventPayload | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -1955,6 +1964,11 @@ export function App() {
           setPendingPluginShortcut(payload);
         }
       }),
+      onUtoolsRedirect((payload) => {
+        if (!disposed) {
+          setPendingUtoolsRedirect(payload);
+        }
+      }),
       onPluginShortcutsChanged(() => {
         if (!disposed) {
           void refreshPlugins();
@@ -2680,6 +2694,7 @@ export function App() {
             setPastedImage(null);
             setActivePlugin(null);
             setPendingPluginEvent(null);
+            setPendingUtoolsRedirect(null);
             setSurface("launcher");
           }
           // A visible-but-unfocused launcher keeps its current query/plugin/
@@ -2693,6 +2708,7 @@ export function App() {
           setPastedImage(null);
           setActivePlugin(null);
           setPendingPluginEvent(null);
+          setPendingUtoolsRedirect(null);
           setSurface("hidden");
         });
       } catch {
@@ -3142,6 +3158,7 @@ export function App() {
     setQuery("");
     setPastedFileResults([]);
     setPastedImage(null);
+    setPendingUtoolsRedirect(null);
     setToolboxLaunchContext(null);
     setPluginCenterInitialSearch(null);
     setSurface("hidden");
@@ -3468,6 +3485,33 @@ export function App() {
       }
     };
 
+    if (pendingUtoolsRedirect) {
+      const candidate = pendingUtoolsRedirect.candidates.find((target) => (
+        target.pluginId === result.pluginId && target.commandId === result.commandId
+      ));
+      setPendingUtoolsRedirect(null);
+      if (candidate) {
+        const plugin = plugins.find((item) => item.id === candidate.pluginId && item.enabled !== false);
+        const commandInfo = Array.isArray(plugin?.commands)
+          ? plugin.commands.find((item) => item.id === candidate.commandId)
+          : undefined;
+        if (!plugin?.frontendEntry || !commandInfo) {
+          showToast("跳转目标已停用、移除或更新；未向其他插件发送内容。");
+          return;
+        }
+        invalidateLauncherContextHandoff();
+        setPendingPluginEvent(createFrontendCommandEvent(
+          plugin.id,
+          commandInfo.id,
+          pendingUtoolsRedirect.action,
+        ));
+        setActivePlugin(plugin);
+        setSurface("plugin");
+        recordSuccessfulAction();
+        return;
+      }
+    }
+
     if (result.commandId === "ihub.index.default") {
       await refreshIndex();
       return;
@@ -3628,6 +3672,42 @@ export function App() {
       showToast(error instanceof Error ? error.message : "无法执行该项目。");
     }
   };
+
+  useEffect(() => {
+    if (!pendingUtoolsRedirect) {
+      return;
+    }
+    const liveCandidates = pendingUtoolsRedirect.candidates.filter((candidate) => {
+      const plugin = plugins.find((item) => item.id === candidate.pluginId && item.enabled !== false);
+      return Boolean(
+        plugin?.frontendEntry
+        && Array.isArray(plugin.commands)
+        && plugin.commands.some((commandInfo) => commandInfo.id === candidate.commandId),
+      );
+    });
+    if (liveCandidates.length === 0) {
+      setPendingUtoolsRedirect(null);
+      showToast("跳转目标已停用、移除或更新；未向其他插件发送内容。");
+      return;
+    }
+    if (liveCandidates.length === 1) {
+      const candidate = liveCandidates[0]!;
+      void activateResult({
+        id: `utools-redirect:${candidate.pluginId}:${candidate.commandId}`,
+        name: candidate.commandName,
+        kind: "plugin",
+        score: 1_000,
+        metadata: candidate.pluginName,
+        pluginId: candidate.pluginId,
+        commandId: candidate.commandId,
+      });
+      return;
+    }
+    setQuery(pendingUtoolsRedirect.label);
+    setSurface("launcher");
+    setLauncherFocusSignal((current) => current + 1);
+    showToast(`找到 ${liveCandidates.length} 个“${pendingUtoolsRedirect.label}”目标，请选择要打开的插件。`);
+  }, [pendingUtoolsRedirect]);
 
   useEffect(() => {
     if (!pendingPluginShortcut) {

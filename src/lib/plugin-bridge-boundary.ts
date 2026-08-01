@@ -67,6 +67,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.system.readCurrentFolderPath",
   "compatibility.utools.window.hideMain",
   "compatibility.utools.window.outPlugin",
+  "compatibility.utools.window.redirect",
   "compatibility.utools.window.setHeight",
   "compatibility.utools.window.showMain",
   "cursorColor.sampleOnce",
@@ -277,6 +278,7 @@ export function validatePluginBridgeCall(
     || method === "compatibility.utools.db.bulkDocs";
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
+  const isUtoolsRedirect = method === "compatibility.utools.window.redirect";
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
     if (!params || !hasOnlyKeys(params, new Set())) {
@@ -353,8 +355,55 @@ export function validatePluginBridgeCall(
       };
     }
   }
+  if (isUtoolsRedirect) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const label = params?.label;
+    const action = isPlainRecord(params?.action) ? params.action : null;
+    const labelParts = typeof label === "string"
+      ? [label]
+      : Array.isArray(label) && label.length === 2 && label.every((part) => typeof part === "string")
+        ? label
+        : null;
+    const kind = action?.type;
+    const payload = action?.payload;
+    const validLabel = labelParts !== null && labelParts.every((part) => (
+      typeof part === "string"
+      && part.length > 0
+      && part.length <= 1_024
+      && [...part].length <= 160
+      && ![...part].some((character) => character < " " || character === "\u007f")
+    ));
+    const validPayload = kind === "text"
+      ? typeof payload === "string"
+        && new TextEncoder().encode(payload).byteLength <= 48 * 1_024
+        && !payload.includes("\0")
+      : kind === "img"
+        ? typeof payload === "string"
+          && payload.startsWith("data:image/png;base64,iVBORw0KGgo")
+          && payload.length <= PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS
+        : kind === "files"
+          ? Array.isArray(payload)
+            && payload.length >= 1
+            && payload.length <= 16
+            && payload.every((path) => typeof path === "string" && path.length > 0 && path.length <= 8_192)
+          : false;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["label", "action"]))
+      || !action
+      || !hasOnlyKeys(action, new Set(["type", "payload"]))
+      || !validLabel
+      || !validPayload
+    ) {
+      return {
+        ok: false,
+        error: "uTools redirect requires one bounded label and text, PNG, or file payload.",
+        responseId,
+      };
+    }
+  }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
-  if (isImageCopy) {
+  if (isImageCopy || isUtoolsRedirect) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
   } else if (isDbWrite) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_JSON_BYTES;
@@ -413,6 +462,7 @@ export class PluginBridgeInFlightGate {
 export function isLargePluginBridgeMethod(method: string): boolean {
   return method === "compatibility.utools.clipboard.writeImage"
     || method === "compatibility.utools.input.pasteImage"
+    || method === "compatibility.utools.window.redirect"
     || method === "compatibility.utools.db.put"
     || method === "compatibility.utools.db.bulkDocs"
     || method === "compatibility.utools.db.postAttachment";

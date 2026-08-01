@@ -4471,6 +4471,15 @@ fn plugin_host_call_for_active_lease(
             }
             Ok(json!(true))
         }
+        "compatibility.utools.window.redirect" => {
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Interactive uTools navigation is limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} requests every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            dispatch_utools_redirect(app, state, &request.plugin_id, &request.params)
+        }
         "lifecycle.ready" => Ok(json!({ "ok": true })),
         "lifecycle.dispose" => {
             clear_plugin_runtime_state(&state.host, &request.plugin_id);
@@ -5003,6 +5012,226 @@ fn dispatch_utools_notification_click(app: &AppHandle, plugin_id: &str, feature_
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UtoolsRedirectCandidate {
+    plugin_id: String,
+    command_id: String,
+    plugin_name: String,
+    command_name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UtoolsRedirectAction {
+    #[serde(rename = "type")]
+    kind: String,
+    payload: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UtoolsRedirectEvent {
+    source_plugin_id: String,
+    label: String,
+    candidates: Vec<UtoolsRedirectCandidate>,
+    action: UtoolsRedirectAction,
+}
+
+fn bounded_utools_redirect_label(value: &Value, field: &str) -> Result<String, String> {
+    let label = value
+        .as_str()
+        .ok_or_else(|| format!("uTools redirect {field} must be a string."))?
+        .trim();
+    if label.is_empty()
+        || label.chars().count() > 160
+        || label.len() > 1024
+        || label.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "uTools redirect {field} must contain 1-160 non-control characters."
+        ));
+    }
+    Ok(label.to_owned())
+}
+
+fn validate_utools_redirect_request(
+    params: &Value,
+) -> Result<(Option<String>, String, UtoolsRedirectAction), String> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| "uTools redirect parameters must be an object.".to_owned())?;
+    if object.len() != 2 || !object.contains_key("label") || !object.contains_key("action") {
+        return Err("uTools redirect accepts exactly label and action.".to_owned());
+    }
+    let (plugin_name, command_label) = match object.get("label") {
+        Some(Value::String(_)) => (
+            None,
+            bounded_utools_redirect_label(&object["label"], "label")?,
+        ),
+        Some(Value::Array(labels)) if labels.len() == 2 => (
+            Some(bounded_utools_redirect_label(&labels[0], "plugin name")?),
+            bounded_utools_redirect_label(&labels[1], "command label")?,
+        ),
+        _ => {
+            return Err("uTools redirect label must be a string or a two-string array.".to_owned())
+        }
+    };
+    let action = object
+        .get("action")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "uTools redirect action must be an object.".to_owned())?;
+    if action.len() != 2 || !action.contains_key("type") || !action.contains_key("payload") {
+        return Err("uTools redirect action accepts exactly type and payload.".to_owned());
+    }
+    let kind = action
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "uTools redirect action type must be a string.".to_owned())?;
+    let payload = match kind {
+        "text" => {
+            let text = action
+                .get("payload")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "uTools redirect text payload must be a string.".to_owned())?;
+            if text.len() > MAX_PLUGIN_CLIPBOARD_TEXT_BYTES || text.contains('\0') {
+                return Err(format!(
+                    "uTools redirect text is limited to {MAX_PLUGIN_CLIPBOARD_TEXT_BYTES} UTF-8 bytes and cannot contain NUL."
+                ));
+            }
+            Value::String(text.to_owned())
+        }
+        "img" => {
+            let data_url = action
+                .get("payload")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "uTools redirect image payload must be a PNG Data URL.".to_owned()
+                })?;
+            let _ = decode_utools_clipboard_png_data_url(data_url)?;
+            Value::String(data_url.to_owned())
+        }
+        "files" => {
+            let values = action
+                .get("payload")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "uTools redirect files payload must be an array.".to_owned())?;
+            let paths = validate_utools_copy_file_paths(&json!({ "paths": values }))?;
+            Value::Array(
+                paths
+                    .into_iter()
+                    .map(|path| Value::String(path.to_string_lossy().into_owned()))
+                    .collect(),
+            )
+        }
+        _ => return Err("uTools redirect action type must be text, img, or files.".to_owned()),
+    };
+    Ok((
+        plugin_name,
+        command_label,
+        UtoolsRedirectAction {
+            kind: kind.to_owned(),
+            payload,
+        },
+    ))
+}
+
+fn resolve_utools_redirect_candidates(
+    plugins: &PluginManager,
+    settings: &PluginSettingsStore,
+    plugin_name: Option<&str>,
+    command_label: &str,
+) -> Result<Vec<UtoolsRedirectCandidate>, String> {
+    const MAX_REDIRECT_CANDIDATES: usize = 32;
+    let mut plugin_infos = plugins.list();
+    project_utools_dynamic_features(plugins, settings, &mut plugin_infos);
+    let mut candidates = Vec::new();
+    for plugin in plugin_infos {
+        if !plugin.enabled
+            || !plugins
+                .uses_utools_compatibility(&plugin.id)
+                .unwrap_or(false)
+            || plugin_name.is_some_and(|expected| !plugin.name.eq_ignore_ascii_case(expected))
+        {
+            continue;
+        }
+        for command in plugin.commands {
+            let matches_label = command.name.eq_ignore_ascii_case(command_label)
+                || command
+                    .keywords
+                    .iter()
+                    .any(|keyword| keyword.eq_ignore_ascii_case(command_label));
+            if !matches_label {
+                continue;
+            }
+            if candidates.len() >= MAX_REDIRECT_CANDIDATES {
+                return Err(format!(
+                    "uTools redirect matched more than {MAX_REDIRECT_CANDIDATES} installed commands."
+                ));
+            }
+            candidates.push(UtoolsRedirectCandidate {
+                plugin_id: plugin.id.clone(),
+                command_id: command.id,
+                plugin_name: plugin.name.clone(),
+                command_name: command.name,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.plugin_name
+            .to_lowercase()
+            .cmp(&right.plugin_name.to_lowercase())
+            .then_with(|| {
+                left.command_name
+                    .to_lowercase()
+                    .cmp(&right.command_name.to_lowercase())
+            })
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+            .then_with(|| left.command_id.cmp(&right.command_id))
+    });
+    if candidates.is_empty() {
+        return Err(match plugin_name {
+            Some(plugin_name) => format!(
+                "No enabled uTools-compatible command named '{command_label}' exists in plugin '{plugin_name}'."
+            ),
+            None => format!(
+                "No enabled uTools-compatible command named '{command_label}' is installed."
+            ),
+        });
+    }
+    Ok(candidates)
+}
+
+fn dispatch_utools_redirect(
+    app: &AppHandle,
+    state: &AppState,
+    source_plugin_id: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    if !state.plugins.uses_utools_compatibility(source_plugin_id)? {
+        return Err("uTools redirect requires a verified uTools source package.".to_owned());
+    }
+    let (plugin_name, command_label, action) = validate_utools_redirect_request(params)?;
+    let candidates = resolve_utools_redirect_candidates(
+        &state.plugins,
+        &state.plugin_settings,
+        plugin_name.as_deref(),
+        &command_label,
+    )?;
+    show_launcher(app);
+    app.emit_to(
+        "main",
+        "ihub://utools-redirect",
+        UtoolsRedirectEvent {
+            source_plugin_id: source_plugin_id.to_owned(),
+            label: command_label,
+            candidates,
+            action,
+        },
+    )
+    .map_err(|error| format!("Could not route the uTools plugin redirect: {error}"))?;
+    Ok(json!(true))
+}
+
 fn plugin_notification_body(
     params: &Value,
     compatibility_body_only: bool,
@@ -5105,6 +5334,7 @@ fn ensure_plugin_host_request_is_allowed(
             .starts_with("compatibility.utools.shell.showItemInFolder")
         || request.method == "compatibility.utools.system.readCurrentFolderPath"
         || request.method == "compatibility.utools.system.readCurrentBrowserUrl"
+        || request.method == "compatibility.utools.window.redirect"
         || request.method == "compatibility.utools.clipboard.writeFiles")
         && !request.surface
     {
@@ -8460,12 +8690,13 @@ mod tests {
         validate_system_icon_request, validate_utools_copy_file_paths,
         validate_utools_dialog_options, validate_utools_dynamic_feature,
         validate_utools_expend_height, validate_utools_input_text,
-        validate_utools_shell_local_path, validate_utools_window_request_params, CaptureFocusLease,
-        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
-        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
-        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
-        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_utools_redirect_request, validate_utools_shell_local_path,
+        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
+        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
+        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
+        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -8574,6 +8805,39 @@ mod tests {
             json!({ "unknown": true }),
         ] {
             assert!(validate_utools_dialog_options("open", value).is_err());
+        }
+    }
+
+    #[test]
+    fn utools_redirect_accepts_only_bounded_typed_handoffs() {
+        let (_, label, action) = validate_utools_redirect_request(&json!({
+            "label": ["Translate", "翻译"],
+            "action": { "type": "text", "payload": "hello" }
+        }))
+        .expect("bounded text redirect");
+        assert_eq!(label, "翻译");
+        assert_eq!(action.kind, "text");
+        assert_eq!(action.payload, "hello");
+
+        let file = std::env::temp_dir().join("ihub-utools-redirect.txt");
+        let (_, _, action) = validate_utools_redirect_request(&json!({
+            "label": "Open file",
+            "action": {
+                "type": "files",
+                "payload": [file.to_string_lossy()]
+            }
+        }))
+        .expect("lexically bounded file redirect");
+        assert_eq!(action.kind, "files");
+
+        for value in [
+            json!({ "label": [], "action": { "type": "text", "payload": "x" } }),
+            json!({ "label": "Open", "action": { "type": "unknown", "payload": "x" } }),
+            json!({ "label": "Open", "action": { "type": "text", "payload": "x", "extra": true } }),
+            json!({ "label": "Open", "action": { "type": "files", "payload": [] } }),
+            json!({ "label": "Open", "action": { "type": "files", "payload": ["relative.txt"] } }),
+        ] {
+            assert!(validate_utools_redirect_request(&value).is_err());
         }
     }
 

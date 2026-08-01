@@ -1861,6 +1861,49 @@ function syncDialog(kind, options) {{
   if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous dialog request failed.");
   return result === null ? undefined : result;
 }}
+function normalizedRedirect(label, value) {{
+  const normalizeLabel = (candidate) => {{
+    if (typeof candidate !== "string") throw new TypeError("uTools redirect labels must be strings.");
+    const result = candidate.trim();
+    if (!result || Array.from(result).length > 160 || new TextEncoder().encode(result).byteLength > 1024 || /[\u0000-\u001f\u007f]/.test(result)) throw new TypeError("uTools redirect label is invalid.");
+    return result;
+  }};
+  const normalizedLabel = typeof label === "string"
+    ? normalizeLabel(label)
+    : Array.isArray(label) && label.length === 2
+      ? [normalizeLabel(label[0]), normalizeLabel(label[1])]
+      : null;
+  if (!normalizedLabel) throw new TypeError("uTools redirect label must be a string or two-string array.");
+  let action;
+  if (value === undefined) action = {{ type: "text", payload: "" }};
+  else if (typeof value === "string") action = {{ type: "text", payload: value }};
+  else {{
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "type" && key !== "data") || typeof value.type !== "string" || !("data" in value)) throw new TypeError("uTools redirect payload is invalid.");
+    if (value.type === "text") {{
+      if (typeof value.data !== "string") throw new TypeError("uTools redirect text data must be a string.");
+      action = {{ type: "text", payload: value.data }};
+    }} else if (value.type === "img") {{
+      const dataUrl = pngDataUrlForCopyImage(value.data);
+      if (!dataUrl) throw new TypeError("uTools redirect image data must be a bounded PNG.");
+      action = {{ type: "img", payload: dataUrl }};
+    }} else if (value.type === "files") {{
+      const paths = typeof value.data === "string" ? [value.data] : value.data;
+      if (!Array.isArray(paths) || paths.length === 0 || paths.length > 16) throw new TypeError("uTools redirect files data must contain 1-16 paths.");
+      const encoder = new TextEncoder();
+      let totalBytes = 0;
+      const normalized = [];
+      for (const path of paths) {{
+        if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) throw new TypeError("uTools redirect file path is invalid.");
+        totalBytes += encoder.encode(path).byteLength;
+        if (totalBytes > 8192 || normalized.includes(path)) throw new TypeError("uTools redirect file paths are too large or duplicated.");
+        normalized.push(path);
+      }}
+      action = {{ type: "files", payload: normalized }};
+    }} else throw new TypeError("uTools redirect payload type must be text, img, or files.");
+  }}
+  if (action.type === "text" && (new TextEncoder().encode(action.payload).byteLength > 49152 || action.payload.includes("\u0000"))) throw new TypeError("uTools redirect text is too large or contains NUL.");
+  return {{ label: normalizedLabel, action }};
+}}
 function screenPoint(value, label) {{
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y)) throw new TypeError(label + " requires finite x and y coordinates.");
   return {{ x: Math.round(value.x), y: Math.round(value.y) }};
@@ -2177,6 +2220,13 @@ function nextDynamicFeatureVersion(code) {{
   dynamicFeatureVersions.set(code, version);
   return version;
 }}
+function projectedRedirectAction(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "type" && key !== "payload")) return null;
+  if (value.type === "text" && typeof value.payload === "string" && new TextEncoder().encode(value.payload).byteLength <= 49152 && !value.payload.includes("\u0000")) return {{ type: "text", payload: value.payload }};
+  if (value.type === "img" && typeof value.payload === "string" && value.payload.startsWith("data:image/png;base64,iVBORw0KGgo") && value.payload.length <= copyImageMaxDataUrlChars) return {{ type: "img", payload: value.payload }};
+  if (value.type === "files" && Array.isArray(value.payload) && value.payload.length > 0 && value.payload.length <= 16 && value.payload.every((path) => typeof path === "string" && path.length > 0 && Array.from(path).length <= 1024 && !/[\u0000-\u001f\u007f]/.test(path))) return {{ type: "files", payload: value.payload.slice() }};
+  return null;
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -2208,6 +2258,11 @@ window.addEventListener("message", (event) => {{
   const command = config.commands.find((candidate) => candidate.commandId === commandId)
     || Array.from(dynamicFeatures.values()).find((candidate) => candidate.commandId === commandId);
   if (!command) return;
+  const redirectAction = projectedRedirectAction(message.payload && message.payload.utoolsAction);
+  if (redirectAction) {{
+    invoke(enterCallbacks, {{ code: command.code, type: redirectAction.type, payload: redirectAction.payload, from: "redirect" }});
+    return;
+  }}
   const input = message.payload && message.payload.input;
   invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
 }});
@@ -2355,6 +2410,14 @@ const utools = Object.freeze({{
     invokePluginOut(Boolean(isKill));
     void call("compatibility.utools.window.outPlugin", {{ isKill: Boolean(isKill) }})
       .catch((error) => console.error("iHub compatibility plugin exit failed", error));
+    return true;
+  }},
+  redirect(label, payload) {{
+    let params;
+    try {{ params = normalizedRedirect(label, payload); }}
+    catch (error) {{ console.error("iHub rejected an invalid uTools redirect", error); return false; }}
+    void call("compatibility.utools.window.redirect", params)
+      .catch((error) => console.error("iHub compatibility redirect failed", error));
     return true;
   }},
   copyText(value) {{
@@ -2938,6 +3001,10 @@ mod tests {
         assert!(script.contains("X-IHub-Utools-Dialog"));
         assert!(script.contains("syncDialog(\"open\", options)"));
         assert!(script.contains("syncDialog(\"save\", options)"));
+        assert!(script.contains("redirect(label, payload)"));
+        assert!(script.contains("compatibility.utools.window.redirect"));
+        assert!(script.contains("from: \"redirect\""));
+        assert!(script.contains("projectedRedirectAction"));
         assert!(script.contains("shellBeep"));
         assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));
@@ -3102,11 +3169,25 @@ mod tests {
 
         let fixture_path = fixture.to_string_lossy().into_owned();
         for request in [".txt", "folder", fixture_path.as_str()] {
-            let (status, icon) = send_sync_icon_request(&lease, request, true);
+            let mut response = send_sync_icon_request(&lease, request, true);
+            for _ in 0..3 {
+                if response
+                    .1
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("data:image/png;base64,"))
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+                response = send_sync_icon_request(&lease, request, true);
+            }
+            let (status, icon) = response;
             assert_eq!(status, "HTTP/1.1 200 OK");
             assert!(icon
                 .as_str()
-                .is_some_and(|value| value.starts_with("data:image/png;base64,")));
+                .is_some_and(|value| value.starts_with("data:image/png;base64,")),
+                "the synchronous native icon was empty for {request:?}"
+            );
         }
 
         let (status, rejection) = send_sync_icon_request(&lease, ".txt", false);

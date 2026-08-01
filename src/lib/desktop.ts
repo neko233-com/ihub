@@ -102,6 +102,75 @@ export async function onPluginGlobalShortcut(
   });
 }
 
+export type UtoolsRedirectAction =
+  | { type: "text"; payload: string }
+  | { type: "img"; payload: string }
+  | { type: "files"; payload: string[] };
+
+export interface UtoolsRedirectCandidate {
+  pluginId: string;
+  commandId: string;
+  pluginName: string;
+  commandName: string;
+}
+
+export interface UtoolsRedirectEventPayload {
+  sourcePluginId: string;
+  label: string;
+  candidates: UtoolsRedirectCandidate[];
+  action: UtoolsRedirectAction;
+}
+
+function isUtoolsRedirectAction(value: unknown): value is UtoolsRedirectAction {
+  const action = value && typeof value === "object" ? value as Partial<UtoolsRedirectAction> : null;
+  if (action?.type === "text") {
+    return typeof action.payload === "string" && new TextEncoder().encode(action.payload).byteLength <= 48 * 1_024;
+  }
+  if (action?.type === "img") {
+    return typeof action.payload === "string"
+      && action.payload.startsWith("data:image/png;base64,iVBORw0KGgo")
+      && action.payload.length <= 5_592_430;
+  }
+  return action?.type === "files"
+    && Array.isArray(action.payload)
+    && action.payload.length >= 1
+    && action.payload.length <= 16
+    && action.payload.every((path) => typeof path === "string" && path.length > 0 && path.length <= 8_192);
+}
+
+export async function onUtoolsRedirect(
+  callback: (payload: UtoolsRedirectEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    return () => undefined;
+  }
+  return listen<UtoolsRedirectEventPayload>("ihub://utools-redirect", (event) => {
+    const payload = event.payload as Partial<UtoolsRedirectEventPayload> | null;
+    const candidates = Array.isArray(payload?.candidates) ? payload.candidates : null;
+    if (
+      typeof payload?.sourcePluginId !== "string"
+      || !/^[A-Za-z0-9._-]{2,96}$/.test(payload.sourcePluginId)
+      || typeof payload.label !== "string"
+      || payload.label.length === 0
+      || payload.label.length > 1_024
+      || !candidates
+      || candidates.length === 0
+      || candidates.length > 32
+      || candidates.some((candidate) => (
+        !candidate
+        || typeof candidate.pluginId !== "string"
+        || typeof candidate.commandId !== "string"
+        || typeof candidate.pluginName !== "string"
+        || typeof candidate.commandName !== "string"
+      ))
+      || !isUtoolsRedirectAction(payload.action)
+    ) {
+      return;
+    }
+    callback(payload as UtoolsRedirectEventPayload);
+  });
+}
+
 export async function onPluginShortcutsChanged(
   callback: () => void,
 ): Promise<UnlistenFn> {

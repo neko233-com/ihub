@@ -45,6 +45,8 @@ flowchart LR
 
 uTools 同步文件对话框不经过异步 iframe Bridge：兼容脚本只向本插件随机 origin 下的固定 POST 路由发送同步 XHR，服务器重新确认该 lease 仍是当前可见 surface、保留一个宿主原生操作槽，再调用 setup 时安装的可信 UI-thread dispatcher。请求具有专用 capability header、same-origin/Host/Origin 检查、32 KiB JSON 上限与严格选项白名单；返回值也重新检查为有界路径数组、单一路径或取消值。dispatcher 仍会复核插件启用状态与 uTools 来源，并只把系统选择器中由用户明确选定的路径投影回该插件。
 
+跨插件 `redirect` 不允许 iframe 指定目标 plugin ID 或 command ID。源只提交官方 label 与有界 typed payload；Rust 根据当前已验证插件清单解析候选，并把候选 ID、展示名和规范化 action 作为可信桌面事件交给主窗口。React 会再次对照当前启用插件与命令；唯一候选直接创建目标 command event，歧义候选由启动器选择，其他选择或 surface 隐藏会清除 payload。目标 uTools bootstrap 最后再次验证 action 形状，才以 `from: "redirect"` 触发 `onPluginEnter`。
+
 ### `plugins/registry.json`
 
 官方 registry 是可提交、可审计的目录，不是私有服务数据库。每个条目至少描述：插件 ID、显示信息、Git URL、默认 ref、清单路径、支持平台与更新通道。iHub 可以读取此文件发现官方插件，也可以读取任意符合相同格式的 registry URL/文件。
