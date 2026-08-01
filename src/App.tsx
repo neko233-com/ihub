@@ -772,6 +772,13 @@ const builtinTools: Array<{
     tab: "share",
   },
   {
+    commandId: "ihub.tool.hosts",
+    name: "hosts 文件管理",
+    metadata: "受控编辑 iHub 管理区，指纹校验、UAC 写入与原子备份",
+    keywords: ["hosts", "域名映射", "DNS", "屏蔽域名", "本地域名", "hosts 管理"],
+    tab: "hosts",
+  },
+  {
     commandId: "ihub.tool.batch-rename",
     name: "批量重命名",
     metadata: "预览后再安全执行文件改名",

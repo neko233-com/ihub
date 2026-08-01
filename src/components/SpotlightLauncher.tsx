@@ -23,6 +23,7 @@ import {
   Search,
   ScanText,
   Share2,
+  ServerCog,
   Sparkles,
   Video,
   Gauge,
@@ -316,6 +317,14 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
     detail: "扫码在局域网内下载文件",
     icon: Share2,
     tone: "mint",
+    badge: "内置",
+  },
+  {
+    id: "ihub.tool.hosts",
+    label: "hosts 文件管理",
+    detail: "预览、校验、备份后安全写入",
+    icon: ServerCog,
+    tone: "blue",
     badge: "内置",
   },
   {

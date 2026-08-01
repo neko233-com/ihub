@@ -7,6 +7,7 @@ mod cloud_credentials;
 mod cloud_drive;
 mod detached_plugin_window;
 mod host_log;
+mod hosts_manager;
 mod indexer;
 mod lan_share;
 mod launcher_hotkey;
@@ -28,4 +29,9 @@ mod super_panel;
 pub mod system_open;
 mod window_management;
 
-pub use app::run;
+pub fn run() {
+    if let Some(code) = hosts_manager::elevated_helper_exit_code_from_args() {
+        std::process::exit(code);
+    }
+    app::run();
+}

@@ -45,6 +45,7 @@ iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿
 - **IP 与网络测速**：桌面端原生读取首选本地 IPv4/IPv6；公网 IP 查询与精简测速都必须由用户点击触发，并只访问 Cloudflare 官方固定端点。一次测速执行 6 次空载延迟、10 MB 下载和 5 MB 固定字节上传，返回延迟、抖动和上下行速率，不上传本地文件、不允许任意 URL、不在后台运行。详细边界见[网络诊断](docs/NETWORK_DIAGNOSTICS.md)。
 - **屏幕 OCR**：隐藏 iHub 后原生截取主显示器的一帧，在同一工作台拖拽选区，按 Windows 已安装 OCR 语言包自动或指定语言识别。选区过大时按系统 `MaxImageDimension` 等比缩放；PNG 与文字只通过内存流处理，不写临时文件、不启动外部 worker、不联网，也不向普通插件开放屏幕像素。详细边界见[屏幕 OCR](docs/SCREEN_OCR.md)。
 - **内网文件分享**：通过系统选择器明确选取最多 32 个、总计不超过 64 GiB 的普通文件，原生宿主立即打开这些文件并生成随机 128-bit 路径与二维码。下载服务只接受私有、回环或链路本地来源，最多并发 4 个连接，30 分钟自动停止；WebView 不接收绝对路径，服务不接受上传、任意 URL 或目录遍历。HTTP 局域网传输不提供加密，只应在可信专用网络使用，详细边界见[内网文件分享](docs/LAN_FILE_SHARING.md)。
+- **hosts 文件管理**：Windows 工作台只编辑由明确标记包围的 iHub 管理区，其他注释与映射保持原始字节不变。保存前先预览，再以 SHA-256 指纹拒绝覆盖外部新改动；普通权限下通过可见 UAC 启动同一 iHub EXE 的一次性辅助模式，在固定系统路径执行 `ReplaceFileW` 原子替换并保存上一份备份。域名、IP、条数、文件大小和请求寿命都有硬上限，详细边界见[hosts 文件管理](docs/HOSTS_MANAGER.md)。
 - **批量重命名**：只操作选定目录的直接普通文件；必须先预览，应用阶段会再校验路径、符号链接、冲突和过期预览。
 - **插件项目创建器**：在指定绝对父目录生成一个独立的 TypeScript + Vite 前端、Rust JSONL worker、Windows/macOS 构建脚本与协议文档；目标目录已存在时绝不覆盖，也不会自动运行脚本。
 
@@ -158,7 +159,7 @@ GitHub source → resolved immutable commit → manifest / integrity lock
 
 ### 官方插件 catalog
 
-内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、屏幕截图 OCR、剪贴板历史、JSON（含受限路径查询）、默认中英双向的本地离线翻译、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、IP/网络测速、内网文件分享、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入，只有用户明确点“收藏”的颜色才会写入本机收藏。官方外部 catalog 还提供 OCR、联网翻译源、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
+内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、屏幕截图 OCR、剪贴板历史、JSON（含受限路径查询）、默认中英双向的本地离线翻译、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、IP/网络测速、内网文件分享、hosts 文件管理、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入，只有用户明确点“收藏”的颜色才会写入本机收藏。官方外部 catalog 还提供 OCR、联网翻译源、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
 
 [ihub-plugin-window-manager@v1.0.2](https://github.com/neko233-com/ihub-plugin-window-manager/tree/v1.0.2) 只可对 iHub 自己的主启动器执行居中、左右贴靠和切换置顶，不能枚举、读取、聚焦或控制其他应用窗口。图片、OCR 和批量重命名的 `launcherContext` 只交接一次性元数据，仍要求用户重新选择文件／目录；文本工具与翻译只预填显式交接文本，不自动处理或发送。PDF、ZIP 和网页动作均在最小权限下提供正式 Git fallback。完整源码 checkout 中的 18 个官方项目都带固定 ID 的 `workspaceProject` 开发入口：开发安装器验证 `sourceRoot` 后优先链接当前构建产物，普通安装则全部回退到锁定 commit 的 Git 包。
 

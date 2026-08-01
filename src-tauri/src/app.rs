@@ -525,6 +525,7 @@ pub struct AppState {
     pub plugins: PluginManager,
     pub clipboard_history: ClipboardHistory,
     pub cloud_drive: crate::cloud_drive::CloudDriveState,
+    pub hosts_manager: crate::hosts_manager::HostsManagerState,
     pub lan_file_share: crate::lan_share::LanFileShareState,
     pub started_at: String,
     launcher_shortcuts: LauncherShortcutStore,
@@ -580,6 +581,7 @@ impl AppState {
             plugins,
             clipboard_history: ClipboardHistory::new(app_data_dir.clone()),
             cloud_drive: crate::cloud_drive::CloudDriveState::new(app_data_dir.clone()),
+            hosts_manager: crate::hosts_manager::HostsManagerState::default(),
             lan_file_share: crate::lan_share::LanFileShareState::default(),
             started_at: Utc::now().to_rfc3339(),
             launcher_shortcuts: LauncherShortcutStore::new(app_data_dir.clone()),
@@ -2472,6 +2474,28 @@ pub fn get_lan_file_share_status(
 #[tauri::command]
 pub fn stop_lan_file_share(state: State<'_, AppState>) -> Result<(), String> {
     state.lan_file_share.stop()
+}
+
+#[tauri::command]
+pub fn get_hosts_snapshot() -> Result<crate::hosts_manager::HostsSnapshot, String> {
+    crate::hosts_manager::get_hosts_snapshot()
+}
+
+#[tauri::command]
+pub fn apply_hosts_entries(
+    state: State<'_, AppState>,
+    expected_fingerprint: String,
+    entries: Vec<crate::hosts_manager::HostsManagedEntryInput>,
+) -> Result<crate::hosts_manager::HostsApplyResult, String> {
+    crate::hosts_manager::apply_hosts_entries(&state.hosts_manager, expected_fingerprint, entries)
+}
+
+#[tauri::command]
+pub fn restore_hosts_backup(
+    state: State<'_, AppState>,
+    expected_fingerprint: String,
+) -> Result<crate::hosts_manager::HostsApplyResult, String> {
+    crate::hosts_manager::restore_hosts_backup(&state.hosts_manager, expected_fingerprint)
 }
 
 /// Returns display-only profile metadata. Reading this list never touches the
@@ -5619,6 +5643,9 @@ pub fn run() {
             start_lan_file_share,
             get_lan_file_share_status,
             stop_lan_file_share,
+            get_hosts_snapshot,
+            apply_hosts_entries,
+            restore_hosts_backup,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
             preview_batch_rename,

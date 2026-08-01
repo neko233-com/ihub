@@ -39,6 +39,7 @@ export type BuiltinToolId =
   | "network"
   | "ocr"
   | "share"
+  | "hosts"
   | "rename"
   | "developer";
 
@@ -59,7 +60,8 @@ export type PluginCatalogIcon =
   | "note"
   | "converter"
   | "network"
-  | "share";
+  | "share"
+  | "hosts";
 
 export interface PluginCatalogEntry {
   id: string;
@@ -266,6 +268,16 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     icon: "share",
     builtinTool: "share",
     featured: true,
+  },
+  {
+    id: "ihub-hosts-manager",
+    name: "hosts 文件管理",
+    description: "只编辑 iHub 管理区；保存时校验磁盘指纹，经一次 Windows UAC 原子替换并保留上一份备份。",
+    category: "system",
+    distribution: "builtin",
+    tags: ["hosts", "DNS", "域名映射", "Windows", "UAC", "备份"],
+    icon: "hosts",
+    builtinTool: "hosts",
   },
   {
     id: "ihub-batch-rename",

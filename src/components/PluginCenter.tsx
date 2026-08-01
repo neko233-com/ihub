@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Search,
   ScanText,
+  ServerCog,
   Share2,
   Settings2,
   ShieldCheck,
@@ -171,6 +172,7 @@ const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   converter: Binary,
   network: Gauge,
   share: Share2,
+  hosts: ServerCog,
 };
 
 const pluginCenterStyles = `
