@@ -37,6 +37,7 @@ iHub 是一个由 Rust 核心驱动的桌面启动器、本地搜索和插件宿
 - **截图**：每次通过系统选择器明确选择屏幕、窗口或标签页，导出 PNG 并保留当前会话预览。
 - **剪贴板历史**：默认关闭；只有手动开启后才在本机保存纯文本，可固定、复制、删除和清除未固定记录。
 - **JSON**：独立双栏编辑工作台，本地识别 JSON、URL Params、XML 与 YAML；支持格式化、压缩、转义、转 XML、转 TypeScript，以及不执行脚本的受限 JSONPath 查询。输入不会发送到网络。
+- **离线翻译**：独立双栏工作台默认随应用提供中英双向基础包，自动识别中英文并选择另一侧目标语言；输入、结果和词典匹配全部在 WebView 内完成，状态栏明确显示“网络请求 0”。其他语言可导入最多 1 MiB / 5,000 词条的纯 JSON 本地语言包，单机最多保留 8 个、总量 2 MiB；包不会执行代码，也没有云端回退。词典覆盖率和未覆盖片段会如实显示，格式见[离线翻译语言包](docs/OFFLINE_TRANSLATION.md)。
 - **速记、转换与计算器**：本机便签的保存、搜索、复制、删除，以及 BigInt 二/八/十/十六进制、UTF-8 Hex / Base64 转换和离线四则/括号/幂表达式计算；计算器历史只保存在本机。
 - **二维码**：离线将文本或 URL 编码为二维码，预览后导出 PNG；也可识别你主动选择的本地图片。图片不会上传、不会读取相册或调用摄像头。
 - **统一云盘（WebDAV）**：第一方原生连接器，只在首次连接时接收密码；认证成功后浏览、下载和上传只使用随机原生会话 ID。可选择只连接一次，也可明确保存到 Windows 凭据管理器 / macOS 钥匙串，普通元数据文件和插件桥均拿不到密码。连接器拒绝重定向与非本机 HTTP；下载使用原生保存框和不覆盖临时文件，上传使用原生选择器、唯一暂存名与 `MOVE + Overwrite: F`。阿里云盘、百度网盘与 OneDrive 预留相同 UI 下的独立 OAuth 原生适配器，不会把令牌交给前端。
@@ -154,7 +155,7 @@ GitHub source → resolved immutable commit → manifest / integrity lock
 
 ### 官方插件 catalog
 
-内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、剪贴板历史、JSON（含受限路径查询）、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入，只有用户明确点“收藏”的颜色才会写入本机收藏。官方外部 catalog 还提供 OCR、翻译、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
+内置工具已经提供本地搜索、实时 9×9 放大取色、可拖拽矩形选区截图、剪贴板历史、JSON（含受限路径查询）、默认中英双向的本地离线翻译、Markdown 工作台（离线安全预览/导入/导出）、速记、进制转换、计算器、Unix/ISO/IANA 时间转换、二维码生成与图片识别、WebDAV 云盘目录浏览、录屏、批量重命名和插件创建器。截图只复用一次由用户触发的显示器或系统共享帧，确认前不写入磁盘；实时取色会话固定 9×9、限频且最长 30 秒，不注入输入，只有用户明确点“收藏”的颜色才会写入本机收藏。官方外部 catalog 还提供 OCR、联网翻译源、截图、图片工具、JSON、取色、二维码、录屏、文本工具、进制转换、批量重命名、速记、剪贴板、开发者工具、PDF、ZIP、网页动作和 iHub 启动器窗口布局；其中心 registry 在 [plugins/registry.json](plugins/registry.json)。当前 18 个条目都固定到发布 tag 的不可变 commit，并在 [plugins/registry.lock.json](plugins/registry.lock.json) 中记录 manifest、权限与全部前端／原生产物 SHA-256。
 
 [ihub-plugin-window-manager@v1.0.2](https://github.com/neko233-com/ihub-plugin-window-manager/tree/v1.0.2) 只可对 iHub 自己的主启动器执行居中、左右贴靠和切换置顶，不能枚举、读取、聚焦或控制其他应用窗口。图片、OCR 和批量重命名的 `launcherContext` 只交接一次性元数据，仍要求用户重新选择文件／目录；文本工具与翻译只预填显式交接文本，不自动处理或发送。PDF、ZIP 和网页动作均在最小权限下提供正式 Git fallback。完整源码 checkout 中的 18 个官方项目都带固定 ID 的 `workspaceProject` 开发入口：开发安装器验证 `sourceRoot` 后优先链接当前构建产物，普通安装则全部回退到锁定 commit 的 Git 包。
 

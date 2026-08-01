@@ -27,6 +27,7 @@ export type BuiltinToolId =
   | "screenshot"
   | "clipboard"
   | "json"
+  | "translate"
   | "markdown"
   | "note"
   | "convert"
@@ -140,15 +141,26 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     supportedTargets: ["windows-x86_64"],
   },
   {
+    id: "ihub-offline-translate",
+    name: "离线翻译",
+    description: "内置中英双向基础包；支持导入有界 JSON 多语言词典包，文本始终留在当前设备。",
+    category: "text",
+    distribution: "builtin",
+    tags: ["翻译", "中英", "多语言", "离线", "词典", "隐私"],
+    icon: "translate",
+    builtinTool: "translate",
+    featured: true,
+  },
+  {
     id: "ihub-plugin-translate",
-    name: "翻译（插件）",
-    description: "显式交接的文本只会预填；仅在点击后才向你填写的 LibreTranslate 兼容 HTTPS 服务发送。",
+    name: "翻译（联网插件）",
+    description: "可选 LibreTranslate 兼容 HTTPS 服务；文本只预填，点击翻译后才会发送。",
     category: "text",
     distribution: "installable",
     workspaceProject: true,
     source: "neko233-com/ihub-plugin-translate@v1.1.0",
     aliases: ["io.ihub.translate"],
-    tags: ["翻译", "LibreTranslate", "HTTPS", "会话密钥"],
+    tags: ["翻译", "LibreTranslate", "HTTPS", "会话密钥", "联网"],
     icon: "translate",
   },
   {

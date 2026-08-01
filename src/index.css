@@ -3895,6 +3895,283 @@ kbd {
   .color-workbench * { scroll-behavior: auto !important; }
 }
 
+/* Translation follows the compact language-bar + paired-editor path of the
+ * reference surface. The source and output stay visibly local and no neutral
+ * gray product palette replaces iHub's blue/indigo glass hierarchy. */
+.toolbox-drawer.toolbox-drawer--translate {
+  background:
+    radial-gradient(circle at 8% 8%, rgba(100, 210, 255, 0.24), transparent 32%),
+    radial-gradient(circle at 92% 88%, rgba(191, 90, 242, 0.16), transparent 38%),
+    rgba(247, 250, 255, 0.97);
+  border-color: rgba(10, 132, 255, 0.28);
+  overflow: hidden;
+  padding: 0;
+}
+
+.translation-workbench {
+  color: #17181b;
+  display: grid;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  grid-template-rows: 64px 56px minmax(0, 1fr) 38px;
+  height: 100%;
+  min-height: 0;
+  position: relative;
+}
+
+.translation-workbench button,
+.translation-workbench select,
+.translation-workbench textarea { font: inherit; }
+
+.translation-workbench__header {
+  align-items: center;
+  backdrop-filter: blur(24px) saturate(1.3);
+  background: rgba(255, 255, 255, 0.72);
+  border-bottom: 1px solid rgba(10, 132, 255, 0.14);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  padding: 0 18px;
+}
+
+.translation-workbench__identity,
+.translation-workbench__privacy,
+.translation-workbench__header-actions,
+.translation-workbench__header-actions button {
+  align-items: center;
+  display: flex;
+}
+
+.translation-workbench__identity { gap: 10px; }
+.translation-workbench__identity > span {
+  align-items: center;
+  background: linear-gradient(145deg, #0a84ff, #5e5ce6 58%, #bf5af2);
+  border-radius: 9px;
+  box-shadow: 0 7px 18px rgba(94, 92, 230, 0.24);
+  color: #fff;
+  display: flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.translation-workbench__identity strong { display: block; font-size: 15px; }
+.translation-workbench__identity small { color: #747984; display: block; font-size: 9px; margin-top: 1px; }
+
+.translation-workbench__privacy {
+  background: rgba(48, 209, 88, 0.1);
+  border: 1px solid rgba(48, 209, 88, 0.18);
+  border-radius: 999px;
+  color: #16833a;
+  font-size: 10px;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.translation-workbench__header-actions { gap: 7px; justify-content: flex-end; }
+.translation-workbench__header-actions button {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(10, 132, 255, 0.15);
+  border-radius: 9px;
+  color: #4f545d;
+  cursor: pointer;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 10px;
+}
+.translation-workbench__header-actions button:last-child { padding: 0 8px; }
+.translation-workbench__header-actions button:hover { background: rgba(10, 132, 255, 0.1); color: #086abd; }
+
+.translation-workbench__language-bar {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.84);
+  border-bottom: 1px solid rgba(94, 92, 230, 0.13);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 50px minmax(0, 1fr);
+  padding: 0 18px;
+}
+
+.translation-workbench__language-bar label {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+.translation-workbench__language-bar label:last-child { justify-content: flex-end; }
+.translation-workbench__language-bar label > span { color: #747984; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.translation-workbench__language-bar select {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #202329;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  outline: none;
+  padding: 7px 22px 7px 4px;
+}
+
+.translation-workbench__language-bar > button {
+  align-items: center;
+  background: rgba(94, 92, 230, 0.1);
+  border: 1px solid rgba(94, 92, 230, 0.16);
+  border-radius: 9px;
+  color: #5e5ce6;
+  cursor: pointer;
+  display: flex;
+  height: 34px;
+  justify-content: center;
+  justify-self: center;
+  width: 38px;
+}
+.translation-workbench__language-bar > button:hover { background: rgba(94, 92, 230, 0.18); }
+
+.translation-workbench__panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+}
+
+.translation-workbench__pane {
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr) 48px;
+  min-height: 0;
+  padding: 12px 16px 0;
+}
+.translation-workbench__pane--source { background: rgba(255, 255, 255, 0.76); border-right: 1px solid rgba(94, 92, 230, 0.14); }
+.translation-workbench__pane--target { background: linear-gradient(150deg, rgba(10, 132, 255, 0.075), rgba(94, 92, 230, 0.07)); }
+
+.translation-workbench__pane > div:first-child,
+.translation-workbench__pane-actions {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+.translation-workbench__pane > div:first-child > span { color: #4d525a; font-size: 10px; font-weight: 700; }
+.translation-workbench__pane > div:first-child > small { color: #8a8f99; font-family: "SFMono-Regular", "Cascadia Code", monospace; font-size: 8px; }
+
+.translation-workbench__pane textarea,
+.translation-workbench__output {
+  background: transparent;
+  border: 0;
+  color: #1d2026;
+  font-size: clamp(16px, 2vw, 23px);
+  font-weight: 450;
+  letter-spacing: -0.015em;
+  line-height: 1.65;
+  min-height: 0;
+  outline: none;
+  overflow: auto;
+  padding: 8px 4px;
+  resize: none;
+  white-space: pre-wrap;
+}
+.translation-workbench__pane textarea::placeholder { color: #a0a6b0; }
+.translation-workbench__output { color: #2c3274; }
+.translation-workbench__output.is-error { color: #d2264f; font-size: 13px; }
+
+.translation-workbench__pane-actions {
+  border-top: 1px solid rgba(94, 92, 230, 0.11);
+  gap: 8px;
+}
+.translation-workbench__pane-actions > span { color: #7e8490; font-size: 8px; }
+.translation-workbench__pane-actions button {
+  align-items: center;
+  background: rgba(10, 132, 255, 0.09);
+  border: 1px solid rgba(10, 132, 255, 0.14);
+  border-radius: 8px;
+  color: #086abd;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 10px;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+}
+.translation-workbench__pane-actions button:hover:not(:disabled) { background: rgba(10, 132, 255, 0.16); }
+.translation-workbench__pane-actions button:disabled { cursor: default; opacity: 0.42; }
+.translation-workbench__pane--source .translation-workbench__pane-actions { justify-content: flex-end; }
+
+.translation-workbench__footer {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.78);
+  border-top: 1px solid rgba(10, 132, 255, 0.12);
+  color: #777d87;
+  display: flex;
+  font-size: 8px;
+  justify-content: space-between;
+  padding: 0 17px;
+}
+.translation-workbench__footer > div { align-items: center; color: #16833a; display: flex; gap: 6px; }
+
+.translation-workbench__packs {
+  backdrop-filter: blur(28px) saturate(1.35);
+  background: rgba(251, 252, 255, 0.96);
+  border-left: 1px solid rgba(94, 92, 230, 0.17);
+  bottom: 0;
+  box-shadow: -18px 0 48px rgba(38, 41, 75, 0.18);
+  overflow: auto;
+  padding: 18px;
+  position: absolute;
+  right: 0;
+  top: 64px;
+  width: min(390px, 88vw);
+  z-index: 5;
+}
+.translation-workbench__packs > div { align-items: center; display: flex; justify-content: space-between; }
+.translation-workbench__packs > div strong { font-size: 15px; }
+.translation-workbench__packs > div button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #737984;
+  cursor: pointer;
+  display: flex;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+.translation-workbench__packs > p { color: #737984; font-size: 10px; line-height: 1.6; margin: 10px 0 16px; }
+.translation-workbench__packs article {
+  align-items: center;
+  background: rgba(94, 92, 230, 0.055);
+  border: 1px solid rgba(94, 92, 230, 0.11);
+  border-radius: 10px;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  min-height: 58px;
+  padding: 9px 10px;
+}
+.translation-workbench__packs article span { min-width: 0; }
+.translation-workbench__packs article strong { display: block; font-size: 10px; }
+.translation-workbench__packs article small { color: #7d838e; display: block; font-size: 8px; margin-top: 4px; }
+.translation-workbench__packs article em { color: #16833a; font-size: 8px; font-style: normal; }
+.translation-workbench__packs article > button { background: transparent; border: 0; color: #ff375f; cursor: pointer; }
+.translation-workbench__import {
+  align-items: center;
+  background: #0a84ff;
+  border: 0;
+  border-radius: 9px;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  font-size: 10px;
+  gap: 7px;
+  justify-content: center;
+  margin-top: 14px;
+  min-height: 38px;
+  width: 100%;
+}
+
+@media (max-width: 700px) {
+  .translation-workbench__header { grid-template-columns: 1fr auto; }
+  .translation-workbench__privacy { display: none; }
+  .translation-workbench__panes { grid-template-columns: 1fr; overflow: auto; }
+  .translation-workbench__pane { min-height: 300px; }
+  .translation-workbench__pane--source { border-bottom: 1px solid rgba(94, 92, 230, 0.14); border-right: 0; }
+  .translation-workbench__footer > span:nth-child(2) { display: none; }
+}
+
 /* JSON is a dedicated editor surface, following the compact command-header,
  * split workspace and bottom query rhythm of the reference without inheriting
  * its neutral palette. Apple blue/indigo remain the product color system. */

@@ -12,6 +12,7 @@ const expectedBuiltinTools = [
   "screenshot",
   "clipboard",
   "json",
+  "translate",
   "markdown",
   "note",
   "convert",

@@ -36,9 +36,11 @@ export interface LauncherContextAction {
         | "ihub.tool.json"
         | "ihub.tool.local-search"
         | "ihub.tool.batch-rename"
-        | "ihub.tool.screenshot";
+        | "ihub.tool.screenshot"
+        | "ihub.tool.translate";
       jsonInput?: string;
       renameDirectory?: string;
+      translateInput?: string;
     }
     | {
       kind: "plugin-handoff";
@@ -259,14 +261,16 @@ export function deriveLauncherContextActions({
       },
     });
   } else if (text && looksLikeTextContext(text)) {
-    pushPluginHandoff(
-      actions,
-      "ihub.context.translate",
-      "用插件翻译文本",
-      "text",
-      "Translate",
-      "选择已声明文本上下文的插件命令；确认后才交付当前输入",
-    );
+    pushOnce(actions, {
+      id: "ihub.context.translate",
+      label: "本地离线翻译",
+      detail: "将当前输入预填到内置翻译工作台；不会上传",
+      target: {
+        kind: "builtin",
+        commandId: "ihub.tool.translate",
+        translateInput: text,
+      },
+    });
     pushPluginHandoff(
       actions,
       "ihub.context.text-tools",

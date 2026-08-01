@@ -695,6 +695,13 @@ const builtinTools: Array<{
     tab: "json",
   },
   {
+    commandId: "ihub.tool.translate",
+    name: "本地离线翻译",
+    metadata: "默认中英双向；支持导入本地多语言词典包，全程不联网",
+    keywords: ["翻译", "translate", "translator", "中英", "英文", "中文", "离线翻译"],
+    tab: "translate",
+  },
+  {
     commandId: "ihub.tool.markdown",
     name: "Markdown 工作台",
     metadata: "离线写作、安全预览、目录定位与本地导出",
@@ -3639,12 +3646,14 @@ export function App() {
           && Boolean(result.openId));
     const launchContext = action.target.jsonInput !== undefined
       ? { jsonInput: action.target.jsonInput }
-      : renameDirectory !== undefined
-        ? {
-            renameDirectory,
-            renameDirectoryOpenId: renameSource?.openId,
-          }
-        : undefined;
+      : action.target.translateInput !== undefined
+        ? { translateInput: action.target.translateInput }
+        : renameDirectory !== undefined
+          ? {
+              renameDirectory,
+              renameDirectoryOpenId: renameSource?.openId,
+            }
+          : undefined;
     openToolbox(tab, launchContext);
   };
 

@@ -17,6 +17,7 @@ import {
   Download,
   Files,
   FolderSearch,
+  Languages,
   LoaderCircle,
   NotebookPen,
   Palette,
@@ -36,6 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ColorWorkbench } from "./ColorWorkbench";
 import { LocalSearchWorkspace } from "./LocalSearchWorkspace";
 import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
+import { TranslationWorkbench } from "./TranslationWorkbench";
 import { MarkdownWorkbench } from "./MarkdownWorkbench";
 import { RegionCaptureEditor } from "./RegionCaptureEditor";
 import {
@@ -98,6 +100,7 @@ export type ToolboxTab =
   | "screenshot"
   | "clipboard"
   | "json"
+  | "translate"
   | "markdown"
   | "note"
   | "convert"
@@ -115,6 +118,7 @@ export type ToolboxTab =
 export interface ToolboxLaunchContext {
   requestId: number;
   jsonInput?: string;
+  translateInput?: string;
   renameDirectory?: string;
   renameDirectoryOpenId?: string;
   calculatorInput?: string;
@@ -266,6 +270,7 @@ const tabs: Array<{
   { id: "screenshot", label: "截图", icon: Camera },
   { id: "clipboard", label: "剪贴板", icon: Clipboard },
   { id: "json", label: "JSON", icon: Braces },
+  { id: "translate", label: "翻译", icon: Languages },
   { id: "markdown", label: "Markdown", icon: BookOpenText },
   { id: "note", label: "便签", icon: NotebookPen },
   { id: "convert", label: "转换", icon: Binary },
@@ -737,6 +742,7 @@ export function ToolboxDrawer({
   const [isLoadingClipboardHistory, setIsLoadingClipboardHistory] = useState(false);
   const [clipboardActionId, setClipboardActionId] = useState<string | null>(null);
   const [jsonInput, setJsonInput] = useState('{\n  "name": "iHub",\n  "fast": true\n}');
+  const [translateInput, setTranslateInput] = useState("你好，世界");
   const [quickNotes, setQuickNotes] = useState<QuickNote[]>(readQuickNotes);
   const [quickNoteDraft, setQuickNoteDraft] = useState("");
   const [quickNoteQuery, setQuickNoteQuery] = useState("");
@@ -1201,6 +1207,12 @@ export function ToolboxDrawer({
     if (activeTab === "json" && launchContext.jsonInput !== undefined) {
       handledLaunchContextRequestRef.current = launchContext.requestId;
       setJsonInput(launchContext.jsonInput);
+      return;
+    }
+
+    if (activeTab === "translate" && launchContext.translateInput !== undefined) {
+      handledLaunchContextRequestRef.current = launchContext.requestId;
+      setTranslateInput(launchContext.translateInput);
       return;
     }
 
@@ -2492,9 +2504,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2528,6 +2540,15 @@ export function ToolboxDrawer({
                 onColorChange={setColor}
                 onCopy={copyText}
                 onPickScreenColor={pickScreenColor}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : activeTab === "translate" ? (
+              <TranslationWorkbench
+                input={translateInput}
+                onClose={closeToolbox}
+                onCopy={copyText}
+                onInputChange={setTranslateInput}
                 onStartWindowDrag={onStartWindowDrag}
                 onToast={onToast}
               />

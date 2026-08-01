@@ -73,7 +73,7 @@ describe("launcher context actions", () => {
     });
   });
 
-  it("offers an explicit text-handoff picker for prose without staging it", () => {
+  it("prefills the built-in offline translator while keeping plugin text tools explicit", () => {
     const actions = deriveLauncherContextActions({
       query: "Please translate this deliberately long sentence into Chinese.",
     });
@@ -82,14 +82,11 @@ describe("launcher context actions", () => {
       "ihub.context.translate",
       "ihub.context.text-tools",
     ]);
-    expect(actions.every((action) => action.target.kind === "plugin-handoff")).toBe(true);
     expect(actions.map((action) => action.target)).toEqual([
       {
-        kind: "plugin-handoff",
-        category: "text",
-        suggestedUse: "Translate",
-        preferredPluginId: "ihub-plugin-translate",
-        preferredCommandId: "translate-launcher-text",
+        kind: "builtin",
+        commandId: "ihub.tool.translate",
+        translateInput: "Please translate this deliberately long sentence into Chinese.",
       },
       {
         kind: "plugin-handoff",
@@ -267,7 +264,6 @@ describe("launcher context actions", () => {
       "ihub.context.ocr/files",
       "ihub.context.ocr/image",
       "ihub.context.text-tools/text",
-      "ihub.context.translate/text",
     ]);
     for (const [route, target] of routes) {
       const plugin = readOfficialPlugin(target.preferredPluginId);

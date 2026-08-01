@@ -15,6 +15,7 @@ import {
   Command,
   Files,
   FolderSearch,
+  Languages,
   NotebookPen,
   Palette,
   Puzzle,
@@ -227,6 +228,14 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
     badge: "内置",
   },
   {
+    id: "ihub.tool.translate",
+    label: "离线翻译",
+    detail: "默认中英双向 · 本地语言包",
+    icon: Languages,
+    tone: "violet",
+    badge: "内置",
+  },
+  {
     id: "ihub.tool.quick-note",
     label: "快速便签",
     detail: "本机保存与搜索",
@@ -344,6 +353,14 @@ export const defaultMarketplaceItems: readonly SpotlightLauncherItem[] = [
     detail: "离线格式化与校验",
     icon: Braces,
     tone: "amber",
+    badge: "官方",
+  },
+  {
+    id: "ihub.tool.translate",
+    label: "离线翻译",
+    detail: "默认中英双向 · 网络请求 0",
+    icon: Languages,
+    tone: "violet",
     badge: "官方",
   },
   {
