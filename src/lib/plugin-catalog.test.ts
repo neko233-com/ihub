@@ -23,6 +23,7 @@ const expectedBuiltinTools = [
   "record",
   "network",
   "ocr",
+  "share",
   "rename",
   "developer",
 ] as const satisfies readonly BuiltinToolId[];

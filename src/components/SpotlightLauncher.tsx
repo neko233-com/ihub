@@ -22,6 +22,7 @@ import {
   QrCode,
   Search,
   ScanText,
+  Share2,
   Sparkles,
   Video,
   Gauge,
@@ -307,6 +308,14 @@ export const builtinPinnedItems: readonly SpotlightLauncherItem[] = [
     detail: "截图框选 · 本地识别文字",
     icon: ScanText,
     tone: "violet",
+    badge: "内置",
+  },
+  {
+    id: "ihub.tool.lan-share",
+    label: "内网文件分享",
+    detail: "扫码在局域网内下载文件",
+    icon: Share2,
+    tone: "mint",
     badge: "内置",
   },
   {

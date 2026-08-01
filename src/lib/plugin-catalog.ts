@@ -38,6 +38,7 @@ export type BuiltinToolId =
   | "record"
   | "network"
   | "ocr"
+  | "share"
   | "rename"
   | "developer";
 
@@ -57,7 +58,8 @@ export type PluginCatalogIcon =
   | "window"
   | "note"
   | "converter"
-  | "network";
+  | "network"
+  | "share";
 
 export interface PluginCatalogEntry {
   id: string;
@@ -252,6 +254,17 @@ export const pluginCatalog: ReadonlyArray<PluginCatalogEntry> = [
     tags: ["IP", "公网 IP", "内网 IP", "测速", "网络", "延迟", "下载", "上传"],
     icon: "network",
     builtinTool: "network",
+    featured: true,
+  },
+  {
+    id: "ihub-lan-file-share",
+    name: "内网文件分享",
+    description: "系统选择文件后启动 30 分钟下载服务，用随机二维码链接分享给同一局域网设备；不接受上传。",
+    category: "productivity",
+    distribution: "builtin",
+    tags: ["内网", "局域网", "LAN", "文件分享", "二维码", "下载", "离线"],
+    icon: "share",
+    builtinTool: "share",
     featured: true,
   },
   {

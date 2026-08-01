@@ -29,6 +29,7 @@ import {
   RefreshCw,
   Search,
   ScanText,
+  Share2,
   Trash2,
   Video,
   X,
@@ -40,6 +41,7 @@ import { JsonEditorWorkspace } from "./JsonEditorWorkspace";
 import { TranslationWorkbench } from "./TranslationWorkbench";
 import { NetworkWorkbench } from "./NetworkWorkbench";
 import { OcrWorkbench } from "./OcrWorkbench";
+import { LanShareWorkbench } from "./LanShareWorkbench";
 import {
   RecordingWorkbench,
   type RecordingPhase,
@@ -124,6 +126,7 @@ export type ToolboxTab =
   | "record"
   | "network"
   | "ocr"
+  | "share"
   | "rename"
   | "developer";
 
@@ -291,6 +294,7 @@ const tabs: Array<{
   { id: "record", label: "录屏", icon: Video },
   { id: "network", label: "网络", icon: Gauge },
   { id: "ocr", label: "OCR", icon: ScanText },
+  { id: "share", label: "内网分享", icon: Share2 },
   { id: "rename", label: "重命名", icon: Files },
   { id: "developer", label: "开发者", icon: Code2 },
 ];
@@ -2532,9 +2536,9 @@ export function ToolboxDrawer({
             type="button"
           />
           <motion.aside
-            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : activeTab === "network" ? "network-workbench-title" : activeTab === "ocr" ? "ocr-workbench-title" : "toolbox-title"}
+            aria-labelledby={activeTab === "search" ? "local-search-title" : activeTab === "json" ? "json-editor-title" : activeTab === "color" ? "color-workbench-title" : activeTab === "translate" ? "translation-workbench-title" : activeTab === "record" ? "recording-workbench-title" : activeTab === "network" ? "network-workbench-title" : activeTab === "ocr" ? "ocr-workbench-title" : activeTab === "share" ? "lan-share-workbench-title" : "toolbox-title"}
             aria-modal="true"
-            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : activeTab === "network" ? " toolbox-drawer--network" : activeTab === "ocr" ? " toolbox-drawer--ocr" : ""}`}
+            className={`toolbox-drawer${activeTab === "search" ? " toolbox-drawer--search" : activeTab === "json" ? " toolbox-drawer--json" : activeTab === "color" ? " toolbox-drawer--color" : activeTab === "translate" ? " toolbox-drawer--translate" : activeTab === "record" ? " toolbox-drawer--record" : activeTab === "network" ? " toolbox-drawer--network" : activeTab === "ocr" ? " toolbox-drawer--ocr" : activeTab === "share" ? " toolbox-drawer--share" : ""}`}
             initial={{ opacity: 0, y: 10, scale: 0.992 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.994 }}
@@ -2611,6 +2615,13 @@ export function ToolboxDrawer({
               />
             ) : activeTab === "ocr" ? (
               <OcrWorkbench
+                onClose={closeToolbox}
+                onCopy={copyText}
+                onStartWindowDrag={onStartWindowDrag}
+                onToast={onToast}
+              />
+            ) : activeTab === "share" ? (
+              <LanShareWorkbench
                 onClose={closeToolbox}
                 onCopy={copyText}
                 onStartWindowDrag={onStartWindowDrag}

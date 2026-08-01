@@ -8,6 +8,7 @@ mod cloud_drive;
 mod detached_plugin_window;
 mod host_log;
 mod indexer;
+mod lan_share;
 mod launcher_hotkey;
 mod launcher_shortcuts;
 mod models;

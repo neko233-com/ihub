@@ -525,6 +525,7 @@ pub struct AppState {
     pub plugins: PluginManager,
     pub clipboard_history: ClipboardHistory,
     pub cloud_drive: crate::cloud_drive::CloudDriveState,
+    pub lan_file_share: crate::lan_share::LanFileShareState,
     pub started_at: String,
     launcher_shortcuts: LauncherShortcutStore,
     plugin_assets: PluginAssetServer,
@@ -579,6 +580,7 @@ impl AppState {
             plugins,
             clipboard_history: ClipboardHistory::new(app_data_dir.clone()),
             cloud_drive: crate::cloud_drive::CloudDriveState::new(app_data_dir.clone()),
+            lan_file_share: crate::lan_share::LanFileShareState::default(),
             started_at: Utc::now().to_rfc3339(),
             launcher_shortcuts: LauncherShortcutStore::new(app_data_dir.clone()),
             plugin_assets: PluginAssetServer::new(),
@@ -2439,6 +2441,37 @@ pub async fn capture_native_screenshot(
         (Ok(_), Err(show_error)) => Err(show_error),
         (Err(capture_error), Err(show_error)) => Err(format!("{capture_error}; {show_error}")),
     }
+}
+
+/// Opens a host-owned file picker and immediately starts a bounded LAN-only
+/// download server. The WebView receives names, sizes and a random share URL,
+/// never local filesystem paths.
+#[tauri::command]
+pub fn start_lan_file_share(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::lan_share::LanFileShareView>, String> {
+    let mut dialog = rfd::FileDialog::new().set_title("选择要在内网分享的文件");
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _dialog_guard = NativeDialogGuard::begin(&state.host);
+    let Some(paths) = dialog.pick_files() else {
+        return Ok(None);
+    };
+    state.lan_file_share.start(paths).map(Some)
+}
+
+#[tauri::command]
+pub fn get_lan_file_share_status(
+    state: State<'_, AppState>,
+) -> Option<crate::lan_share::LanFileShareView> {
+    state.lan_file_share.status()
+}
+
+#[tauri::command]
+pub fn stop_lan_file_share(state: State<'_, AppState>) -> Result<(), String> {
+    state.lan_file_share.stop()
 }
 
 /// Returns display-only profile metadata. Reading this list never touches the
@@ -5583,6 +5616,9 @@ pub fn run() {
             crate::network_diagnostics::run_network_speed_test,
             crate::ocr::get_ocr_capabilities,
             crate::ocr::recognize_ocr_image,
+            start_lan_file_share,
+            get_lan_file_share_status,
+            stop_lan_file_share,
             crate::builtin_tools::format_json,
             crate::builtin_tools::query_json,
             preview_batch_rename,

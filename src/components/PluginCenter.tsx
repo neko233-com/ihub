@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Search,
   ScanText,
+  Share2,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -169,6 +170,7 @@ const iconForCatalog: Record<PluginCatalogIcon, typeof Puzzle> = {
   note: NotebookPen,
   converter: Binary,
   network: Gauge,
+  share: Share2,
 };
 
 const pluginCenterStyles = `

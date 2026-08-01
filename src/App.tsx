@@ -765,6 +765,13 @@ const builtinTools: Array<{
     tab: "ocr",
   },
   {
+    commandId: "ihub.tool.lan-share",
+    name: "内网文件分享",
+    metadata: "选择文件后生成 30 分钟局域网下载链接和二维码",
+    keywords: ["内网分享", "局域网", "LAN", "文件传输", "扫码下载", "局域网传文件"],
+    tab: "share",
+  },
+  {
     commandId: "ihub.tool.batch-rename",
     name: "批量重命名",
     metadata: "预览后再安全执行文件改名",
