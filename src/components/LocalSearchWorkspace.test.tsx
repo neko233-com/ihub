@@ -9,6 +9,8 @@ import {
   claimLocalSearchIconBatch,
   composeLocalSearchQuery,
   filterBrowserLocalSearchResults,
+  localSearchSelectionRange,
+  nextLocalSearchCategory,
   normalizeLocalSearchResults,
   settleLocalSearchIconBatch,
   shouldOpenLocalSearchResultFromKeyboard,
@@ -166,6 +168,26 @@ describe("LocalSearchWorkspace", () => {
     expect(shouldOpenLocalSearchResultFromKeyboard("Enter", true)).toBe(false);
     expect(shouldOpenLocalSearchResultFromKeyboard(" ", false)).toBe(false);
     expect(shouldOpenLocalSearchResultFromKeyboard("Space", false)).toBe(false);
+  });
+
+  it("builds contiguous Shift selections and cycles categories in both directions", () => {
+    const results = normalizeLocalSearchResults([
+      { id: "one", kind: "file", name: "one.txt", path: "C:\\one.txt", score: 3 },
+      { id: "two", kind: "file", name: "two.txt", path: "C:\\two.txt", score: 2 },
+      { id: "three", kind: "file", name: "three.txt", path: "C:\\three.txt", score: 1 },
+    ]);
+
+    expect([...localSearchSelectionRange(results, "one", "three")]).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+    expect([...localSearchSelectionRange(results, "three", "two")]).toEqual([
+      "two",
+      "three",
+    ]);
+    expect(nextLocalSearchCategory("all", -1)).toBe("installer");
+    expect(nextLocalSearchCategory("all", 1)).toBe("folder");
   });
 
   it("rejects unsafe size values without discarding a valid local result", () => {
@@ -414,9 +436,9 @@ describe("LocalSearchWorkspace visual and native-icon contracts", () => {
     expect(source).toContain(
       "onKeyDown={(event) => handleResultKeyDown(event, result)}",
     );
-    expect(source).toContain(
-      "onClick={() => setSelectedResultId(result.id)}",
-    );
+    expect(source).toContain("onClick={(event) => selectResult(result.id");
+    expect(source).toContain("onContextMenu={(event: MouseEvent<HTMLButtonElement>)");
+    expect(source).toContain('command<number>("copy_search_results_to_clipboard"');
     expect(source).not.toContain(
       "onClick={() => openCurrentResult(result)}",
     );

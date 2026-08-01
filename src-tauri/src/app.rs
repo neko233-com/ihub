@@ -77,6 +77,7 @@ const MAX_SYSTEM_ICON_TARGETS: usize = 12;
 const MAX_SYSTEM_ICON_SEARCH_ID_BYTES: usize = 8 * 1024;
 const MAX_SYSTEM_ICON_SHORTCUT_ID_BYTES: usize = 128;
 const MAX_SYSTEM_ICON_REQUEST_BYTES: usize = 32 * 1024;
+const MAX_LOCAL_SEARCH_SELECTION: usize = 64;
 const MAX_SUPER_PANEL_TEXT_BYTES: usize = 4 * 1024;
 const TEMPORARY_PATH_OPEN_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_TEMPORARY_PATH_OPEN_GRANTS: usize = 96;
@@ -1513,6 +1514,64 @@ pub async fn open_search_result(
     })
     .await
     .map_err(|error| format!("Could not open the indexed search result: {error}"))?
+}
+
+fn validate_local_search_selection(search_result_ids: &[String]) -> Result<(), String> {
+    if search_result_ids.is_empty() {
+        return Err("请先选择至少一个本地搜索结果。".to_owned());
+    }
+    if search_result_ids.len() > MAX_LOCAL_SEARCH_SELECTION {
+        return Err(format!(
+            "一次最多复制 {MAX_LOCAL_SEARCH_SELECTION} 个本地搜索结果。"
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(search_result_ids.len());
+    let mut total_bytes = 0usize;
+    for search_result_id in search_result_ids {
+        if search_result_id.is_empty() || search_result_id.len() > MAX_SYSTEM_ICON_SEARCH_ID_BYTES {
+            return Err("本地搜索结果标识无效。请重新搜索。".to_owned());
+        }
+        total_bytes = total_bytes
+            .checked_add(search_result_id.len())
+            .ok_or_else(|| "本地搜索选择过大。".to_owned())?;
+        if total_bytes > MAX_SYSTEM_ICON_REQUEST_BYTES {
+            return Err("本地搜索选择标识过长。".to_owned());
+        }
+        if !seen.insert(search_result_id.as_str()) {
+            return Err("本地搜索选择包含重复项目。".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Copies only current, host-owned index results as a native file-list
+/// clipboard payload. The renderer supplies opaque result IDs; every path is
+/// resolved again and remains guarded until the clipboard operation ends.
+#[tauri::command]
+pub async fn copy_search_results_to_clipboard(
+    search_result_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    validate_local_search_selection(&search_result_ids)?;
+    let index = state.index.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = search_result_ids
+            .iter()
+            .map(|search_result_id| {
+                resolve_current_search_result_open_target(search_result_id, &index)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let paths = prepared
+            .iter()
+            .map(|target| target.path().to_path_buf())
+            .collect::<Vec<_>>();
+        crate::clipboard_access::with_clipboard(|clipboard| clipboard.set().file_list(&paths))
+            .map_err(|error| format!("无法把所选文件复制到系统剪贴板：{error}"))?;
+        Ok(paths.len())
+    })
+    .await
+    .map_err(|error| format!("本地搜索复制任务未完成：{error}"))?
 }
 
 /// Returns opaque launcher shortcut views only. The host-private source path
@@ -5602,6 +5661,7 @@ pub fn run() {
             get_default_roots,
             open_granted_path,
             open_search_result,
+            copy_search_results_to_clipboard,
             list_launcher_shortcuts,
             pin_launcher_shortcut_from_search,
             open_launcher_shortcut,
@@ -6578,12 +6638,13 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        validate_system_icon_request, validate_utools_window_request_params, CaptureFocusLease,
-        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
-        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
-        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
-        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_local_search_selection, validate_system_icon_request,
+        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
+        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
+        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
+        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -6644,6 +6705,23 @@ mod tests {
             &["x".repeat(super::MAX_SYSTEM_ICON_SEARCH_ID_BYTES + 1)],
             &[],
         )
+        .is_err());
+    }
+
+    #[test]
+    fn local_search_clipboard_selection_is_nonempty_bounded_and_unique() {
+        assert!(validate_local_search_selection(&["one".to_owned(), "two".to_owned()]).is_ok());
+        assert!(validate_local_search_selection(&[]).is_err());
+        assert!(validate_local_search_selection(&["same".to_owned(), "same".to_owned()]).is_err());
+        assert!(validate_local_search_selection(
+            &(0..=super::MAX_LOCAL_SEARCH_SELECTION)
+                .map(|ordinal| format!("result-{ordinal}"))
+                .collect::<Vec<_>>(),
+        )
+        .is_err());
+        assert!(validate_local_search_selection(&[
+            "x".repeat(super::MAX_SYSTEM_ICON_SEARCH_ID_BYTES + 1),
+        ])
         .is_err());
     }
 

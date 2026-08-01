@@ -7263,6 +7263,15 @@ kbd {
   background: var(--local-search-selection);
 }
 
+.local-search__result.is-selected:not(.is-active) {
+  background: rgba(94, 92, 230, 0.44);
+  box-shadow: inset 3px 0 0 #bf5af2;
+}
+
+.local-search__result.is-active {
+  box-shadow: inset 3px 0 0 #64d2ff;
+}
+
 .local-search__file-icon {
   align-items: center;
   display: inline-flex;
@@ -7327,6 +7336,75 @@ kbd {
 
 .local-search__result.is-selected .local-search__result-copy small {
   color: #d9e0ff;
+}
+
+.local-search__context-layer {
+  inset: 0;
+  position: fixed;
+  z-index: 60;
+}
+
+.local-search__context-menu {
+  background: rgba(16, 24, 59, 0.96);
+  border: 1px solid rgba(100, 210, 255, 0.44);
+  border-radius: 11px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5), inset 0 1px rgba(255, 255, 255, 0.08);
+  min-width: 220px;
+  overflow: hidden;
+  position: fixed;
+}
+
+.local-search__context-menu header {
+  background: linear-gradient(135deg, rgba(10, 132, 255, 0.32), rgba(191, 90, 242, 0.28));
+  border-bottom: 1px solid rgba(100, 210, 255, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+}
+
+.local-search__context-menu header strong {
+  color: #ffffff;
+  font-size: 12px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-search__context-menu header span {
+  color: #aebaf1;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.local-search__context-menu > button {
+  align-items: center;
+  background: transparent;
+  color: #ffffff;
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 0 11px 0 13px;
+  text-align: left;
+  width: 100%;
+}
+
+.local-search__context-menu > button:hover:not(:disabled),
+.local-search__context-menu > button:focus-visible {
+  background: rgba(10, 132, 255, 0.34);
+  outline: none;
+}
+
+.local-search__context-menu kbd {
+  background: rgba(94, 92, 230, 0.34);
+  border: 1px solid rgba(191, 90, 242, 0.38);
+  border-radius: 4px;
+  color: #d9e0ff;
+  font-size: 9px;
+  padding: 2px 5px;
 }
 
 .local-search__empty {

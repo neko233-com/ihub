@@ -36,6 +36,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
   type PointerEvent,
   type UIEvent,
 } from "react";
@@ -679,6 +680,39 @@ export function shouldOpenLocalSearchResultFromKeyboard(
   return key === "Enter" && !repeat;
 }
 
+export function localSearchSelectionRange(
+  results: readonly SearchResult[],
+  anchorId: string | null,
+  targetId: string,
+): Set<string> {
+  const targetIndex = results.findIndex((result) => result.id === targetId);
+  const anchorIndex = results.findIndex((result) => result.id === anchorId);
+  if (targetIndex < 0) {
+    return new Set();
+  }
+  if (anchorIndex < 0) {
+    return new Set([targetId]);
+  }
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  return new Set(results.slice(start, end + 1).map((result) => result.id));
+}
+
+export function nextLocalSearchCategory(
+  current: LocalSearchCategoryId,
+  offset: -1 | 1,
+): LocalSearchCategoryId {
+  const index = localSearchCategories.findIndex((category) => category.id === current);
+  const nextIndex = (Math.max(0, index) + offset + localSearchCategories.length)
+    % localSearchCategories.length;
+  return localSearchCategories[nextIndex].id;
+}
+
+interface LocalSearchContextMenu {
+  x: number;
+  y: number;
+}
+
 interface LocalSearchWorkspaceProps {
   indexStatus: IndexStatus;
   isRefreshingIndex: boolean;
@@ -714,6 +748,11 @@ export function LocalSearchWorkspace({
     isDesktop() ? [] : previewResults);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(() =>
     isDesktop() ? null : previewResults[0]?.id ?? null);
+  const [selectedResultIds, setSelectedResultIds] = useState<Set<string>>(() =>
+    new Set(isDesktop() || !previewResults[0] ? [] : [previewResults[0].id]));
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(() =>
+    isDesktop() ? null : previewResults[0]?.id ?? null);
+  const [contextMenu, setContextMenu] = useState<LocalSearchContextMenu | null>(null);
   const [completedSearchKey, setCompletedSearchKey] = useState<string | null>(() =>
     isDesktop() ? null : localSearchRequestKey("", "all"));
   const [previewEnabled, setPreviewEnabled] = useState(true);
@@ -764,7 +803,7 @@ export function LocalSearchWorkspace({
   );
   const searchPending = isSearching || completedSearchKey !== currentSearchKey;
   const selectedResultAnnouncement = selectedResult
-    ? `当前选中：${selectedResult.name}，${selectedResult.path || localSearchKindLabel(selectedResult.kind)}`
+    ? `${selectedResultIds.size > 1 ? `已选择 ${selectedResultIds.size} 项，当前项目：` : "当前选中："}${selectedResult.name}，${selectedResult.path || localSearchKindLabel(selectedResult.kind)}`
     : results.length
       ? `共 ${results.length} 个结果`
       : "当前没有搜索结果";
@@ -793,10 +832,11 @@ export function LocalSearchWorkspace({
       setVisibleRange({ start: 0, end: LOCAL_SEARCH_VISIBLE_ICON_LIMIT });
       setRawResults(nextResults);
       setCompletedSearchKey(requestKey);
-      setSelectedResultId((current) =>
-        nextResults.some((result) => result.id === current)
-          ? current
-          : nextResults[0]?.id ?? null);
+      const nextSelectedId = nextResults[0]?.id ?? null;
+      setSelectedResultId(nextSelectedId);
+      setSelectedResultIds(new Set(nextSelectedId ? [nextSelectedId] : []));
+      setSelectionAnchorId(nextSelectedId);
+      setContextMenu(null);
       resultListRef.current?.scrollTo({ top: 0 });
     } catch (error) {
       if (requestId !== searchRequestRef.current) {
@@ -805,6 +845,9 @@ export function LocalSearchWorkspace({
       setRawResults([]);
       setCompletedSearchKey(requestKey);
       setSelectedResultId(null);
+      setSelectedResultIds(new Set());
+      setSelectionAnchorId(null);
+      setContextMenu(null);
       setSearchError(error instanceof Error ? error.message : "本地搜索暂不可用。");
     } finally {
       if (requestId === searchRequestRef.current) {
@@ -823,11 +866,26 @@ export function LocalSearchWorkspace({
   useEffect(() => {
     if (!results.length) {
       setSelectedResultId(null);
+      setSelectedResultIds(new Set());
+      setSelectionAnchorId(null);
       return;
     }
     if (!results.some((result) => result.id === selectedResultId)) {
-      setSelectedResultId(results[0].id);
+      const firstId = results[0].id;
+      setSelectedResultId(firstId);
+      setSelectedResultIds(new Set([firstId]));
+      setSelectionAnchorId(firstId);
+      return;
     }
+    setSelectedResultIds((current) => {
+      const next = new Set(
+        results.filter((result) => current.has(result.id)).map((result) => result.id),
+      );
+      if (!next.size && selectedResultId) {
+        next.add(selectedResultId);
+      }
+      return next;
+    });
   }, [results, selectedResultId]);
 
   useEffect(() => {
@@ -927,7 +985,34 @@ export function LocalSearchWorkspace({
       });
   }, [iconCache, results, visibleRange]);
 
-  const moveSelection = (offset: -1 | 1) => {
+  const selectResult = (
+    resultId: string,
+    options: { extend?: boolean; toggle?: boolean } = {},
+  ) => {
+    setSelectedResultId(resultId);
+    setContextMenu(null);
+    if (options.extend) {
+      setSelectedResultIds(localSearchSelectionRange(results, selectionAnchorId, resultId));
+      return;
+    }
+    if (options.toggle) {
+      setSelectedResultIds((current) => {
+        const next = new Set(current);
+        if (next.has(resultId) && next.size > 1) {
+          next.delete(resultId);
+        } else {
+          next.add(resultId);
+        }
+        return next;
+      });
+      setSelectionAnchorId(resultId);
+      return;
+    }
+    setSelectedResultIds(new Set([resultId]));
+    setSelectionAnchorId(resultId);
+  };
+
+  const moveSelection = (offset: -1 | 1, extend = false) => {
     if (!results.length) {
       return;
     }
@@ -939,13 +1024,70 @@ export function LocalSearchWorkspace({
       results.length - 1,
       Math.max(0, currentIndex + offset),
     );
-    setSelectedResultId(results[nextIndex].id);
+    selectResult(results[nextIndex].id, { extend });
+  };
+
+  const selectedResultsInOrder = () =>
+    results.filter((result) => selectedResultIds.has(result.id));
+
+  const copySelectedResults = async () => {
+    const selection = selectedResultsInOrder();
+    if (!selection.length || !resultsAreCurrent) {
+      onToast("请先选择当前搜索结果。");
+      return;
+    }
+    setContextMenu(null);
+    if (!isDesktop()) {
+      onToast(`浏览器预览：已模拟复制 ${selection.length} 个项目。`);
+      return;
+    }
+    try {
+      const copied = await command<number>("copy_search_results_to_clipboard", {
+        searchResultIds: selection.map((result) => result.id),
+      });
+      onToast(`已复制 ${copied} 个项目，可直接粘贴到资源管理器或其他应用。`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "无法复制所选项目。");
+    }
+  };
+
+  const showContextMenu = (resultId: string, x: number, y: number) => {
+    if (!selectedResultIds.has(resultId)) {
+      selectResult(resultId);
+    } else {
+      setSelectedResultId(resultId);
+    }
+    const maximumX = typeof window === "undefined" ? x : Math.max(8, window.innerWidth - 236);
+    const maximumY = typeof window === "undefined" ? y : Math.max(8, window.innerHeight - 154);
+    setContextMenu({
+      x: Math.max(8, Math.min(x, maximumX)),
+      y: Math.max(8, Math.min(y, maximumY)),
+    });
+  };
+
+  const showContextMenuForKeyboard = () => {
+    if (!selectedResult) {
+      return;
+    }
+    const row = resultRowsRef.current.get(selectedResult.id);
+    const bounds = row?.getBoundingClientRect();
+    showContextMenu(
+      selectedResult.id,
+      bounds ? bounds.left + Math.min(bounds.width - 12, 220) : 240,
+      bounds ? bounds.top + 12 : 120,
+    );
   };
 
   const handleQueryKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setActiveCategory((current) =>
+        nextLocalSearchCategory(current, event.shiftKey ? -1 : 1));
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      moveSelection(event.key === "ArrowDown" ? 1 : -1);
+      moveSelection(event.key === "ArrowDown" ? 1 : -1, event.shiftKey);
       return;
     }
     if (event.key === "Enter") {
@@ -970,6 +1112,18 @@ export function LocalSearchWorkspace({
     event: KeyboardEvent<HTMLButtonElement>,
     result: SearchResult,
   ) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      moveSelection(event.key === "ArrowDown" ? 1 : -1, event.shiftKey);
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      event.stopPropagation();
+      showContextMenuForKeyboard();
+      return;
+    }
     if (!shouldOpenLocalSearchResultFromKeyboard(event.key, event.repeat)) {
       return;
     }
@@ -981,12 +1135,22 @@ export function LocalSearchWorkspace({
   };
 
   const handleWorkspaceKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "c") {
+      if (!settingsOpen && selectedResultIds.size) {
+        event.preventDefault();
+        event.stopPropagation();
+        void copySelectedResults();
+      }
+      return;
+    }
     if (event.key !== "Escape") {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    if (settingsOpen) {
+    if (contextMenu) {
+      setContextMenu(null);
+    } else if (settingsOpen) {
       setSettingsOpen(false);
     } else if (query) {
       setQuery("");
@@ -1211,7 +1375,8 @@ export function LocalSearchWorkspace({
             </div>
           ) : results.length ? (
             results.map((result) => {
-              const selected = selectedResult?.id === result.id;
+              const active = selectedResult?.id === result.id;
+              const selected = selectedResultIds.has(result.id);
               const nativeIconSrc = nativeIconForResult(iconCache, result);
               const nativeIconPending = isDesktop()
                 && localSearchIconRequestEligible(result)
@@ -1219,10 +1384,18 @@ export function LocalSearchWorkspace({
                 && !settledIconIdentities.has(localSearchIconIdentity(result));
               return (
                 <button
-                  aria-current={selected ? "true" : undefined}
-                  className={`local-search__result${selected ? " is-selected" : ""}`}
+                  aria-current={active ? "true" : undefined}
+                  aria-pressed={selected}
+                  className={`local-search__result${selected ? " is-selected" : ""}${active ? " is-active" : ""}`}
                   key={`${result.kind}:${result.id}`}
-                  onClick={() => setSelectedResultId(result.id)}
+                  onClick={(event) => selectResult(result.id, {
+                    extend: event.shiftKey,
+                    toggle: event.ctrlKey || event.metaKey,
+                  })}
+                  onContextMenu={(event: MouseEvent<HTMLButtonElement>) => {
+                    event.preventDefault();
+                    showContextMenu(result.id, event.clientX, event.clientY);
+                  }}
                   onDoubleClick={() => openCurrentResult(result)}
                   onKeyDown={(event) => handleResultKeyDown(event, result)}
                   ref={(element) => {
@@ -1357,6 +1530,52 @@ export function LocalSearchWorkspace({
           {" 项"}
         </div>
       </footer>
+
+      {contextMenu ? (
+        <div
+          aria-label="关闭文件菜单"
+          className="local-search__context-layer"
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={() => setContextMenu(null)}
+          role="presentation"
+        >
+          <div
+            aria-label="文件菜单"
+            className="local-search__context-menu"
+            onPointerDown={(event) => event.stopPropagation()}
+            role="menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <header>
+              <strong>{selectedResultIds.size > 1 ? `${selectedResultIds.size} 个项目` : selectedResult?.name}</strong>
+              <span>文件操作</span>
+            </header>
+            <button
+              disabled={!selectedResult || !resultsAreCurrent}
+              onClick={() => {
+                if (selectedResult) {
+                  setContextMenu(null);
+                  openCurrentResult(selectedResult);
+                }
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <span>打开当前项目</span>
+              <kbd>Enter</kbd>
+            </button>
+            <button
+              disabled={!selectedResultIds.size || !resultsAreCurrent}
+              onClick={() => void copySelectedResults()}
+              role="menuitem"
+              type="button"
+            >
+              <span>复制所选项目</span>
+              <kbd>Ctrl C</kbd>
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {settingsOpen ? (
         <aside aria-label="本地搜索设置" className="local-search__settings">
