@@ -5242,10 +5242,15 @@ mod tests {
 
         let started = Instant::now();
         let result = manager_at(storage.clone()).run_command(plugin_id, "wait", None);
+        // Measure the command path before teardown. Windows Defender or another
+        // filesystem filter may hold the copied fixture briefly after the
+        // worker is reaped, and that cleanup latency is not part of the
+        // command timeout contract this test covers.
+        let elapsed = started.elapsed();
         let _ = fs::remove_dir_all(&storage);
         let error = result.expect_err("the sleeping worker must time out");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            elapsed < Duration::from_secs(3),
             "the one-second policy must not wait for the child test's full sleep"
         );
         assert!(error.contains("timed out after 1000 ms"), "{error}");
