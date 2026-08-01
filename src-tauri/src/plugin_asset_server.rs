@@ -2119,11 +2119,9 @@ const utools = Object.freeze({{
     if (typeof body !== "string") return;
     const trimmedBody = body.trim();
     if (trimmedBody.length === 0 || Array.from(trimmedBody).length > 1000) return;
-    if (clickFeatureCode !== undefined) {{
-      console.error("iHub compatibility notification click routing is not supported yet.");
-      return;
-    }}
-    void call("compatibility.utools.notification.show", {{ body: trimmedBody }})
+    if (clickFeatureCode !== undefined && (typeof clickFeatureCode !== "string" || clickFeatureCode.trim().length === 0 || Array.from(clickFeatureCode.trim()).length > 160 || /[\u0000-\u001f\u007f]/.test(clickFeatureCode))) return;
+    const params = clickFeatureCode === undefined ? {{ body: trimmedBody }} : {{ body: trimmedBody, clickFeatureCode: clickFeatureCode.trim() }};
+    void call("compatibility.utools.notification.show", params)
       .catch((error) => console.error("iHub compatibility notification failed", error));
   }},
   shellOpenExternal(url) {{
@@ -2150,6 +2148,12 @@ const utools = Object.freeze({{
     if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || new TextEncoder().encode(path).byteLength > 8192 || /[\u0000-\u001f\u007f]/.test(path)) return "";
     try {{ return syncFileIcon(path); }}
     catch (error) {{ console.error("iHub compatibility file icon failed", error); return ""; }}
+  }},
+  readCurrentFolderPath() {{
+    return call("compatibility.utools.system.readCurrentFolderPath", {{}});
+  }},
+  readCurrentBrowserUrl() {{
+    return call("compatibility.utools.system.readCurrentBrowserUrl", {{}});
   }},
   shellBeep() {{
     void call("compatibility.utools.shell.beep", {{}})
@@ -2591,6 +2595,7 @@ mod tests {
         assert!(script.contains("compatibility.utools.clipboard.writeFiles"));
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
+        assert!(script.contains("clickFeatureCode: clickFeatureCode.trim()"));
         assert!(script.contains("compatibility.utools.notification.show"));
         assert!(script.contains("shellOpenExternal"));
         assert!(script.contains("compatibility.utools.shell.openExternal"));
@@ -2603,6 +2608,10 @@ mod tests {
         assert!(script.contains("getFileIcon(path)"));
         assert!(script.contains("request.open(\"POST\", syncIconRoute, false)"));
         assert!(script.contains("X-IHub-Utools-Icon"));
+        assert!(script.contains("readCurrentFolderPath()"));
+        assert!(script.contains("compatibility.utools.system.readCurrentFolderPath"));
+        assert!(script.contains("readCurrentBrowserUrl()"));
+        assert!(script.contains("compatibility.utools.system.readCurrentBrowserUrl"));
         assert!(script.contains("shellBeep"));
         assert!(script.contains("compatibility.utools.shell.beep"));
         assert!(script.contains("screenColorPick"));

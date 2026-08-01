@@ -63,6 +63,8 @@ const pluginHostMethods = new Set([
   "compatibility.utools.shell.openPath",
   "compatibility.utools.shell.showItemInFolder",
   "compatibility.utools.shell.trashItem",
+  "compatibility.utools.system.readCurrentBrowserUrl",
+  "compatibility.utools.system.readCurrentFolderPath",
   "compatibility.utools.window.hideMain",
   "compatibility.utools.window.outPlugin",
   "compatibility.utools.window.setHeight",

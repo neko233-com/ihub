@@ -64,6 +64,8 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.openPath", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.showItemInFolder", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.trashItem", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.system.readCurrentFolderPath", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.system.readCurrentBrowserUrl", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.outPlugin", { isKill: false })).ok).toBe(true);
     expect(validatePluginBridgeCall(call(), "com.example.safe").ok).toBe(true);

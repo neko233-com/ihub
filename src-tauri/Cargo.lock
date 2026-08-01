@@ -2032,6 +2032,7 @@ dependencies = [
  "keyring",
  "libc",
  "notify",
+ "notify-rust",
  "rayon",
  "regex",
  "reqwest",

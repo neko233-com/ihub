@@ -570,6 +570,10 @@ pub struct AppState {
     launcher_hotkey_change: Mutex<()>,
     launcher_hotkey: Mutex<LauncherHotkeyStatus>,
     launcher_hotkey_toggle: Mutex<LauncherHotkeyToggleGate>,
+    /// The one external top-level window that owned the foreground immediately
+    /// before the current launcher reveal. uTools compatibility reads never
+    /// enumerate arbitrary windows and revalidate this exact HWND/PID pair.
+    previous_foreground: Mutex<Option<crate::utools_foreground::ForegroundWindowTarget>>,
     /// Serializes best-effort plugin binding refreshes without ever sharing
     /// the launcher's registration transaction or unregistering its recovery
     /// accelerator.
@@ -626,6 +630,7 @@ impl AppState {
             launcher_hotkey_change: Mutex::new(()),
             launcher_hotkey: Mutex::new(LauncherHotkeyStatus::unavailable()),
             launcher_hotkey_toggle: Mutex::new(LauncherHotkeyToggleGate::default()),
+            previous_foreground: Mutex::new(None),
             plugin_shortcut_change: Mutex::new(()),
             plugin_shortcuts: Mutex::new(PluginShortcutRegistry::default()),
             super_panel,
@@ -666,6 +671,26 @@ impl AppState {
             .launcher_hotkey_toggle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = LauncherHotkeyToggleGate::default();
+    }
+
+    fn capture_previous_foreground(&self) {
+        *self
+            .previous_foreground
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            crate::utools_foreground::capture_external_foreground_window();
+    }
+
+    fn previous_foreground(
+        &self,
+    ) -> Result<crate::utools_foreground::ForegroundWindowTarget, String> {
+        self.previous_foreground
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ok_or_else(|| {
+                "iHub did not capture an external foreground window for this launcher session."
+                    .to_owned()
+            })
     }
 
     fn plugin_shortcut_binding(&self, shortcut: &str) -> Option<PluginShortcutBinding> {
@@ -3610,6 +3635,26 @@ fn confirm_utools_local_path_action(
     dialog.show() == rfd::MessageDialogResult::Yes
 }
 
+fn confirm_utools_foreground_read(
+    app: &AppHandle,
+    host: &PluginHostState,
+    plugin_id: &str,
+    subject: &str,
+) -> bool {
+    let mut dialog = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("iHub · {plugin_id} 请求读取{subject}"))
+        .set_description(format!(
+            "插件请求读取打开 iHub 前最后一个活动窗口的{subject}。\n\n仅检查该窗口，不会枚举其他窗口、模拟按键或读取剪贴板。是否允许？"
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _dialog_guard = NativeDialogGuard::begin(host);
+    dialog.show() == rfd::MessageDialogResult::Yes
+}
+
 fn decode_utools_clipboard_png_data_url(
     data_url: &str,
 ) -> Result<arboard::ImageData<'static>, String> {
@@ -3782,6 +3827,66 @@ pub async fn plugin_host_call(
         .map_err(|error| format!("Cursor color sampling task failed: {error}"))??;
         return serde_json::to_value(PluginCursorColor::from(sample))
             .map_err(|error| format!("Could not encode cursor color sample: {error}"));
+    }
+
+    if matches!(
+        request.method.as_str(),
+        "compatibility.utools.system.readCurrentFolderPath"
+            | "compatibility.utools.system.readCurrentBrowserUrl"
+    ) {
+        let method = request.method.clone();
+        let (target, native_lease) = plugin_assets.with_plugin_bridge_operation(
+            &request_plugin_id,
+            || {
+                if !request.surface
+                    || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                {
+                    return Err(
+                        "Reading the preceding window is available only from the plugin's visible active surface."
+                            .to_owned(),
+                    );
+                }
+                ensure_plugin_host_request_is_allowed(&request, &state)?;
+                if request
+                    .params
+                    .as_object()
+                    .map_or(true, |params| !params.is_empty())
+                {
+                    return Err("uTools current-window readers do not accept parameters.".to_owned());
+                }
+                if !state.host.admit_plugin_notification(&request_plugin_id) {
+                    return Err(format!(
+                        "Interactive uTools alerts are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                        PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                    ));
+                }
+                Ok((
+                    state.previous_foreground()?,
+                    server.begin_native_command(&request_plugin_id)?,
+                ))
+            },
+        )?;
+        let subject = if method.ends_with("FolderPath") {
+            "文件管理器路径"
+        } else {
+            "浏览器网址"
+        };
+        if !confirm_utools_foreground_read(&app, &state.host, &request_plugin_id, subject) {
+            return Err(format!(
+                "The user declined access to the preceding {subject}."
+            ));
+        }
+        let value = tauri::async_runtime::spawn_blocking(move || {
+            if method.ends_with("FolderPath") {
+                crate::utools_foreground::read_folder_path(target)
+            } else {
+                crate::utools_foreground::read_browser_url(target)
+            }
+        })
+        .await
+        .map_err(|error| format!("The current-window read task failed: {error}"))??;
+        drop(native_lease);
+        return Ok(Value::String(value));
     }
 
     // A native worker can take up to the host command deadline. Reserve it
@@ -4722,19 +4827,177 @@ fn show_plugin_notification(
     compatibility_body_only: bool,
 ) -> Result<Value, String> {
     let body = plugin_notification_body(&request.params, compatibility_body_only)?;
+    let click_feature_code = compatibility_body_only
+        .then(|| utools_notification_click_feature_code(&request.params))
+        .transpose()?
+        .flatten();
     if !state.host.admit_plugin_notification(&request.plugin_id) {
         return Err(format!(
             "Plugin notifications are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
             PLUGIN_NOTIFICATION_WINDOW.as_secs()
         ));
     }
-    app.notification()
-        .builder()
-        .title(format!("iHub · {}", request.plugin_id))
-        .body(body)
-        .show()
-        .map_err(|error| format!("Could not show the system notification: {error}"))?;
+    if let Some(feature_code) = click_feature_code {
+        let _ = resolve_utools_notification_command(
+            &state.plugins,
+            &state.plugin_settings,
+            &request.plugin_id,
+            &feature_code,
+        )?;
+        show_clickable_utools_notification(app, request.plugin_id.clone(), body, feature_code)?;
+    } else {
+        app.notification()
+            .builder()
+            .title(format!("iHub · {}", request.plugin_id))
+            .body(body)
+            .show()
+            .map_err(|error| format!("Could not show the system notification: {error}"))?;
+    }
     Ok(json!({ "accepted": true }))
+}
+
+fn utools_notification_click_feature_code(params: &Value) -> Result<Option<String>, String> {
+    let Some(value) = params.get("clickFeatureCode") else {
+        return Ok(None);
+    };
+    let Some(code) = value.as_str() else {
+        return Err("uTools notification clickFeatureCode must be a string.".to_owned());
+    };
+    let code = code.trim();
+    if code.is_empty() || code.chars().count() > 160 || code.chars().any(char::is_control) {
+        return Err(
+            "uTools notification clickFeatureCode must contain 1-160 non-control characters."
+                .to_owned(),
+        );
+    }
+    Ok(Some(code.to_owned()))
+}
+
+fn resolve_utools_notification_command(
+    plugins: &PluginManager,
+    settings: &PluginSettingsStore,
+    plugin_id: &str,
+    feature_code: &str,
+) -> Result<String, String> {
+    plugins.ensure_plugin_enabled(plugin_id)?;
+    let bundle = plugins.frontend_asset_bundle(plugin_id)?;
+    let config = bundle.utools_compat.ok_or_else(|| {
+        "Notification click routing requires a verified uTools package.".to_owned()
+    })?;
+    if let Some(command) = config
+        .commands
+        .into_iter()
+        .find(|command| command.code == feature_code)
+    {
+        return Ok(command.command_id);
+    }
+    if let Some(feature) = utools_dynamic_features(settings, plugin_id)
+        .into_iter()
+        .find(|feature| {
+            feature.code == feature_code && utools_dynamic_feature_matches_platform(feature)
+        })
+    {
+        return Ok(utools_dynamic_feature_command_id(&feature.code));
+    }
+    Err(format!(
+        "uTools notification feature '{feature_code}' is not currently declared by this plugin."
+    ))
+}
+
+#[cfg(windows)]
+fn show_clickable_utools_notification(
+    app: &AppHandle,
+    plugin_id: String,
+    body: String,
+    feature_code: String,
+) -> Result<(), String> {
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .summary(&format!("iHub · {plugin_id}"))
+        .body(&body)
+        .auto_icon();
+    let executable_directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let is_cargo_output = executable_directory.as_ref().is_some_and(|directory| {
+        directory.ends_with(Path::new("target/debug"))
+            || directory.ends_with(Path::new("target/release"))
+    });
+    if !is_cargo_output {
+        notification.app_id(&app.config().identifier);
+    }
+    let handle = notification
+        .show()
+        .map_err(|error| format!("Could not show the clickable Windows notification: {error}"))?;
+    let callback_app = app.clone();
+    std::thread::Builder::new()
+        .name("ihub-utools-notification".to_owned())
+        .spawn(move || {
+            let result =
+                handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                    if matches!(
+                        response,
+                        notify_rust::NotificationResponse::Default
+                            | notify_rust::NotificationResponse::Action(_)
+                    ) {
+                        dispatch_utools_notification_click(
+                            &callback_app,
+                            &plugin_id,
+                            &feature_code,
+                        );
+                    }
+                });
+            if let Err(error) = result {
+                host_log::warn(
+                    "plugins",
+                    format!("Could not wait for a uTools notification response: {error}"),
+                );
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the notification response worker: {error}"))
+}
+
+#[cfg(not(windows))]
+fn show_clickable_utools_notification(
+    _app: &AppHandle,
+    _plugin_id: String,
+    _body: String,
+    _feature_code: String,
+) -> Result<(), String> {
+    Err("uTools notification click routing has been runtime-verified on Windows only.".to_owned())
+}
+
+fn dispatch_utools_notification_click(app: &AppHandle, plugin_id: &str, feature_code: &str) {
+    let state = app.state::<AppState>();
+    let command_id = match resolve_utools_notification_command(
+        &state.plugins,
+        &state.plugin_settings,
+        plugin_id,
+        feature_code,
+    ) {
+        Ok(command_id) => command_id,
+        Err(error) => {
+            host_log::warn(
+                "plugins",
+                format!("Ignored stale uTools notification activation: {error}"),
+            );
+            return;
+        }
+    };
+    show_launcher(app);
+    let payload = PluginShortcutEvent {
+        plugin_id: plugin_id.to_owned(),
+        shortcut: "notification".to_owned(),
+        command_id: Some(command_id),
+        keyword: None,
+    };
+    if let Err(error) = app.emit_to("main", "ihub://plugin-global-shortcut", payload) {
+        host_log::warn(
+            "plugins",
+            format!("Could not route a uTools notification activation: {error}"),
+        );
+    }
 }
 
 fn plugin_notification_body(
@@ -4745,7 +5008,7 @@ fn plugin_notification_body(
         return Err("Plugin notification parameters must be an object.".to_owned());
     };
     let allowed_keys: &[&str] = if compatibility_body_only {
-        &["body"]
+        &["body", "clickFeatureCode"]
     } else {
         &["title", "body", "level"]
     };
@@ -4837,6 +5100,8 @@ fn ensure_plugin_host_request_is_allowed(
         || request
             .method
             .starts_with("compatibility.utools.shell.showItemInFolder")
+        || request.method == "compatibility.utools.system.readCurrentFolderPath"
+        || request.method == "compatibility.utools.system.readCurrentBrowserUrl"
         || request.method == "compatibility.utools.clipboard.writeFiles")
         && !request.surface
     {
@@ -7153,10 +7418,11 @@ fn reveal_super_panel(app: &AppHandle, trigger: SuperPanelTrigger) {
         "A deliberate long-right-click opened the compact launcher.",
     );
 
-    let _ = window.unminimize();
     if let Some(state) = window.try_state::<AppState>() {
+        state.capture_previous_foreground();
         state.launcher_focus.begin_reveal();
     }
+    let _ = window.unminimize();
     apply_super_panel_reveal_geometry(
         &window,
         PhysicalPosition::new(event.physical_x, event.physical_y),
@@ -7253,11 +7519,14 @@ fn apply_launcher_visibility(app: &AppHandle, source: LauncherInvocationSource) 
         // the resident launcher clears that temporary placement on the next
         // reveal because no position is ever written to durable state.
         let fresh_reveal = action == LauncherVisibilityAction::RevealFresh;
-        let _ = window.unminimize();
         if fresh_reveal {
             if let Some(state) = window.try_state::<AppState>() {
+                state.capture_previous_foreground();
                 state.launcher_focus.begin_reveal();
             }
+        }
+        let _ = window.unminimize();
+        if fresh_reveal {
             // The launcher is intentionally ephemeral: a user may drag it
             // while it is visible, but every hidden-to-visible reveal starts
             // from its Spotlight-like centered position. We center against
@@ -7913,7 +8182,8 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        utools_dynamic_feature_command_id, utools_dynamic_feature_key, validate_external_url,
+        utools_dynamic_feature_command_id, utools_dynamic_feature_key,
+        utools_notification_click_feature_code, validate_external_url,
         validate_local_search_selection, validate_plugin_clipboard_text,
         validate_system_icon_request, validate_utools_copy_file_paths,
         validate_utools_dynamic_feature, validate_utools_expend_height, validate_utools_input_text,
@@ -10202,6 +10472,21 @@ mod tests {
                 .expect("valid compatibility notification"),
             "兼容通知"
         );
+        assert_eq!(
+            plugin_notification_body(
+                &json!({ "body": "兼容通知", "clickFeatureCode": "open" }),
+                true,
+            )
+            .expect("click routing stays outside the displayed body"),
+            "兼容通知"
+        );
+        assert_eq!(
+            utools_notification_click_feature_code(
+                &json!({ "body": "兼容通知", "clickFeatureCode": " open " })
+            )
+            .expect("valid click feature code"),
+            Some("open".to_owned())
+        );
 
         for params in [
             json!({}),
@@ -10218,11 +10503,12 @@ mod tests {
             true,
         )
         .is_err());
-        assert!(plugin_notification_body(
-            &json!({ "body": "ok", "clickFeatureCode": "unsafe" }),
-            true,
-        )
-        .is_err());
+        for value in [json!(7), json!(""), json!("bad\ncode")] {
+            assert!(utools_notification_click_feature_code(
+                &json!({ "body": "ok", "clickFeatureCode": value })
+            )
+            .is_err());
+        }
     }
 
     #[test]
