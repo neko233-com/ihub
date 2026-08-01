@@ -11,6 +11,8 @@ export interface OfflineTranslationResult {
   coverage: number;
   detectedSource: string;
   packId: string | null;
+  packIds: string[];
+  pivotLanguage: string | null;
   text: string;
   unknownSegments: string[];
 }
@@ -209,19 +211,99 @@ export const BUILTIN_ZH_EN_PACK: OfflineTranslationPack = {
   entries: Object.fromEntries(builtInPairs),
 };
 
-export function detectOfflineLanguage(text: string): "zh-CN" | "en" {
+function translationPacks(additionalPacks: readonly OfflineTranslationPack[]) {
+  // The most recently imported packs are stored first. They intentionally
+  // override bundled terminology while the bundled pack remains the final
+  // fallback for the default Chinese-English route.
+  return [...additionalPacks, BUILTIN_ZH_EN_PACK];
+}
+
+function addScore(scores: Map<string, number>, language: string, score: number) {
+  scores.set(language, (scores.get(language) ?? 0) + score);
+}
+
+function languageSignals(text: string): Set<string> {
+  const normalized = text.normalize("NFKC").toLocaleLowerCase().slice(0, 4_096);
+  const signals = new Set(normalized.match(/[\p{L}\p{N}'-]+/gu) ?? []);
+  const compactCjk = Array.from(normalized)
+    .filter((character) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(character))
+    .join("");
+  const characters = Array.from(compactCjk);
+  for (let start = 0; start < characters.length; start += 1) {
+    for (let length = 1; length <= 8 && start + length <= characters.length; length += 1) {
+      signals.add(characters.slice(start, start + length).join(""));
+    }
+  }
+  return signals;
+}
+
+export function detectOfflineLanguage(
+  text: string,
+  additionalPacks: readonly OfflineTranslationPack[] = [],
+): string {
   let hanCount = 0;
   let latinCount = 0;
+  let kanaCount = 0;
+  let hangulCount = 0;
+  let cyrillicCount = 0;
+  let arabicCount = 0;
   for (const character of text) {
-    if (han.test(character)) hanCount += 1;
+    if (/\p{Script=Hiragana}|\p{Script=Katakana}/u.test(character)) kanaCount += 1;
+    else if (/\p{Script=Hangul}/u.test(character)) hangulCount += 1;
+    else if (/\p{Script=Cyrillic}/u.test(character)) cyrillicCount += 1;
+    else if (/\p{Script=Arabic}/u.test(character)) arabicCount += 1;
+    else if (han.test(character)) hanCount += 1;
     else if (latin.test(character)) latinCount += 1;
   }
-  return hanCount >= latinCount ? "zh-CN" : "en";
+  const packs = translationPacks(additionalPacks);
+  const languages = Array.from(new Set([
+    "zh-CN",
+    "en",
+    ...packs.flatMap((pack) => [pack.source, pack.target]),
+  ]));
+  const scores = new Map(languages.map((language) => [language, 0]));
+  const signals = languageSignals(text);
+  const normalizedInput = normalizedSource(text, "en");
+
+  for (const language of languages) {
+    const base = language.toLocaleLowerCase().split("-")[0];
+    if (base === "zh") addScore(scores, language, hanCount * 8);
+    if (base === "ja") addScore(scores, language, kanaCount * 40 + hanCount * 2);
+    if (base === "ko") addScore(scores, language, hangulCount * 40);
+    if (["ru", "uk", "bg", "sr", "mk", "be"].includes(base)) {
+      addScore(scores, language, cyrillicCount * 12);
+    }
+    if (["ar", "fa", "ur"].includes(base)) addScore(scores, language, arabicCount * 12);
+    if (base === "en") addScore(scores, language, latinCount * 2);
+    else if (latinCount > 0 && ["fr", "de", "es", "it", "pt", "nl", "sv", "da", "fi"].includes(base)) {
+      addScore(scores, language, latinCount);
+    }
+  }
+
+  for (const pack of packs) {
+    for (const [source, target] of Object.entries(pack.entries)) {
+      for (const [language, phrase] of [[pack.source, source], [pack.target, target]] as const) {
+        const normalized = normalizedSource(phrase, language);
+        if (normalized === normalizedInput) addScore(scores, language, 1_000);
+        else if (Array.from(normalized).length <= 64 && signals.has(normalized.toLocaleLowerCase())) {
+          addScore(scores, language, Math.min(80, Array.from(normalized).length * 8));
+        }
+      }
+    }
+  }
+
+  return languages.reduce((best, language) => {
+    const score = scores.get(language) ?? 0;
+    const bestScore = scores.get(best) ?? 0;
+    return score > bestScore ? language : best;
+  }, hanCount >= latinCount ? "zh-CN" : "en");
 }
 
 function normalizedSource(value: string, language: string): string {
   const normalized = value.trim().replace(/\s+/g, " ");
-  return language === "en" ? normalized.toLocaleLowerCase("en") : normalized;
+  return language.toLocaleLowerCase().startsWith("en")
+    ? normalized.toLocaleLowerCase("en")
+    : normalized;
 }
 
 function packPairs(pack: OfflineTranslationPack, source: string, target: string) {
@@ -232,6 +314,29 @@ function packPairs(pack: OfflineTranslationPack, source: string, target: string)
     return Object.entries(pack.entries).map(([from, to]) => [normalizedSource(to, source), from] as const);
   }
   return [];
+}
+
+interface TranslationRoute {
+  packIds: string[];
+  pairs: ReadonlyArray<readonly [string, string]>;
+}
+
+function translationRoute(
+  packs: readonly OfflineTranslationPack[],
+  source: string,
+  target: string,
+): TranslationRoute | null {
+  const entries = new Map<string, string>();
+  const packIds: string[] = [];
+  for (const pack of packs) {
+    const pairs = packPairs(pack, source, target);
+    if (pairs.length === 0) continue;
+    packIds.push(pack.id);
+    for (const [from, to] of pairs) {
+      if (!entries.has(from)) entries.set(from, to);
+    }
+  }
+  return entries.size > 0 ? { packIds, pairs: Array.from(entries.entries()) } : null;
 }
 
 function finishEnglish(value: string): string {
@@ -316,7 +421,7 @@ function translateSpaceDelimited(
     index += 1;
   }
 
-  const joined = target === "zh-CN"
+  const joined = target.toLocaleLowerCase().startsWith("zh")
     ? output.join("").replace(/([，。！？：；])(?=[A-Za-z])/g, "$1 ")
     : finishEnglish(output.join(" "));
   return {
@@ -335,29 +440,72 @@ export function translateOffline(
   if (input.length > MAX_OFFLINE_TRANSLATION_INPUT_CHARACTERS) {
     throw new Error(`离线翻译输入不能超过 ${MAX_OFFLINE_TRANSLATION_INPUT_CHARACTERS.toLocaleString()} 个字符。`);
   }
-  const detectedSource = sourceLanguage === "auto" ? detectOfflineLanguage(input) : sourceLanguage;
+  const detectedSource = sourceLanguage === "auto"
+    ? detectOfflineLanguage(input, additionalPacks)
+    : sourceLanguage;
   if (detectedSource === targetLanguage) {
-    return { coverage: 1, detectedSource, packId: null, text: input, unknownSegments: [] };
+    return {
+      coverage: 1,
+      detectedSource,
+      packId: null,
+      packIds: [],
+      pivotLanguage: null,
+      text: input,
+      unknownSegments: [],
+    };
   }
-  const packs = [BUILTIN_ZH_EN_PACK, ...additionalPacks];
-  const selectedPack = packs.find((pack) => packPairs(pack, detectedSource, targetLanguage).length > 0);
-  if (!selectedPack) {
-    throw new Error(`未安装 ${detectedSource} → ${targetLanguage} 的本地语言包。`);
+  const packs = translationPacks(additionalPacks);
+
+  const translateRoute = (
+    value: string,
+    source: string,
+    target: string,
+    route: TranslationRoute,
+  ) => {
+    const exact = new Map(route.pairs).get(normalizedSource(value, source));
+    if (exact !== undefined) {
+      return { coverage: 1, text: exact, unknown: [] as string[] };
+    }
+    return source.toLocaleLowerCase().startsWith("zh")
+      ? translateChinese(value, route.pairs)
+      : translateSpaceDelimited(value, route.pairs, target);
+  };
+
+  const direct = translationRoute(packs, detectedSource, targetLanguage);
+  if (direct) {
+    const translated = translateRoute(input, detectedSource, targetLanguage, direct);
+    return {
+      coverage: translated.coverage,
+      detectedSource,
+      packId: direct.packIds[0] ?? null,
+      packIds: direct.packIds,
+      pivotLanguage: null,
+      text: translated.text,
+      unknownSegments: translated.unknown,
+    };
   }
-  const pairs = packPairs(selectedPack, detectedSource, targetLanguage);
-  const exact = new Map(pairs).get(normalizedSource(input, detectedSource));
-  if (exact !== undefined) {
-    return { coverage: 1, detectedSource, packId: selectedPack.id, text: exact, unknownSegments: [] };
+
+  const pivotLanguage = "en";
+  const firstRoute = detectedSource === pivotLanguage
+    ? null
+    : translationRoute(packs, detectedSource, pivotLanguage);
+  const secondRoute = targetLanguage === pivotLanguage
+    ? null
+    : translationRoute(packs, pivotLanguage, targetLanguage);
+  if (!firstRoute || !secondRoute) {
+    throw new Error(`未安装 ${detectedSource} → ${targetLanguage} 的本地语言包或英语枢轴路径。`);
   }
-  const translated = detectedSource === "zh-CN"
-    ? translateChinese(input, pairs)
-    : translateSpaceDelimited(input, pairs, targetLanguage);
+  const first = translateRoute(input, detectedSource, pivotLanguage, firstRoute);
+  const second = translateRoute(first.text, pivotLanguage, targetLanguage, secondRoute);
+  const packIds = Array.from(new Set([...firstRoute.packIds, ...secondRoute.packIds]));
   return {
-    coverage: translated.coverage,
+    coverage: Math.min(first.coverage, second.coverage),
     detectedSource,
-    packId: selectedPack.id,
-    text: translated.text,
-    unknownSegments: translated.unknown,
+    packId: packIds[0] ?? null,
+    packIds,
+    pivotLanguage,
+    text: second.text,
+    unknownSegments: Array.from(new Set([...first.unknown, ...second.unknown])),
   };
 }
 
