@@ -1125,6 +1125,11 @@ const utools = Object.freeze({{
     void call("compatibility.utools.notification.show", {{ body: trimmedBody }})
       .catch((error) => console.error("iHub compatibility notification failed", error));
   }},
+  shellOpenExternal(url) {{
+    if (typeof url !== "string" || url.length === 0 || Array.from(url).length > 2048 || /[\u0000-\u001f\u007f]/.test(url)) return;
+    void call("compatibility.utools.shell.openExternal", {{ url }})
+      .catch((error) => console.error("iHub compatibility external URL failed", error));
+  }},
   screenColorPick(callback) {{
     if (typeof callback !== "function") return;
     void call("cursorColor.sampleOnce", {{}}).then((color) => callback(color)).catch((error) => console.error("iHub compatibility color pick failed", error));
@@ -1287,6 +1292,8 @@ mod tests {
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("compatibility.utools.notification.show"));
+        assert!(script.contains("shellOpenExternal"));
+        assert!(script.contains("compatibility.utools.shell.openExternal"));
         assert!(script.contains("screenColorPick"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("invokePluginDetach"));

@@ -3978,6 +3978,10 @@ fn plugin_host_call_for_active_lease(
         "compatibility.utools.notification.show" => {
             show_plugin_notification(app, &request, state, true)
         }
+        "compatibility.utools.shell.openExternal" => {
+            open_external_in_system(required_string(&request.params, "url")?)?;
+            Ok(json!({ "opened": true }))
+        }
         _ => Err(format!(
             "Unsupported plugin host method '{}'.",
             request.method
@@ -6594,10 +6598,7 @@ fn temporary_path_open_id_is_valid(open_id: &str) -> bool {
 }
 
 fn open_external_in_system(url: &str) -> Result<(), String> {
-    let allowed = ["https://", "http://", "mailto:"];
-    if !allowed.iter().any(|prefix| url.starts_with(prefix)) {
-        return Err("Only http(s) and mailto URLs can be opened externally.".to_owned());
-    }
+    validate_external_url(url)?;
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = background_command("explorer.exe");
@@ -6620,6 +6621,24 @@ fn open_external_in_system(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Could not open external URL: {error}"))
+}
+
+fn validate_external_url(value: &str) -> Result<(), String> {
+    const MAX_EXTERNAL_URL_CHARS: usize = 2_048;
+    if value.is_empty()
+        || value.chars().count() > MAX_EXTERNAL_URL_CHARS
+        || value.chars().any(char::is_control)
+    {
+        return Err("External URL is empty, too long, or contains control characters.".to_owned());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| "External URL is invalid.".to_owned())?;
+    match parsed.scheme() {
+        "http" | "https" if parsed.host_str().is_some() => Ok(()),
+        "mailto" if !parsed.path().is_empty() => Ok(()),
+        _ => Err(
+            "Only absolute http(s) URLs and mailto recipients can be opened externally.".to_owned(),
+        ),
+    }
 }
 
 fn utools_db_storage_key(key: &str) -> Result<String, String> {
@@ -6814,7 +6833,7 @@ mod tests {
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        validate_local_search_selection, validate_system_icon_request,
+        validate_external_url, validate_local_search_selection, validate_system_icon_request,
         validate_utools_expend_height, validate_utools_window_request_params, CaptureFocusLease,
         CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
         LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
@@ -6882,6 +6901,31 @@ mod tests {
         ] {
             assert!(validate_utools_expend_height(&params).is_err());
         }
+    }
+
+    #[test]
+    fn external_urls_require_bounded_explicit_web_or_mail_schemes() {
+        for value in [
+            "https://example.com/path?q=1",
+            "http://127.0.0.1:8080/",
+            "HTTPS://example.com",
+            "mailto:user@example.com?subject=iHub",
+        ] {
+            assert!(validate_external_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "",
+            "https://",
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "mailto:",
+            "https://example.com/\nunsafe",
+        ] {
+            assert!(validate_external_url(value).is_err(), "{value}");
+        }
+        assert!(
+            validate_external_url(&format!("https://example.com/{}", "x".repeat(2_048))).is_err()
+        );
     }
 
     #[test]
