@@ -1126,6 +1126,7 @@ export function App() {
   // reliably prevents the completion handler from starting an install.
   const autoInstallSignedUpdatesRef = useRef(autoInstallSignedUpdates);
   const [activePlugin, setActivePlugin] = useState<PluginInfo | null>(null);
+  const [pluginExpendHeight, setPluginExpendHeight] = useState<number | null>(null);
   const [pendingPluginEvent, setPendingPluginEvent] = useState<PluginFrontendEvent | null>(null);
   const [pendingPluginShortcut, setPendingPluginShortcut] = useState<PluginGlobalShortcutEvent | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1292,6 +1293,10 @@ export function App() {
   }, [activePlugin, invalidateLauncherContextHandoff, plugins]);
 
   useEffect(() => {
+    setPluginExpendHeight(null);
+  }, [activePlugin?.id]);
+
+  useEffect(() => {
     if (!isDesktop()) {
       return;
     }
@@ -1301,6 +1306,8 @@ export function App() {
       ? 602
       : surface === "plugin-center"
         ? 602
+        : surface === "plugin"
+          ? (pluginExpendHeight ?? 444) + 60
         : surface === "launcher" || surface === "hidden"
           ? 380
           : 504;
@@ -1326,7 +1333,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [surface, toolboxTab]);
+  }, [pluginExpendHeight, surface, toolboxTab]);
 
   const contentResults = useMemo(
     () => findLauncherContentResults(query, quickNotes, clipboardHistory),
@@ -4319,6 +4326,7 @@ export function App() {
             onDetach={detachActivePlugin}
             onClose={returnToLauncher}
             onHideMainWindow={hidePluginHostWindow}
+            onSetExpendHeight={setPluginExpendHeight}
             onPendingEventHandled={(eventId) => {
               setPendingPluginEvent((current) => (current?.id === eventId ? null : current));
             }}

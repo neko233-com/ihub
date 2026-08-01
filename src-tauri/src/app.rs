@@ -3689,6 +3689,10 @@ fn plugin_host_call_for_active_lease(
             validate_utools_window_request_params(&request.params, &[])?;
             Ok(json!(true))
         }
+        "compatibility.utools.window.setHeight" => {
+            let height = validate_utools_expend_height(&request.params)?;
+            Ok(json!({ "accepted": true, "height": height }))
+        }
         "compatibility.utools.window.outPlugin" => {
             validate_utools_window_request_params(&request.params, &["isKill"])?;
             if let Some(value) = request.params.get("isKill") {
@@ -6505,6 +6509,19 @@ fn validate_utools_window_request_params(
     Ok(())
 }
 
+fn validate_utools_expend_height(params: &Value) -> Result<u32, String> {
+    validate_utools_window_request_params(params, &["height"])?;
+    let height = params
+        .get("height")
+        .and_then(Value::as_u64)
+        .and_then(|height| u32::try_from(height).ok())
+        .ok_or_else(|| "uTools setExpendHeight expects an integer height.".to_owned())?;
+    if !(100..=900).contains(&height) {
+        return Err("uTools setExpendHeight accepts heights from 100 to 900 pixels.".to_owned());
+    }
+    Ok(height)
+}
+
 fn required_value<'a>(params: &'a Value, key: &str) -> Result<&'a Value, String> {
     params
         .get(key)
@@ -6639,12 +6656,12 @@ mod tests {
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
         validate_local_search_selection, validate_system_icon_request,
-        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
-        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
-        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
-        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        validate_utools_expend_height, validate_utools_window_request_params, CaptureFocusLease,
+        CursorColorApproval, DetachedPluginFrontendEventRequest, IssuedPluginSearchResults,
+        LauncherFocusGate, LauncherHotkeyToggleGate, LauncherInvocationSource,
+        LauncherVisibilityAction, LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard,
+        PendingPluginSearch, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
+        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
         PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
         TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
         LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
@@ -6682,6 +6699,29 @@ mod tests {
         )
         .is_err());
         assert!(validate_utools_window_request_params(&json!([]), &[]).is_err());
+    }
+
+    #[test]
+    fn utools_expend_height_accepts_only_bounded_integer_pixels() {
+        for height in [100_u32, 300, 900] {
+            assert_eq!(
+                validate_utools_expend_height(&json!({ "height": height }))
+                    .expect("bounded integer height should be accepted"),
+                height
+            );
+        }
+
+        for params in [
+            json!({ "height": 99 }),
+            json!({ "height": 901 }),
+            json!({ "height": 300.5 }),
+            json!({ "height": "300" }),
+            json!({ "height": null }),
+            json!({}),
+            json!({ "height": 300, "nativeHandle": "forbidden" }),
+        ] {
+            assert!(validate_utools_expend_height(&params).is_err());
+        }
     }
 
     #[test]

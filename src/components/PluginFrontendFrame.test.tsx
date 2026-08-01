@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -17,6 +18,20 @@ const surfacePlugin: PluginInfo = {
 const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrG8AAAAASUVORK5CYII=";
 
 describe("PluginFrontendFrame surface chrome", () => {
+  it("routes bounded uTools height requests only through the visible trusted host", () => {
+    const frameSource = readFileSync(
+      new URL("./PluginFrontendFrame.tsx", import.meta.url),
+      "utf8",
+    );
+    const appSource = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+
+    expect(frameSource).toContain('utoolsWindowMethod === "compatibility.utools.window.setHeight" && !onSetExpendHeight');
+    expect(frameSource).toContain("onSetExpendHeight?.(params.height)");
+    expect(appSource).toContain("const [pluginExpendHeight, setPluginExpendHeight]");
+    expect(appSource).toContain("? (pluginExpendHeight ?? 444) + 60");
+    expect(appSource).toContain("onSetExpendHeight={setPluginExpendHeight}");
+  });
+
   it("sandboxes every real plugin document without navigation or popup capabilities", () => {
     const markup = renderToStaticMarkup(
       <PluginFrontendIframe

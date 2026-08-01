@@ -47,6 +47,7 @@ interface PluginFrontendFrameProps {
    * can request them only after the native host validates its compatibility
    * package and active visible lease. */
   onHideMainWindow?: (restorePreviousWindow: boolean) => void | Promise<void>;
+  onSetExpendHeight?: (height: number) => void | Promise<void>;
   onShowMainWindow?: () => void | Promise<void>;
   onPendingEventHandled: (eventId: string) => void;
   onToast: (message: string) => void;
@@ -215,6 +216,7 @@ export function PluginFrontendFrame({
   pendingEvent,
   onClose,
   onHideMainWindow,
+  onSetExpendHeight,
   onShowMainWindow,
   onPendingEventHandled,
   onToast,
@@ -753,6 +755,7 @@ export function PluginFrontendFrame({
         && (
           runtimeOnly
           || (utoolsWindowMethod === "compatibility.utools.window.hideMain" && !onHideMainWindow)
+          || (utoolsWindowMethod === "compatibility.utools.window.setHeight" && !onSetExpendHeight)
           || (utoolsWindowMethod === "compatibility.utools.window.showMain" && !onShowMainWindow)
         )
       ) {
@@ -823,6 +826,13 @@ export function PluginFrontendFrame({
                 void Promise.resolve(onShowMainWindow?.()).catch((error) => {
                   onToast(error instanceof Error ? error.message : "iHub 主窗口未能显示。");
                 });
+              } else if (utoolsWindowMethod === "compatibility.utools.window.setHeight") {
+                const params = bridgeCall.request.params as { height?: number } | undefined;
+                if (typeof params?.height === "number") {
+                  void Promise.resolve(onSetExpendHeight?.(params.height)).catch((error) => {
+                    onToast(error instanceof Error ? error.message : "iHub 插件窗口未能调整高度。");
+                  });
+                }
               } else if (utoolsWindowMethod === "compatibility.utools.window.outPlugin") {
                 onClose();
               }
@@ -877,6 +887,7 @@ export function PluginFrontendFrame({
   }, [
     onClose,
     onHideMainWindow,
+    onSetExpendHeight,
     onRuntimeDisposed,
     onSearchProviderRegistered,
     onSearchProviderUnregistered,

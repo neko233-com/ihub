@@ -1078,6 +1078,12 @@ const utools = Object.freeze({{
     return true;
   }},
   showMainWindow() {{ void call("compatibility.utools.window.showMain", {{}}).catch((error) => console.error("iHub compatibility window show failed", error)); return true; }},
+  setExpendHeight(height) {{
+    if (!Number.isInteger(height) || height < 100 || height > 900) return false;
+    void call("compatibility.utools.window.setHeight", {{ height }})
+      .catch((error) => console.error("iHub compatibility window resize failed", error));
+    return true;
+  }},
   outPlugin(isKill) {{
     if (isKill !== undefined && typeof isKill !== "boolean") return false;
     invokePluginOut(Boolean(isKill));
@@ -1257,6 +1263,8 @@ mod tests {
         assert!(script.contains("setSubInput"));
         assert!(script.contains("subInputSelect"));
         assert!(script.contains("compatibility.utools.window.hideMain"));
+        assert!(script.contains("setExpendHeight"));
+        assert!(script.contains("compatibility.utools.window.setHeight"));
         assert!(script.contains("compatibility.utools.window.outPlugin"));
         assert!(script.contains("getAppVersion"));
         assert!(script.contains("getUser() { return null; }"));

@@ -19,6 +19,7 @@ const pluginHostMethods = new Set([
   "commands.unregister",
   "compatibility.utools.window.hideMain",
   "compatibility.utools.window.outPlugin",
+  "compatibility.utools.window.setHeight",
   "compatibility.utools.window.showMain",
   "cursorColor.sampleOnce",
   "developer.createProject",
