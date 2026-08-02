@@ -9,7 +9,7 @@ import {
   normalizeUpdaterJson,
   parseBrowserDownloadUrl,
 } from './normalize-release-updater-json.mjs';
-import { validateLatestJson } from './verify-release-assets.mjs';
+import { validateLatestJson, verifyReleaseDirectory } from './verify-release-assets.mjs';
 
 const REPOSITORY = 'neko233-com/ihub';
 const TAG = 'v0.1.0';
@@ -228,6 +228,33 @@ test('release verifier accepts canonical browser URLs and rejects API or cross-r
       repository: REPOSITORY,
       tag: TAG,
     }), undefined, url);
+  }
+});
+
+test('release verifier can enforce an explicit Windows-only stable platform set', () => {
+  const fixtureDirectory = mkdtempSync(join(tmpdir(), 'ihub-windows-release-test-'));
+  try {
+    const windowsAsset = ASSETS[0];
+    const latest = makeLatest(({ name }) => browserDownloadUrl(REPOSITORY, TAG, name));
+    latest.platforms = {
+      'windows-x86_64': latest.platforms['windows-x86_64'],
+    };
+    writeFileSync(join(fixtureDirectory, windowsAsset.name), '', 'utf8');
+    writeFileSync(join(fixtureDirectory, 'latest.json'), JSON.stringify(latest), 'utf8');
+
+    assert.doesNotThrow(() => verifyReleaseDirectory({
+      inputDirectory: fixtureDirectory,
+      repository: REPOSITORY,
+      tag: TAG,
+      platformKeys: ['windows-x86_64'],
+    }));
+    assert.throws(() => verifyReleaseDirectory({
+      inputDirectory: fixtureDirectory,
+      repository: REPOSITORY,
+      tag: TAG,
+    }), /darwin_aarch64/);
+  } finally {
+    rmSync(fixtureDirectory, { recursive: true, force: true });
   }
 });
 

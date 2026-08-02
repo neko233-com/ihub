@@ -118,13 +118,6 @@ jobs:
           RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
@@ -138,24 +131,6 @@ jobs:
 
           if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
             echo 'TAURI_SIGNING_PRIVATE_KEY is required for signed in-app updates. Refusing to create an unsigned release.' >&2
-            exit 1
-          fi
-
-          missing_apple_secrets=()
-          for secret_name in \
-            APPLE_CERTIFICATE \
-            APPLE_CERTIFICATE_PASSWORD \
-            APPLE_SIGNING_IDENTITY \
-            APPLE_ID \
-            APPLE_PASSWORD \
-            APPLE_TEAM_ID \
-            KEYCHAIN_PASSWORD; do
-            if [[ -z "${!secret_name:-}" ]]; then
-              missing_apple_secrets+=("$secret_name")
-            fi
-          done
-          if (( ${#missing_apple_secrets[@]} > 0 )); then
-            printf 'A public macOS release requires Developer ID signing and notarization. Missing GitHub secrets: %s\n' "${missing_apple_secrets[*]}" >&2
             exit 1
           fi
 
@@ -264,7 +239,7 @@ jobs:
                 tag_name: tag,
                 target_commitish: releaseSha,
                 name: `iHub ${tag}`,
-                body: 'iHub desktop release. Verify installers with SHA256SUMS.txt.',
+                body: 'iHub stable release for Windows 10/11 x64. Verify the installer with SHA256SUMS.txt.',
                 draft: true,
                 prerelease,
                 generate_release_notes: true,
@@ -304,14 +279,6 @@ jobs:
             runner: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis,msi
-          - name: macOS Apple Silicon DMG
-            runner: macos-latest
-            rust-target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles dmg
-          - name: macOS Intel DMG
-            runner: macos-latest
-            rust-target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles dmg
 
     steps:
       - name: Check out source
@@ -339,31 +306,6 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Import macOS Developer ID certificate
-        if: runner.os == 'macOS'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          certificate_path="$RUNNER_TEMP/ihub-release-certificate.p12"
-          keychain_path="$RUNNER_TEMP/ihub-release.keychain-db"
-          trap 'rm -f "$certificate_path"' EXIT
-          if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path" 2>/dev/null; then
-            printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
-          fi
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security default-keychain -s "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security find-identity -v -p codesigning "$keychain_path"
-          security find-identity -v -p codesigning "$keychain_path" | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null
-
       - name: Build and upload Tauri artifacts
         uses: tauri-apps/tauri-action@v1
         env:
@@ -372,12 +314,6 @@ jobs:
           # GitHub Actions secrets; the matching public key belongs in Tauri config.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # The certificate is imported only on macOS. Keeping these empty on
-          # Windows avoids exposing Apple credentials to an unrelated runner.
-          APPLE_SIGNING_IDENTITY: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.runner == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
         with:
           # The prepare job owns draft creation, so concurrent platform jobs
           # cannot race to create the tag release. Keep tagName as well: the
@@ -546,7 +482,8 @@ jobs:
           node ./scripts/verify-release-assets.mjs \
             --input-dir release-assets \
             --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --platforms windows-x86_64
 
       - name: Generate SHA-256 manifest
         shell: pwsh

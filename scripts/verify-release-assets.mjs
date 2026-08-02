@@ -13,13 +13,19 @@ import {
   parseRepository,
 } from './normalize-release-updater-json.mjs';
 
-const REQUIRED_PLATFORM_KEYS = ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64'];
+const PLATFORM_INSTALLERS = Object.freeze({
+  'windows-x86_64': (version) => `ihub_${version}_windows_x64_setup.exe`,
+  'darwin-aarch64': (version) => `ihub_${version}_darwin_aarch64.dmg`,
+  'darwin-x86_64': (version) => `ihub_${version}_darwin_x64.dmg`,
+});
+const ALL_PLATFORM_KEYS = Object.freeze(Object.keys(PLATFORM_INSTALLERS));
 
 function usage() {
-  console.log(`Usage: node scripts/verify-release-assets.mjs --input-dir DIR --repository OWNER/REPO --tag vX.Y.Z
+  console.log(`Usage: node scripts/verify-release-assets.mjs --input-dir DIR --repository OWNER/REPO --tag vX.Y.Z [--platforms KEY[,KEY...]]
 
 Validates the installer names consumed by iHub bootstrap installers and the
-signed updater entries in latest.json. The release is not modified.`);
+signed updater entries in latest.json. --platforms defaults to every supported
+platform. The release is not modified.`);
 }
 
 function fail(message) {
@@ -44,7 +50,7 @@ export function parseOptions(argumentsList) {
     process.exit(0);
   }
 
-  const knownOptions = new Set(['--input-dir', '--repository', '--tag']);
+  const knownOptions = new Set(['--input-dir', '--repository', '--tag', '--platforms']);
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (!knownOptions.has(argument)) {
@@ -56,16 +62,28 @@ export function parseOptions(argumentsList) {
   const inputDirectory = readOption(argumentsList, '--input-dir');
   const repository = readOption(argumentsList, '--repository');
   const tag = readOption(argumentsList, '--tag');
+  const platforms = readOption(argumentsList, '--platforms');
   if (!inputDirectory || !repository || !tag) {
     fail('--input-dir, --repository, and --tag are required.');
   }
   parseRepository(repository);
   assertSimpleTag(tag);
+  const platformKeys = platforms
+    ? [...new Set(platforms.split(',').map((value) => value.trim()).filter(Boolean))]
+    : [...ALL_PLATFORM_KEYS];
+  if (platformKeys.length === 0) {
+    fail('--platforms must contain at least one platform key.');
+  }
+  for (const platformKey of platformKeys) {
+    if (!Object.hasOwn(PLATFORM_INSTALLERS, platformKey)) {
+      fail(`Unsupported release platform: ${platformKey}.`);
+    }
+  }
 
-  return { inputDirectory: resolve(inputDirectory), repository, tag };
+  return { inputDirectory: resolve(inputDirectory), repository, tag, platformKeys };
 }
 
-export function validateLatestJson({ latest, assets, repository, tag }) {
+export function validateLatestJson({ latest, assets, repository, tag, platformKeys = ALL_PLATFORM_KEYS }) {
   if (!latest || typeof latest !== 'object' || Array.isArray(latest)) {
     fail('latest.json must contain an object.');
   }
@@ -78,7 +96,7 @@ export function validateLatestJson({ latest, assets, repository, tag }) {
     fail('latest.json must contain a platforms object.');
   }
 
-  for (const platformKey of REQUIRED_PLATFORM_KEYS) {
+  for (const platformKey of platformKeys) {
     const platform = latest.platforms[platformKey];
     if (!platform || typeof platform !== 'object' || Array.isArray(platform)) {
       fail(`latest.json is missing platform '${platformKey}'.`);
@@ -101,7 +119,7 @@ export function validateLatestJson({ latest, assets, repository, tag }) {
   }
 }
 
-export function verifyReleaseDirectory({ inputDirectory, repository, tag }) {
+export function verifyReleaseDirectory({ inputDirectory, repository, tag, platformKeys = ALL_PLATFORM_KEYS }) {
   parseRepository(repository);
   assertSimpleTag(tag);
   const resolvedInputDirectory = resolve(inputDirectory);
@@ -115,11 +133,7 @@ export function verifyReleaseDirectory({ inputDirectory, repository, tag }) {
       .map((entry) => entry.name),
   );
   const expectedVersion = tag.startsWith('v') ? tag.slice(1) : tag;
-  const expectedInstallers = [
-    `ihub_${expectedVersion}_windows_x64_setup.exe`,
-    `ihub_${expectedVersion}_darwin_aarch64.dmg`,
-    `ihub_${expectedVersion}_darwin_x64.dmg`,
-  ];
+  const expectedInstallers = platformKeys.map((platformKey) => PLATFORM_INSTALLERS[platformKey](expectedVersion));
   for (const installer of expectedInstallers) {
     if (!assets.has(installer)) {
       fail(`Required installer asset is missing: ${installer}`);
@@ -137,8 +151,8 @@ export function verifyReleaseDirectory({ inputDirectory, repository, tag }) {
     fail(`Could not parse latest.json: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  validateLatestJson({ latest, assets, repository, tag });
-  console.log(`Release asset verification passed for ${tag}: installers and ${REQUIRED_PLATFORM_KEYS.length} updater platforms are complete.`);
+  validateLatestJson({ latest, assets, repository, tag, platformKeys });
+  console.log(`Release asset verification passed for ${tag}: installers and ${platformKeys.length} updater platforms are complete.`);
 }
 
 export function main(argumentsList = process.argv.slice(2)) {

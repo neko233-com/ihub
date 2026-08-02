@@ -1,6 +1,6 @@
 # 发布与安装
 
-iHub 的正式发布由 `.github/workflows/release.yml` 完成：Windows x64 会产出 NSIS 与 MSI，macOS 会分别产出 Apple Silicon (`aarch64`) 和 Intel (`x64`) DMG。发布资产使用稳定命名，例如 `ihub_0.1.0_windows_x64_setup.exe` 与 `ihub_0.1.0_darwin_aarch64.dmg`，因此安装脚本不依赖易变的产品显示名。Windows 的 NSIS 安装模式明确为当前用户（目标为 `%LOCALAPPDATA%`）；若系统缺少 WebView2，安装器使用 Microsoft 的下载 bootstrapper。macOS bundle 明确最低支持 macOS 12.0。
+iHub 当前正式发布由 `.github/workflows/release.yml` 完成，并以已经实机验收的 Windows 10/11 x64 为 stable 平台，产出 NSIS 与 MSI。发布资产使用稳定命名，例如 `ihub_0.1.0_windows_x64_setup.exe`，因此安装脚本不依赖易变的产品显示名。Windows 的 NSIS 安装模式明确为当前用户（目标为 `%LOCALAPPDATA%`）；若系统缺少 WebView2，安装器使用 Microsoft 的下载 bootstrapper。macOS 保留构建与安装脚本扩展点，但在 Developer ID 签名、公证与真机验收完成前不属于 stable 发布承诺。
 
 ## 用户安装
 
@@ -23,7 +23,7 @@ Unblock-File $script
 
 也可通过 `IHUB_REPOSITORY`、`IHUB_VERSION` 环境变量提供相同默认值；显式参数优先。默认是 NSIS 的静默、当前用户安装。添加 `-Interactive` 可显示安装器界面。首次运行可能会由 Tauri 安装或更新 Microsoft Edge WebView2，因此没有该运行时的设备需要联网完成首次安装。
 
-macOS 12+（Apple Silicon 和 Intel）可运行：
+macOS 安装脚本作为后续发布扩展点保留；当前 stable Release 不上传 DMG，因此暂不应对终端用户执行下面的命令：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/neko233-com/ihub/main/scripts/install.sh -o /tmp/ihub-install.sh
@@ -40,7 +40,7 @@ bash /tmp/ihub-install.sh --application-dir "$HOME/Applications" --require-signa
 
 ## 签名与完整性模型
 
-SHA-256 清单保护首次安装器。它由工作流在所有平台资产上传后生成，并与同一 GitHub Release 一起发布。在公开 draft 之前，工作流还会验证 `latest.json`：三个承诺平台（`windows-x86_64`、`darwin-aarch64`、`darwin-x86_64`）必须各自有非空签名，并且 URL 必须是当前仓库、当前 tag 已上传 updater 资产的规范 GitHub HTTPS `browser_download_url`；包含 userinfo、端口、query、fragment 或编码歧义的 URL 会被拒绝。缺少安装器、签名或任一平台条目都会保留 draft。
+SHA-256 清单保护首次安装器。它由工作流在 Windows 资产上传后生成，并与同一 GitHub Release 一起发布。在公开 draft 之前，工作流还会验证 `latest.json`：当前承诺平台 `windows-x86_64` 必须有非空签名，并且 URL 必须是当前仓库、当前 tag 已上传 updater 资产的规范 GitHub HTTPS `browser_download_url`；包含 userinfo、端口、query、fragment 或编码歧义的 URL 会被拒绝。缺少安装器、签名或平台条目都会保留 draft。验证器仍支持显式检查 macOS 平台，以便未来在完成签名、公证与真机验收后恢复跨平台矩阵。
 
 Tauri 的应用内自动更新是另一条链路：`TAURI_SIGNING_PRIVATE_KEY` 对 updater 资产签名，客户端内置的公开密钥验证 `latest.json` 中的签名。`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 只在私钥加密时需要。私钥绝不能提交、上传到 Release 或复用为 macOS/Windows 的代码签名证书；丢失该私钥会使既有客户端无法信任后续更新。
 
@@ -50,14 +50,14 @@ macOS 的 Developer ID 签名和公证、Windows 的 Authenticode 签名与 Taur
 
 - `install.sh --require-signature` 同时要求 `codesign` 和 Gatekeeper (`spctl`) 成功；未加该参数时，SHA-256 仍是强制项，但脚本会提示签名状态。
 - `install.ps1 -RequireAuthenticodeSignature` 要求 Windows 信任链中的 Authenticode 签名有效；未加该参数时，脚本会提示状态而不会把未签名状态当作校验成功。
-- 正式公开版的工作流会先要求 Apple Developer ID 签名和 notarization 所需 secrets，并把 `.p12` 导入仅存活于 macOS runner 的临时 keychain；缺少任一个 secret 时不会创建公开 Release。
+- 恢复 macOS 正式发布前，必须重新接入 Apple Developer ID 签名和 notarization 所需 secrets，并在真机上完成安装与更新验收；当前 Windows stable 工作流不会生成或宣称 macOS 资产。
 - Windows Authenticode/Trusted Signing 仍需由组织选定提供商并接入后才能宣称 SmartScreen 友好。当前工作流不会把 updater 私钥误当作代码签名证书，`install.ps1 -RequireAuthenticodeSignature` 也会在未接入该步骤时明确失败。
 
 ## 首次发布前的维护者清单
 
 1. 保持 `package.json` 与 `src-tauri/tauri.conf.json` 的版本相同，并提交 `pnpm-lock.yaml`。工作流使用 `pnpm install --frozen-lockfile`。
 2. 本地生成 updater 密钥，例如 `pnpm tauri signer generate -w ./ihub-updater.key`。将公开密钥填入 Tauri 配置的 updater `pubkey`，将私钥内容作为 GitHub Secret `TAURI_SIGNING_PRIVATE_KEY`；只有私钥加密时才另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。不要提交 `ihub-updater.key`。
-3. 配置 Apple Secrets：`APPLE_CERTIFICATE`（base64 编码的 Developer ID `.p12`）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` 和随机的 `KEYCHAIN_PASSWORD`。工作流会把证书导入临时 keychain、验证指定身份、再签名和公证；任何缺失都会在构建前失败。
+3. 若要恢复 macOS 发布，先配置 Apple Secrets：`APPLE_CERTIFICATE`（base64 编码的 Developer ID `.p12`）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` 和随机的 `KEYCHAIN_PASSWORD`，恢复 macOS 构建矩阵，并完成真机验收；在此之前保持 Windows-only stable。
 4. 为 Windows 增加所选证书服务的 post-build 签名步骤，并用 `-RequireAuthenticodeSignature` 做一次干净机器验收。证书、令牌和私钥都只能进入 GitHub Secrets 或受管密钥服务。
 5. 运行 `pnpm verify:official-plugins`（本地独立插件仓库）以及 `node scripts/verify-official-plugin-lock.mjs --remote`（远端不可变 tag），再运行 `powershell -ExecutionPolicy Bypass -File scripts/validate-github-actions.ps1`、`node scripts/verify-release-assets.mjs --help` 和项目的常规检查。
 
@@ -68,10 +68,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流先把请求的 tag 解析或创建到当前精确提交，复用既有 draft 时也重新验证 tag → commit 绑定；随后输出固定的 `release_sha`，所有构建都检出这个 SHA。它创建或复用同一个**draft** Release，并把三个矩阵平台都绑定到同一个 release ID；矩阵以 `max-parallel: 1` 串行构建和上传，避免多个平台同时改写同一份 updater 清单。每个平台上传安装器、Tauri updater 签名和当前 `latest.json` 后，工作流都会读取这个精确 draft 的 Release 元数据，把清单中的资产 API URL 严格映射为同一 Release 返回的 `browser_download_url`，再覆盖上传规范化后的清单。全部平台完成后才下载完整资产集，验证三个承诺平台的安装器、签名及 URL 关联，生成强制的 `SHA256SUMS.txt`；公开前再次复核精确 draft ID、tag → `release_sha` 与 draft 状态，并按 release ID 发布。任何 commit／release 身份绑定、矩阵构建、签名预检、规范化或最终清单验证失败都会保留 draft，避免把不完整的跨平台 Release 暴露为 latest；已公开的同 tag Release 不会被重写。手动触发工作流时也必须提供完全匹配 `package.json` 版本的 tag。
+工作流先把请求的 tag 解析或创建到当前精确提交，复用既有 draft 时也重新验证 tag → commit 绑定；随后输出固定的 `release_sha`，Windows 构建检出这个 SHA。它创建或复用同一个**draft** Release，上传安装器、Tauri updater 签名和当前 `latest.json` 后读取这个精确 draft 的 Release 元数据，把清单中的资产 API URL 严格映射为同一 Release 返回的 `browser_download_url`，再覆盖上传规范化后的清单。Windows 资产完成后才下载完整资产集，验证安装器、签名及 URL 关联，生成强制的 `SHA256SUMS.txt`；公开前再次复核精确 draft ID、tag → `release_sha` 与 draft 状态，并按 release ID 发布。任何 commit／release 身份绑定、构建、签名预检、规范化或最终清单验证失败都会保留 draft；已公开的同 tag Release 不会被重写。手动触发工作流时也必须提供完全匹配 `package.json` 版本的 tag。
 
 ## 自动更新验收
 
-在发布前，以每个平台的已安装旧版本验证：应用能取得 `releases/latest/download/latest.json`、平台键与本机一致（`windows-x86_64`、`darwin-aarch64` 或 `darwin-x86_64`）、签名可验证、并能安装更新。不要仅靠下载链接可访问作为通过标准；工作流的 JSON/资产关联检查不能替代真实机器上的下载、安装与重启验收。
+在发布前，以已安装的 Windows 旧版本验证：应用能取得 `releases/latest/download/latest.json`、平台键为 `windows-x86_64`、签名可验证、并能安装更新。不要仅靠下载链接可访问作为通过标准；工作流的 JSON/资产关联检查不能替代真实机器上的下载、安装与重启验收。未来恢复 macOS 发布时，必须分别补做 `darwin-aarch64` 与 `darwin-x86_64` 真机验收。
 
 若需要轮换 updater 密钥，必须先发布能同时信任旧/新密钥的迁移版本；直接替换公开密钥会令已安装客户端拒绝之后的更新。
