@@ -1922,6 +1922,13 @@ function pngDataUrlForCopyImage(value) {{
   }}
   return "data:image/png;base64," + btoa(binary);
 }}
+function normalizedCopyImagePayload(value) {{
+  const dataUrl = pngDataUrlForCopyImage(value);
+  if (dataUrl) return {{ dataUrl }};
+  if (typeof value === "string" && value.startsWith("data:")) return null;
+  if (typeof value !== "string" || value.length === 0 || Array.from(value).length > 1024 || new TextEncoder().encode(value).byteLength > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  return {{ path: value }};
+}}
 function attachmentBase64(value) {{
   if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > attachmentMaxBytes) return null;
   let binary = "";
@@ -2680,9 +2687,9 @@ const utools = Object.freeze({{
     return true;
   }},
   hideMainWindowPasteImage(value) {{
-    const dataUrl = pngDataUrlForCopyImage(value);
-    if (!dataUrl) return false;
-    void interactionCall("compatibility.utools.input.pasteImage", {{ dataUrl }})
+    const payload = normalizedCopyImagePayload(value);
+    if (!payload) return false;
+    void interactionCall("compatibility.utools.input.pasteImage", payload)
       .catch((error) => console.error("iHub compatibility image paste failed", error));
     return true;
   }},
@@ -2818,9 +2825,9 @@ const utools = Object.freeze({{
     return true;
   }},
   copyImage(value) {{
-    const dataUrl = pngDataUrlForCopyImage(value);
-    if (!dataUrl) return false;
-    void call("compatibility.utools.clipboard.writeImage", {{ dataUrl }})
+    const payload = normalizedCopyImagePayload(value);
+    if (!payload) return false;
+    void call("compatibility.utools.clipboard.writeImage", payload)
       .catch((error) => console.error("iHub compatibility image copy failed", error));
     return true;
   }},
@@ -3443,6 +3450,8 @@ mod tests {
         assert!(script.contains("compatibility.utools.clipboard.writeText"));
         assert!(script.contains("copyImage"));
         assert!(script.contains("pngDataUrlForCopyImage"));
+        assert!(script.contains("normalizedCopyImagePayload"));
+        assert!(script.contains("return { path: value }"));
         assert!(script.contains("value instanceof Uint8Array"));
         assert!(script.contains("compatibility.utools.clipboard.writeImage"));
         assert!(script.contains("copyFile"));

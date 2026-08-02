@@ -29,6 +29,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "data:image/png;base64,iVBORw0KGgo=",
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      path: "C:\\Users\\Tester\\Pictures\\sample.jpg",
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeFiles", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -135,6 +138,13 @@ describe("plugin iframe Bridge boundary", () => {
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "data:image/jpeg;base64,/9j/",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      path: "C:\\bad\nname.jpg",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      path: "C:\\sample.png",
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.redirect", {
       label: "OCR",

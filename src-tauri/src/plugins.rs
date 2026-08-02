@@ -4883,6 +4883,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.startDrag.pickerGranted".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.imagePath.pickerGranted".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5434,6 +5437,9 @@ mod tests {
         assert!(plugin_security_declaration(&manifest)
             .permissions
             .contains("compatibility.utools.startDrag.pickerGranted"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.imagePath.pickerGranted"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);

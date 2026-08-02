@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1384,7 +1384,7 @@ const MAX_PASTED_IMAGE_EDGE: usize = 8_192;
 const MAX_PASTED_IMAGE_PIXELS: usize = 12_000_000;
 const MAX_PASTED_IMAGE_RAW_BYTES: usize = 48 * 1024 * 1024;
 const MAX_PASTED_IMAGE_PNG_BYTES: usize = 12 * 1024 * 1024;
-const MAX_UTOOLS_COPY_IMAGE_PNG_BYTES: usize = 4 * 1024 * 1024;
+const MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const UTOOLS_COPY_IMAGE_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 const MAX_UTOOLS_COPY_FILE_ITEMS: usize = 16;
 const MAX_UTOOLS_COPY_FILE_PATH_CHARS: usize = 1_024;
@@ -3706,17 +3706,26 @@ fn prepare_authorized_utools_drag_paths(
     lease_id: &str,
     params: &Value,
 ) -> Result<Vec<PreparedLocalOpen>, String> {
-    let requested = validate_utools_file_paths(params, "startDrag")?;
+    prepare_authorized_utools_picker_paths(host, plugin_id, lease_id, params, "startDrag")
+}
+
+fn prepare_authorized_utools_picker_paths(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+    api: &str,
+) -> Result<Vec<PreparedLocalOpen>, String> {
+    let requested = validate_utools_file_paths(params, api)?;
     let expected = {
         let grants = host
             .utools_drag_grants
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(lease_grants) = grants.get(&(plugin_id.to_owned(), lease_id.to_owned())) else {
-            return Err(
-                "uTools startDrag accepts only paths returned by showOpenDialog to this current plugin surface."
-                    .to_owned(),
-            );
+            return Err(format!(
+                "uTools {api} accepts only paths returned by showOpenDialog to this current plugin surface."
+            ));
         };
         requested
             .iter()
@@ -3725,10 +3734,9 @@ fn prepare_authorized_utools_drag_paths(
                     .iter()
                     .find(|grant| grant.path == *path)
                     .cloned()
-                    .ok_or_else(|| {
-                        "uTools startDrag accepts only exact paths returned by showOpenDialog to this current plugin surface."
-                            .to_owned()
-                    })
+                    .ok_or_else(|| format!(
+                        "uTools {api} accepts only exact paths returned by showOpenDialog to this current plugin surface."
+                    ))
             })
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -3737,15 +3745,17 @@ fn prepare_authorized_utools_drag_paths(
     for grant in expected {
         let item = crate::system_open::prepare_local_open(&grant.path, Some(grant.kind))?;
         if item.path() != grant.path || item.identity() != grant.identity {
-            return Err(
-                "A file selected for uTools startDrag changed before the drag began.".to_owned(),
-            );
+            return Err(format!(
+                "A file selected for uTools {api} changed before the operation began."
+            ));
         }
         if prepared
             .iter()
             .any(|existing: &PreparedLocalOpen| existing.identity() == item.identity())
         {
-            return Err("uTools startDrag targets resolve to the same local object.".to_owned());
+            return Err(format!(
+                "uTools {api} targets resolve to the same local object."
+            ));
         }
         prepared.push(item);
     }
@@ -4067,17 +4077,36 @@ fn decode_utools_clipboard_png_data_url(
     let encoded = data_url
         .strip_prefix(UTOOLS_COPY_IMAGE_DATA_URL_PREFIX)
         .ok_or_else(|| "uTools copyImage accepts only a PNG data URL or Uint8Array.".to_owned())?;
-    let max_encoded_chars = MAX_UTOOLS_COPY_IMAGE_PNG_BYTES.div_ceil(3) * 4;
+    let max_encoded_chars = MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES.div_ceil(3) * 4;
     if encoded.is_empty() || encoded.len() > max_encoded_chars {
         return Err(format!(
-            "uTools copyImage PNG payloads are limited to {MAX_UTOOLS_COPY_IMAGE_PNG_BYTES} bytes."
+            "uTools copyImage PNG payloads are limited to {MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES} bytes."
         ));
     }
     let png = BASE64_STANDARD
         .decode(encoded)
         .map_err(|_| "uTools copyImage received malformed PNG base64 data.".to_owned())?;
-    if png.len() > MAX_UTOOLS_COPY_IMAGE_PNG_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+    if png.len() > MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err("uTools copyImage received an invalid or oversized PNG.".to_owned());
+    }
+
+    decode_utools_clipboard_image_bytes(&png, ImageFormat::Png)
+}
+
+fn decode_utools_clipboard_image_bytes(
+    bytes: &[u8],
+    format: ImageFormat,
+) -> Result<arboard::ImageData<'static>, String> {
+    if bytes.is_empty() || bytes.len() > MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES {
+        return Err(format!(
+            "uTools image files are limited to {MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES} bytes."
+        ));
+    }
+    if !matches!(
+        format,
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
+    ) {
+        return Err("uTools image files must be PNG, JPEG, or WebP.".to_owned());
     }
 
     let mut limits = Limits::default();
@@ -4087,36 +4116,34 @@ fn decode_utools_clipboard_png_data_url(
     // decoder a small, fixed amount of workspace in addition to that output
     // instead of inheriting image-rs's 512 MiB default.
     limits.max_alloc = Some((MAX_PASTED_IMAGE_RAW_BYTES + 16 * 1024 * 1024) as u64);
-    let mut dimensions_reader =
-        ImageReader::with_format(io::Cursor::new(png.as_slice()), ImageFormat::Png);
+    let mut dimensions_reader = ImageReader::with_format(io::Cursor::new(bytes), format);
     dimensions_reader.limits(limits.clone());
     let (width, height) = dimensions_reader
         .into_dimensions()
         .map_err(|error| format!("uTools copyImage could not read the PNG header: {error}"))?;
-    let width_usize = usize::try_from(width)
-        .map_err(|_| "uTools copyImage PNG width is unsupported.".to_owned())?;
+    let width_usize =
+        usize::try_from(width).map_err(|_| "uTools copyImage width is unsupported.".to_owned())?;
     let height_usize = usize::try_from(height)
-        .map_err(|_| "uTools copyImage PNG height is unsupported.".to_owned())?;
+        .map_err(|_| "uTools copyImage height is unsupported.".to_owned())?;
     let pixels = width_usize
         .checked_mul(height_usize)
-        .ok_or_else(|| "uTools copyImage PNG dimensions overflow.".to_owned())?;
+        .ok_or_else(|| "uTools copyImage dimensions overflow.".to_owned())?;
     if width_usize == 0
         || height_usize == 0
         || width_usize > MAX_PASTED_IMAGE_EDGE
         || height_usize > MAX_PASTED_IMAGE_EDGE
         || pixels > MAX_PASTED_IMAGE_PIXELS
     {
-        return Err("uTools copyImage PNG dimensions exceed the host limits.".to_owned());
+        return Err("uTools copyImage dimensions exceed the host limits.".to_owned());
     }
     let expected_rgba_bytes = pixels
         .checked_mul(4)
-        .ok_or_else(|| "uTools copyImage PNG byte size overflows.".to_owned())?;
+        .ok_or_else(|| "uTools copyImage byte size overflows.".to_owned())?;
     if expected_rgba_bytes > MAX_PASTED_IMAGE_RAW_BYTES {
-        return Err("uTools copyImage PNG uses too much decoded memory.".to_owned());
+        return Err("uTools copyImage uses too much decoded memory.".to_owned());
     }
 
-    let mut image_reader =
-        ImageReader::with_format(io::Cursor::new(png.as_slice()), ImageFormat::Png);
+    let mut image_reader = ImageReader::with_format(io::Cursor::new(bytes), format);
     image_reader.limits(limits);
     let rgba = image_reader
         .decode()
@@ -4134,6 +4161,62 @@ fn decode_utools_clipboard_png_data_url(
         height: height_usize,
         bytes: std::borrow::Cow::Owned(rgba.into_raw()),
     })
+}
+
+fn decode_authorized_utools_clipboard_image(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+    api: &str,
+) -> Result<arboard::ImageData<'static>, String> {
+    let Some(object) = params.as_object() else {
+        return Err(format!("uTools {api} parameters must be an object."));
+    };
+    if object.len() != 1 {
+        return Err(format!(
+            "uTools {api} accepts exactly one dataUrl or picker-returned path."
+        ));
+    }
+    if let Some(data_url) = object.get("dataUrl").and_then(Value::as_str) {
+        return decode_utools_clipboard_png_data_url(data_url);
+    }
+    let path = object.get("path").and_then(Value::as_str).ok_or_else(|| {
+        format!("uTools {api} accepts exactly one dataUrl or picker-returned path.")
+    })?;
+    let path_params = json!({ "paths": [path] });
+    let prepared =
+        prepare_authorized_utools_picker_paths(host, plugin_id, lease_id, &path_params, api)?;
+    let item = prepared
+        .first()
+        .ok_or_else(|| format!("uTools {api} requires one selected image file."))?;
+    if item.kind() != LocalOpenKind::File {
+        return Err(format!("uTools {api} requires a selected image file."));
+    }
+
+    let file = fs::File::open(item.path())
+        .map_err(|error| format!("Could not open the selected uTools image file: {error}"))?;
+    let declared_len = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the selected uTools image file: {error}"))?
+        .len();
+    if declared_len == 0 || declared_len > MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES as u64 {
+        return Err(format!(
+            "uTools image files are limited to {MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES} bytes."
+        ));
+    }
+    let mut bytes = Vec::with_capacity(declared_len as usize);
+    file.take(MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read the selected uTools image file: {error}"))?;
+    if bytes.len() > MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES {
+        return Err(format!(
+            "uTools image files are limited to {MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES} bytes."
+        ));
+    }
+    let format = image::guess_format(&bytes)
+        .map_err(|error| format!("Could not identify the selected uTools image: {error}"))?;
+    decode_utools_clipboard_image_bytes(&bytes, format)
 }
 
 /// Lets the PNG encoder stop before an arbitrary clipboard bitmap can retain
@@ -4829,16 +4912,13 @@ fn plugin_host_call_for_active_lease(
             Ok(json!({ "accepted": true }))
         }
         "compatibility.utools.input.pasteImage" => {
-            let Some(params) = request.params.as_object() else {
-                return Err("uTools paste image parameters must be an object.".to_owned());
-            };
-            if params.len() != 1 || !params.contains_key("dataUrl") {
-                return Err("uTools paste image accepts only one PNG dataUrl parameter.".to_owned());
-            }
-            let image = decode_utools_clipboard_png_data_url(required_string(
+            let image = decode_authorized_utools_clipboard_image(
+                &state.host,
+                &request.plugin_id,
+                &request.lease_id,
                 &request.params,
-                "dataUrl",
-            )?)?;
+                "hideMainWindowPasteImage",
+            )?;
             let bytes = image.bytes.into_owned();
             crate::clipboard_access::with_clipboard(|clipboard| {
                 clipboard.set_image(arboard::ImageData {
@@ -5164,18 +5244,13 @@ fn plugin_host_call_for_active_lease(
             Ok(json!({ "written": true }))
         }
         "compatibility.utools.clipboard.writeImage" => {
-            let Some(params) = request.params.as_object() else {
-                return Err("uTools copyImage parameters must be an object.".to_owned());
-            };
-            if params.len() != 1 || !params.contains_key("dataUrl") {
-                return Err(
-                    "uTools copyImage accepts only one PNG dataUrl parameter.".to_owned(),
-                );
-            }
-            let image = decode_utools_clipboard_png_data_url(required_string(
+            let image = decode_authorized_utools_clipboard_image(
+                &state.host,
+                &request.plugin_id,
+                &request.lease_id,
                 &request.params,
-                "dataUrl",
-            )?)?;
+                "copyImage",
+            )?;
             let width = image.width;
             let height = image.height;
             let bytes = image.bytes.into_owned();
@@ -9843,10 +9918,10 @@ mod tests {
         clear_plugin_session_secrets, clipboard_files_from_paths, clipboard_image_from_rgba,
         complete_plugin_search, create_plugin_project_for_grant,
         create_plugin_project_with_open_grant, cursor_color_approval_id,
-        decode_utools_clipboard_png_data_url, decode_utools_db_storage_key, directory_for_grant,
-        get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
-        issue_plugin_launcher_context_transfer, launcher_visibility_action,
-        native_plugin_command_input, normalize_plugin_search_results,
+        decode_authorized_utools_clipboard_image, decode_utools_clipboard_png_data_url,
+        decode_utools_db_storage_key, directory_for_grant, get_plugin_session_secret,
+        issue_file_grant, issue_filesystem_grant, issue_plugin_launcher_context_transfer,
+        launcher_visibility_action, native_plugin_command_input, normalize_plugin_search_results,
         normalize_utools_main_push_selection, normalized_host_target, optional_u32, optional_u8,
         physical_point_in_monitor, plugin_clipboard_history_snapshot, plugin_notification_body,
         plugin_search_providers_changed_payload, prepare_authorized_utools_drag_paths,
@@ -9874,7 +9949,7 @@ mod tests {
         LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
         MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
         MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_PNG_BYTES, PLUGIN_LOG_WINDOW,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW,
         PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
@@ -12089,11 +12164,74 @@ mod tests {
         );
         let oversized = format!(
             "data:image/png;base64,{}",
-            "A".repeat(MAX_UTOOLS_COPY_IMAGE_PNG_BYTES.div_ceil(3) * 4 + 1)
+            "A".repeat(MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES.div_ceil(3) * 4 + 1)
         );
         assert!(decode_utools_clipboard_png_data_url(&oversized)
             .expect_err("compressed PNG bytes must be bounded before decoding")
             .contains("limited"));
+    }
+
+    #[test]
+    fn utools_copy_image_reads_only_picker_granted_image_files() {
+        use image::{codecs::jpeg::JpegEncoder, ColorType, ImageEncoder};
+
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-utools-copy-image-grant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).expect("create image grant fixture directory");
+        let path = directory.join("selected.jpg");
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .write_image(&[0x12, 0x34, 0x56], 1, 1, ColorType::Rgb8.into())
+            .expect("encode picker-selected JPEG fixture");
+        fs::write(&path, jpeg).expect("write picker-selected JPEG fixture");
+        let canonical = canonical_selected_file(path)
+            .expect("canonicalize picker-selected JPEG fixture")
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let host = PluginHostState::default();
+        remember_utools_drag_grants(
+            &host,
+            "image-plugin",
+            "image-lease",
+            std::slice::from_ref(&canonical),
+            crate::system_open::LocalOpenKind::File,
+        )
+        .expect("picker selection should create the shared path grant");
+
+        let decoded = decode_authorized_utools_clipboard_image(
+            &host,
+            "image-plugin",
+            "image-lease",
+            &json!({ "path": canonical }),
+            "copyImage",
+        )
+        .expect("the same plugin lease should read the selected JPEG");
+        assert_eq!((decoded.width, decoded.height), (1, 1));
+        assert_eq!(decoded.bytes.len(), 4);
+        assert!(decode_authorized_utools_clipboard_image(
+            &host,
+            "other-plugin",
+            "image-lease",
+            &json!({ "path": canonical }),
+            "copyImage",
+        )
+        .expect_err("another plugin must not reuse the selected image path")
+        .contains("showOpenDialog"));
+        let missing = directory.join("never-selected.png");
+        assert!(decode_authorized_utools_clipboard_image(
+            &host,
+            "image-plugin",
+            "image-lease",
+            &json!({ "path": missing.to_string_lossy() }),
+            "copyImage",
+        )
+        .expect_err("an unselected path must be rejected before filesystem probing")
+        .contains("showOpenDialog"));
+
+        fs::remove_dir_all(directory).expect("cleanup image grant fixture directory");
     }
 
     #[test]

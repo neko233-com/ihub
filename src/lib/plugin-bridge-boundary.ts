@@ -321,16 +321,25 @@ export function validatePluginBridgeCall(
   if (isImageCopy) {
     const params = isPlainRecord(request.params) ? request.params : null;
     const dataUrl = params?.dataUrl;
+    const path = params?.path;
     if (
       !params
-      || !hasOnlyKeys(params, new Set(["dataUrl"]))
-      || typeof dataUrl !== "string"
-      || !dataUrl.startsWith("data:image/png;base64,iVBORw0KGgo")
-      || dataUrl.length > PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS
+      || (
+        hasOnlyKeys(params, new Set(["dataUrl"]))
+          ? typeof dataUrl !== "string"
+            || !dataUrl.startsWith("data:image/png;base64,iVBORw0KGgo")
+            || dataUrl.length > PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS
+          : !hasOnlyKeys(params, new Set(["path"]))
+            || typeof path !== "string"
+            || path.length === 0
+            || [...path].length > 1_024
+            || new TextEncoder().encode(path).byteLength > 8 * 1_024
+            || [...path].some((character) => character < " " || character === "\u007f")
+      )
     ) {
       return {
         ok: false,
-        error: "uTools image transfer accepts one bounded PNG data URL.",
+        error: "uTools image transfer accepts one bounded PNG data URL or picker-returned path.",
         responseId,
       };
     }
