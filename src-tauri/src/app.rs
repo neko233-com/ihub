@@ -67,6 +67,10 @@ use crate::{
         create_utools_browser_window, UtoolsBrowserWindowOptions, UtoolsBrowserWindowRegistry,
         UTOOLS_BROWSER_WINDOW_PREFIX,
     },
+    utools_ubrowser::{
+        run_chain as run_utools_ubrowser_chain, UBrowserRunRequest, UtoolsUBrowserRegistry,
+        UTOOLS_UBROWSER_WINDOW_PREFIX,
+    },
 };
 
 const LAUNCHER_INITIAL_BLUR_GRACE: Duration = Duration::from_millis(700);
@@ -1900,6 +1904,10 @@ fn populate_utools_runtime_system_config(
         paths.insert("exe".to_owned(), renderer_display_path(&path));
     }
     config.paths = paths;
+    config.idle_ubrowsers = app
+        .try_state::<UtoolsUBrowserRegistry>()
+        .map(|registry| registry.idle_instances(app, &config.plugin_id))
+        .unwrap_or_default();
     Ok(())
 }
 
@@ -2345,6 +2353,8 @@ fn close_utools_browser_windows_for_plugin(app: &AppHandle, plugin_id: &str) {
             let _ = window.close();
         }
     }
+    app.state::<UtoolsUBrowserRegistry>()
+        .close_plugin_windows(app, plugin_id);
 }
 
 /// Renews a renderer-owned frontend lease. The main React host sends a small
@@ -4687,6 +4697,55 @@ pub async fn plugin_host_call(
         });
     }
 
+    if request.method == "compatibility.utools.ubrowser.run" {
+        let (run_request, native_lease) =
+            plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+                if !request.surface
+                    || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                {
+                    return Err(
+                        "uTools ubrowser chains require the plugin's visible active surface."
+                            .to_owned(),
+                    );
+                }
+                ensure_plugin_host_request_is_allowed(&request, &state)?;
+                if !state
+                    .plugins
+                    .uses_utools_compatibility(&request_plugin_id)?
+                {
+                    return Err(
+                        "uTools ubrowser is available only to validated imported uTools packages."
+                            .to_owned(),
+                    );
+                }
+                let run_request =
+                    serde_json::from_value::<UBrowserRunRequest>(request.params.clone())
+                        .map_err(|error| format!("Invalid uTools ubrowser chain: {error}"))?;
+                crate::utools_ubrowser::validate_run_request(&run_request)?;
+                let native_lease = server.begin_native_command(&request_plugin_id)?;
+                Ok((run_request, native_lease))
+            })?;
+        let run_app = app.clone();
+        let run_server = server.clone();
+        let run_plugin_id = request_plugin_id.clone();
+        let parent_lease_id = request.lease_id.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let registry = run_app.state::<UtoolsUBrowserRegistry>();
+            run_utools_ubrowser_chain(
+                &run_app,
+                &registry,
+                &run_server,
+                &run_plugin_id,
+                &parent_lease_id,
+                run_request,
+            )
+        })
+        .await
+        .map_err(|error| format!("uTools ubrowser host task failed: {error}"))?;
+        drop(native_lease);
+        return result;
+    }
+
     // Cursor sampling is deliberately not a normal synchronous Bridge call.
     // The trusted parent only reaches this branch after rendering its own
     // confirmation overlay and injecting a host-issued, one-time approval
@@ -5364,6 +5423,46 @@ fn plugin_host_call_for_active_lease(
             )
             .map_err(|error| format!("Could not deliver the uTools BrowserWindow message: {error}"))?;
             Ok(json!({ "sent": true }))
+        }
+        "compatibility.utools.ubrowser.setProxy" => {
+            if !request.surface
+                || !state
+                    .plugin_assets
+                    .is_active_surface_for(&request.lease_id, &request.plugin_id)
+            {
+                return Err(
+                    "uTools ubrowser proxy changes require the visible active plugin surface."
+                        .to_owned(),
+                );
+            }
+            if !state.plugins.uses_utools_compatibility(&request.plugin_id)? {
+                return Err("uTools ubrowser proxy is available only to imported uTools packages.".to_owned());
+            }
+            validate_exact_plugin_params(&request.params, &["config"])?;
+            app.state::<UtoolsUBrowserRegistry>().set_proxy_config(
+                &request.plugin_id,
+                required_value(&request.params, "config")?,
+            )?;
+            Ok(json!({ "configured": true }))
+        }
+        "compatibility.utools.ubrowser.clearCache" => {
+            if !request.surface
+                || !state
+                    .plugin_assets
+                    .is_active_surface_for(&request.lease_id, &request.plugin_id)
+            {
+                return Err(
+                    "uTools ubrowser cache clearing requires the visible active plugin surface."
+                        .to_owned(),
+                );
+            }
+            if !state.plugins.uses_utools_compatibility(&request.plugin_id)? {
+                return Err("uTools ubrowser cache is available only to imported uTools packages.".to_owned());
+            }
+            validate_exact_plugin_params(&request.params, &[])?;
+            app.state::<UtoolsUBrowserRegistry>()
+                .clear_cache(app, &request.plugin_id)?;
+            Ok(json!({ "cleared": true }))
         }
         "commands.register" => {
             let definition = required_value(&request.params, "definition")?;
@@ -8924,6 +9023,12 @@ fn release_hosted_plugin_window_lease(window: &tauri::Window) {
     if window.label() == "main" {
         return;
     }
+    if window.label().starts_with(UTOOLS_UBROWSER_WINDOW_PREFIX) {
+        if let Some(registry) = window.try_state::<UtoolsUBrowserRegistry>() {
+            registry.remove_window(window.label());
+        }
+        return;
+    }
     let lease_id = if window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
         window
             .try_state::<UtoolsBrowserWindowRegistry>()
@@ -9039,6 +9144,7 @@ pub fn run() {
             app.manage(state);
             app.manage(DetachedPluginWindowRegistry::default());
             app.manage(UtoolsBrowserWindowRegistry::default());
+            app.manage(UtoolsUBrowserRegistry::default());
             let dialog_app = app.handle().clone();
             app.state::<AppState>()
                 .plugin_assets

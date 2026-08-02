@@ -65,6 +65,19 @@ describe("plugin iframe Bridge boundary", () => {
       error: null,
     })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.browser.closeSelf", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ubrowser.run", {
+      instanceId: null,
+      steps: [
+        { op: "goto", args: ["https://example.com", null, 10_000] },
+        { op: "wait", args: ["#ready", 1_000] },
+        { op: "evaluate", args: [{ __ihubFunction: "() => document.title" }, []] },
+      ],
+      options: { width: 1200, height: 800 },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ubrowser.setProxy", {
+      config: { proxyRules: "http://127.0.0.1:1080" },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ubrowser.clearCache", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -250,6 +263,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.executeResult")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.send")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.sendToParent")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.ubrowser.run")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",
       dataBase64: "c2FmZQ==",

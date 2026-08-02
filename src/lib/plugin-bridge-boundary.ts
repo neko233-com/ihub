@@ -22,6 +22,8 @@ export const PLUGIN_BRIDGE_MAX_ATTACHMENT_BASE64_CHARS = Math.ceil(
 export const PLUGIN_BRIDGE_MAX_ATTACHMENT_JSON_BYTES = 43 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES = 256 * 1024;
 export const PLUGIN_BRIDGE_MAX_BROWSER_JSON_BYTES = 800 * 1024;
+export const PLUGIN_BRIDGE_MAX_UBROWSER_JSON_BYTES = 4 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_UBROWSER_JSON_NODES = 32_768;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
@@ -47,6 +49,9 @@ const pluginHostMethods = new Set([
   "compatibility.utools.browser.executeResult",
   "compatibility.utools.browser.send",
   "compatibility.utools.browser.sendToParent",
+  "compatibility.utools.ubrowser.run",
+  "compatibility.utools.ubrowser.setProxy",
+  "compatibility.utools.ubrowser.clearCache",
   "compatibility.utools.db.allDocs",
   "compatibility.utools.db.bulkDocs",
   "compatibility.utools.db.get",
@@ -317,6 +322,7 @@ export function validatePluginBridgeCall(
   const isUtoolsRedirect = method === "compatibility.utools.window.redirect";
   const isUtoolsSimulation = method.startsWith("compatibility.utools.simulate.");
   const isUtoolsBrowser = method.startsWith("compatibility.utools.browser.");
+  const isUtoolsUBrowser = method === "compatibility.utools.ubrowser.run";
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
     if (!params || !hasOnlyKeys(params, new Set())) {
@@ -604,6 +610,78 @@ export function validatePluginBridgeCall(
       };
     }
   }
+  if (isUtoolsUBrowser) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const instanceId = params?.instanceId;
+    const steps = params?.steps;
+    const options = params?.options;
+    const operations = new Set([
+      "goto", "useragent", "viewport", "hide", "show", "css", "evaluate", "press",
+      "click", "mousedown", "mouseup", "dblclick", "hover", "file", "drop", "input",
+      "value", "check", "focus", "scroll", "download", "paste", "screenshot", "markdown",
+      "pdf", "device", "wait", "when", "end", "devTools", "cookies", "setCookies",
+      "removeCookies", "clearCookies",
+    ]);
+    const validInstanceId = instanceId === null || (
+      typeof instanceId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(instanceId)
+    );
+    const validSteps = Array.isArray(steps)
+      && steps.length >= 1
+      && steps.length <= 128
+      && steps.every((step) => isPlainRecord(step)
+        && hasOnlyKeys(step, new Set(["op", "args"]))
+        && typeof step.op === "string"
+        && operations.has(step.op)
+        && Array.isArray(step.args)
+        && step.args.length <= 8);
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["instanceId", "steps", "options"]))
+      || !validInstanceId
+      || !validSteps
+      || !isPlainRecord(options)
+    ) {
+      return {
+        ok: false,
+        error: "uTools ubrowser accepts one bounded declarative chain and host-issued instance ID.",
+        responseId,
+      };
+    }
+  }
+  if (method === "compatibility.utools.ubrowser.setProxy") {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const config = isPlainRecord(params?.config) ? params.config : null;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["config"]))
+      || !config
+      || !hasOnlyKeys(config, new Set(["proxyRules", "proxyBypassRules"]))
+      || typeof config.proxyRules !== "string"
+      || config.proxyRules.length === 0
+      || [...config.proxyRules].length > 2_048
+      || (config.proxyBypassRules !== undefined && (
+        typeof config.proxyBypassRules !== "string"
+        || [...config.proxyBypassRules].length > 2_048
+      ))
+    ) {
+      return {
+        ok: false,
+        error: "uTools ubrowser proxy config must contain bounded proxyRules strings.",
+        responseId,
+      };
+    }
+  }
+  if (method === "compatibility.utools.ubrowser.clearCache") {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    if (!params || !hasOnlyKeys(params, new Set())) {
+      return {
+        ok: false,
+        error: "uTools clearUBrowserCache does not accept parameters.",
+        responseId,
+      };
+    }
+  }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
   if (isImageCopy || isUtoolsRedirect) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
@@ -617,10 +695,14 @@ export function validatePluginBridgeCall(
     maxJsonBytes = PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES;
   } else if (isUtoolsBrowser) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_BROWSER_JSON_BYTES;
+  } else if (isUtoolsUBrowser) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_UBROWSER_JSON_BYTES;
   }
   const maxJsonNodes = isDbWrite
     ? PLUGIN_BRIDGE_MAX_DB_JSON_NODES
-    : PLUGIN_BRIDGE_MAX_JSON_NODES;
+    : isUtoolsUBrowser
+      ? PLUGIN_BRIDGE_MAX_UBROWSER_JSON_NODES
+      : PLUGIN_BRIDGE_MAX_JSON_NODES;
   if (!boundedJsonValue(normalizedCall, maxJsonBytes, maxJsonNodes)) {
     return {
       ok: false,
@@ -676,5 +758,6 @@ export function isLargePluginBridgeMethod(method: string): boolean {
     || method === "compatibility.utools.browser.executeJavaScript"
     || method === "compatibility.utools.browser.executeResult"
     || method === "compatibility.utools.browser.send"
-    || method === "compatibility.utools.browser.sendToParent";
+    || method === "compatibility.utools.browser.sendToParent"
+    || method === "compatibility.utools.ubrowser.run";
 }

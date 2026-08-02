@@ -1983,10 +1983,11 @@ const browserWindows = new Map();
 const browserReady = new Set();
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
-function call(method, params, interactionId) {{
+function call(method, params, interactionId, timeoutMs) {{
   const id = "utools-compat-" + (++sequence).toString(36);
   return new Promise((resolve, reject) => {{
-    const timeout = window.setTimeout(() => {{ pending.delete(id); reject(new Error("iHub host bridge timed out.")); }}, 15000);
+    const boundedTimeout = Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 125000 ? timeoutMs : 15000;
+    const timeout = window.setTimeout(() => {{ pending.delete(id); reject(new Error("iHub host bridge timed out.")); }}, boundedTimeout);
     pending.set(id, {{ resolve, reject, timeout }});
     const request = {{ pluginId: config.pluginId, method, params: params || {{}} }};
     if (interactionId) request.interactionId = interactionId;
@@ -2878,10 +2879,103 @@ window.addEventListener("message", (event) => {{
   const input = message.payload && message.payload.input;
   invoke(enterCallbacks, {{ code: command.code, type: "text", payload: typeof input === "string" ? input : "", from: "main" }});
 }});
+let idleUBrowsers = Array.isArray(config.idleUbrowsers)
+  ? config.idleUbrowsers.filter((value) => value && typeof value === "object" && typeof value.id === "string").map((value) => Object.freeze({{ ...value }}))
+  : [];
+function ubrowserJsonValue(value, depth) {{
+  if (depth > 12) throw new RangeError("uTools ubrowser arguments are nested too deeply.");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {{ if (!Number.isFinite(value)) throw new TypeError("uTools ubrowser numbers must be finite."); return value; }}
+  if (value instanceof Uint8Array) {{
+    if (value.byteLength === 0 || value.byteLength > 2 * 1024 * 1024) throw new RangeError("uTools ubrowser binary payload is empty or too large.");
+    let binary = "";
+    for (let offset = 0; offset < value.byteLength; offset += 32768) binary += String.fromCharCode(...value.subarray(offset, Math.min(value.byteLength, offset + 32768)));
+    return {{ __ihubBytesBase64: btoa(binary) }};
+  }}
+  if (Array.isArray(value)) {{ if (value.length > 64) throw new RangeError("uTools ubrowser arrays are too large."); return value.map((item) => ubrowserJsonValue(item, depth + 1)); }}
+  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError("uTools ubrowser arguments must be JSON values.");
+  const entries = Object.entries(value);
+  if (entries.length > 64) throw new RangeError("uTools ubrowser objects are too large.");
+  const result = {{}};
+  for (const [key, item] of entries) {{
+    if (!key || Array.from(key).length > 128 || /[\u0000-\u001f\u007f]/.test(key)) throw new TypeError("uTools ubrowser object key is invalid.");
+    result[key] = ubrowserJsonValue(item, depth + 1);
+  }}
+  return result;
+}}
+function ubrowserFunction(value) {{
+  if (typeof value !== "function") throw new TypeError("uTools ubrowser requires a page function.");
+  const source = Function.prototype.toString.call(value);
+  if (!source || Array.from(source).length > 65536 || new TextEncoder().encode(source).byteLength > 262144) throw new RangeError("uTools ubrowser page function is too large.");
+  return {{ __ihubFunction: source }};
+}}
+const ubrowserSimpleMethods = [
+  "useragent", "viewport", "hide", "show", "css", "press", "click", "mousedown", "mouseup", "dblclick", "hover",
+  "file", "drop", "input", "value", "check", "focus", "scroll", "paste", "screenshot", "markdown", "pdf", "device",
+  "end", "devTools", "cookies", "setCookies", "removeCookies", "clearCookies"
+];
+function createUBrowserChain(initialOperation, initialArgs) {{
+  const steps = [];
+  const chain = {{}};
+  const push = (op, args) => {{
+    if (steps.length >= 128) throw new RangeError("uTools ubrowser chains are limited to 128 steps.");
+    if (!Array.isArray(args) || args.length > 8) throw new RangeError("uTools ubrowser step has too many arguments.");
+    steps.push({{ op, args: args.map((value) => ubrowserJsonValue(value, 0)) }});
+    return chain;
+  }};
+  chain.goto = (url, headers, timeout) => push("goto", headers === undefined && timeout === undefined ? [url] : [url, headers ?? null, timeout ?? null]);
+  chain.evaluate = (func, params) => push("evaluate", [ubrowserFunction(func), params === undefined ? [] : ubrowserJsonValue(params, 0)]);
+  chain.wait = (target, timeout, ...params) => typeof target === "function"
+    ? push("wait", [ubrowserFunction(target), timeout ?? null, ...params])
+    : push("wait", timeout === undefined ? [target] : [target, timeout]);
+  chain.when = (target, ...params) => typeof target === "function"
+    ? push("when", [ubrowserFunction(target), ...params])
+    : push("when", [target]);
+  chain.download = (target, savePath, ...params) => typeof target === "function"
+    ? push("download", [ubrowserFunction(target), savePath ?? null, ...params])
+    : push("download", savePath === undefined ? [target] : [target, savePath]);
+  for (const method of ubrowserSimpleMethods) chain[method] = (...args) => push(method, args);
+  chain.run = (instanceOrOptions, maybeOptions) => {{
+    let instanceId = null;
+    let options = {{}};
+    if (typeof instanceOrOptions === "string") {{ instanceId = instanceOrOptions; options = maybeOptions === undefined ? {{}} : ubrowserJsonValue(maybeOptions, 0); }}
+    else if (instanceOrOptions !== undefined && instanceOrOptions !== null) options = ubrowserJsonValue(instanceOrOptions, 0);
+    if (!options || typeof options !== "object" || Array.isArray(options)) return Promise.reject(new TypeError("uTools ubrowser run options must be an object."));
+    return call("compatibility.utools.ubrowser.run", {{ instanceId, steps, options }}, undefined, 125000).then((result) => {{
+      if (!Array.isArray(result) || result.length === 0) throw new Error("iHub returned an invalid ubrowser result.");
+      const instance = result[result.length - 1];
+      if (!instance || typeof instance !== "object" || typeof instance.id !== "string") throw new Error("iHub returned an invalid ubrowser instance.");
+      idleUBrowsers = idleUBrowsers.filter((candidate) => candidate.id !== instance.id);
+      idleUBrowsers.push(Object.freeze({{ ...instance }}));
+      return result;
+    }});
+  }};
+  if (initialOperation) chain[initialOperation](...(initialArgs || []));
+  return Object.freeze(chain);
+}}
+const ubrowser = {{}};
+for (const method of ["goto", "evaluate", "wait", "when", "download", ...ubrowserSimpleMethods]) {{
+  ubrowser[method] = (...args) => createUBrowserChain(method, args);
+}}
+Object.freeze(ubrowser);
 const utools = Object.freeze({{
   db,
   dbStorage,
   dbCryptoStorage,
+  ubrowser,
+  getIdleUBrowsers() {{ return idleUBrowsers.map((value) => ({{ ...value }})); }},
+  setUBrowserProxy(config) {{
+    const normalized = ubrowserJsonValue(config, 0);
+    if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return false;
+    void call("compatibility.utools.ubrowser.setProxy", {{ config: normalized }})
+      .catch((error) => console.error("iHub ubrowser proxy configuration failed", error));
+    return true;
+  }},
+  clearUBrowserCache() {{
+    void call("compatibility.utools.ubrowser.clearCache", {{}})
+      .catch((error) => console.error("iHub ubrowser cache clearing failed", error));
+    return true;
+  }},
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
@@ -3479,6 +3573,7 @@ mod tests {
             commands: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
             paths: Default::default(),
+            idle_ubrowsers: Vec::new(),
             window_type: "main".to_owned(),
             lifecycle_owner: true,
         }
@@ -3728,6 +3823,7 @@ mod tests {
             paths: [("home".to_owned(), "C:\\Users\\Tester".to_owned())]
                 .into_iter()
                 .collect(),
+            idle_ubrowsers: Vec::new(),
             window_type: "main".to_owned(),
             lifecycle_owner: true,
         };

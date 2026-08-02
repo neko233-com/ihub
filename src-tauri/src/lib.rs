@@ -33,6 +33,7 @@ mod utools_db;
 mod utools_drag;
 mod utools_foreground;
 mod utools_screen;
+mod utools_ubrowser;
 mod wifi_profiles;
 mod window_management;
 

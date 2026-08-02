@@ -270,6 +270,10 @@ pub(crate) struct UtoolsCompatRuntimeConfig {
     pub(crate) commands: Vec<UtoolsCompatCommand>,
     pub(crate) native_id: String,
     pub(crate) paths: BTreeMap<String, String>,
+    /// Same-plugin idle remote browser windows available for a subsequent
+    /// `utools.ubrowser.run(instance.id)` call. The host derives every field
+    /// from its registry and native window; package code cannot forge it.
+    pub(crate) idle_ubrowsers: Vec<crate::utools_ubrowser::UBrowserInstance>,
     /// Host-owned role for this exact document. BrowserWindow children never
     /// learn or choose this value from their route or package URL.
     pub(crate) window_type: String,
@@ -1924,6 +1928,7 @@ impl PluginManager {
                     commands: manifest.utools_commands,
                     native_id: String::new(),
                     paths: BTreeMap::new(),
+                    idle_ubrowsers: Vec::new(),
                     window_type: "main".to_owned(),
                     lifecycle_owner: true,
                 }),
@@ -5031,6 +5036,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.browserWindow.sandboxedIpc".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.ubrowser.hostedHttpsAutomation".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5590,6 +5598,9 @@ mod tests {
         assert!(plugin_security_declaration(&manifest)
             .permissions
             .contains("compatibility.utools.browserWindow.sandboxedIpc"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.ubrowser.hostedHttpsAutomation"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);

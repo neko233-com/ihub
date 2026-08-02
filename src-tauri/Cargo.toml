@@ -28,7 +28,7 @@ ring = "0.17"
 # Use Rustls with ring rather than enabling reqwest's AWS-LC default. This keeps
 # the first-party WebDAV client on the same pure-Rust TLS path already used by
 # the desktop stack and avoids introducing a second crypto provider/toolchain.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "socks", "stream"] }
 rfd = { version = "0.15.4", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["fs"] }
@@ -50,6 +50,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 notify-rust = "4.18"
+webview2-com = "0.38.2"
 windows = { version = "0.61.3", features = [
   "Foundation",
   "Globalization",
@@ -62,6 +63,7 @@ windows = { version = "0.61.3", features = [
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_Environment",
   "Win32_System_LibraryLoader",
