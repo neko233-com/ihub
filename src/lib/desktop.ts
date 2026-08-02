@@ -57,6 +57,9 @@ export async function onHideSearch(callback: () => void): Promise<UnlistenFn> {
 export interface TrayNavigationEventPayload {
   surface: "settings";
   section: "preferences" | "about" | "shortcuts" | "ai";
+  pluginId?: string;
+  commandLabel?: string;
+  autoCopy?: boolean;
 }
 
 export async function onTrayNavigation(
@@ -73,6 +76,13 @@ export async function onTrayNavigation(
         section: ["about", "shortcuts", "ai"].includes(String(payload.section))
           ? payload.section as TrayNavigationEventPayload["section"]
           : "preferences",
+        pluginId: typeof payload.pluginId === "string" && payload.pluginId.length <= 128
+          ? payload.pluginId
+          : undefined,
+        commandLabel: typeof payload.commandLabel === "string" && [...payload.commandLabel].length <= 160
+          ? payload.commandLabel
+          : undefined,
+        autoCopy: typeof payload.autoCopy === "boolean" ? payload.autoCopy : undefined,
       });
     }
   });
@@ -83,6 +93,7 @@ export interface PluginGlobalShortcutEventPayload {
   shortcut: string;
   commandId?: string;
   keyword?: string;
+  input?: string;
 }
 
 export async function onPluginGlobalShortcut(
@@ -97,6 +108,12 @@ export async function onPluginGlobalShortcut(
       typeof payload?.pluginId !== "string"
       || typeof payload.shortcut !== "string"
       || (typeof payload.commandId === "string") === (typeof payload.keyword === "string")
+      || (payload.input !== undefined && (
+        typeof payload.input !== "string"
+        || typeof payload.commandId !== "string"
+        || payload.input.includes("\0")
+        || new TextEncoder().encode(payload.input).byteLength > 48 * 1024
+      ))
     ) {
       return;
     }

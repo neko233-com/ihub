@@ -312,6 +312,7 @@ export interface PluginGlobalShortcutEvent {
   shortcut: string;
   commandId?: string;
   keyword?: string;
+  input?: string;
 }
 
 /** Bounded outcome returned after iHub waits for a one-shot native plugin command. */

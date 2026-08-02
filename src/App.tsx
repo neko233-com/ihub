@@ -66,6 +66,10 @@ import {
   type LauncherContextImageSource,
 } from "./lib/plugin-launcher-context";
 import {
+  resolvePluginShortcutTarget,
+  type SettingsPluginShortcutTarget,
+} from "./lib/plugin-shortcut-settings";
+import {
   completePluginSearchProviderReadiness,
   createPluginSearchProviderReadinessBootstrap,
   transitionPluginSearchProviderReadiness,
@@ -840,6 +844,7 @@ function createFrontendCommandEvent(
   pluginId: string,
   commandId: string,
   utoolsAction?: UtoolsRedirectAction,
+  input?: string,
 ): PluginFrontendEvent {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -854,7 +859,7 @@ function createFrontendCommandEvent(
     payload: {
       requestId,
       commandId,
-      input: null,
+      input: input ?? null,
       context: null,
       ...(utoolsAction ? { utoolsAction } : {}),
     },
@@ -1192,6 +1197,11 @@ export function App() {
   const [settingsNavigationSection, setSettingsNavigationSection] = useState<
     "preferences" | "about" | "shortcuts" | "ai"
   >("preferences");
+  const [settingsPluginShortcutTarget, setSettingsPluginShortcutTarget] = useState<SettingsPluginShortcutTarget | null>(null);
+  const [pluginShortcutDraft, setPluginShortcutDraft] = useState<string | null>(null);
+  const [isRecordingPluginShortcut, setIsRecordingPluginShortcut] = useState(false);
+  const [isUpdatingPluginShortcut, setIsUpdatingPluginShortcut] = useState(false);
+  const [pluginShortcutError, setPluginShortcutError] = useState<string | null>(null);
 
   // Keep an imperative snapshot for lifecycle callbacks and async handoff
   // continuations. React state remains the UI source of truth; this ref only
@@ -1689,12 +1699,43 @@ export function App() {
   }, [isRecordingLauncherHotkey]);
 
   useEffect(() => {
+    if (!isRecordingPluginShortcut) {
+      return;
+    }
+    const recordPluginShortcut = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (event.code === "Escape") {
+        setIsRecordingPluginShortcut(false);
+        setPluginShortcutError(null);
+        return;
+      }
+      const normalized = normalizeLauncherHotkey(event);
+      if (!normalized.ok) {
+        if (normalized.reason !== "modifier-only") {
+          setPluginShortcutError(launcherHotkeyRejectionMessage(normalized.reason));
+        }
+        return;
+      }
+      setPluginShortcutDraft(normalized.accelerator);
+      setPluginShortcutError(null);
+      setIsRecordingPluginShortcut(false);
+    };
+    window.addEventListener("keydown", recordPluginShortcut, true);
+    return () => window.removeEventListener("keydown", recordPluginShortcut, true);
+  }, [isRecordingPluginShortcut]);
+
+  useEffect(() => {
     if (settingsOpen) {
       return;
     }
     setIsRecordingLauncherHotkey(false);
     setLauncherHotkeyDraft(null);
     setLauncherHotkeyError(null);
+    setIsRecordingPluginShortcut(false);
+    setPluginShortcutDraft(null);
+    setPluginShortcutError(null);
   }, [settingsOpen]);
 
   useEffect(() => {
@@ -2005,12 +2046,17 @@ export function App() {
           void refreshPlugins();
         }
       }),
-      onTrayNavigation(({ section }) => {
+      onTrayNavigation(({ section, pluginId, commandLabel, autoCopy }) => {
         if (disposed) {
           return;
         }
         setSurface("settings");
         setSettingsNavigationSection(section);
+        setSettingsPluginShortcutTarget(
+          section === "shortcuts" && pluginId && commandLabel
+            ? { pluginId, commandLabel, autoCopy: autoCopy === true }
+            : null,
+        );
         if (section === "about") {
           showToast("关于 iHub：版本与平台信息显示在偏好设置底部。");
         }
@@ -2038,13 +2084,15 @@ export function App() {
     const targetId = settingsNavigationSection === "ai"
       ? "ai-provider-title"
       : settingsNavigationSection === "shortcuts"
-        ? "launcher-hotkey-title"
+        ? settingsPluginShortcutTarget
+          ? "plugin-shortcut-title"
+          : "launcher-hotkey-title"
         : "settings-title";
     const frame = window.requestAnimationFrame(() => {
       document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [settingsNavigationSection, settingsOpen]);
+  }, [settingsNavigationSection, settingsOpen, settingsPluginShortcutTarget]);
 
   /**
    * Update handles are short-lived native resources. A check owns at most one
@@ -2828,6 +2876,7 @@ export function App() {
         event.preventDefault();
         invalidateLauncherContextHandoff();
         setSettingsNavigationSection("preferences");
+        setSettingsPluginShortcutTarget(null);
         setSurface("settings");
         return;
       }
@@ -3015,6 +3064,69 @@ export function App() {
     setIsRecordingLauncherHotkey(true);
   };
 
+  const settingsPluginShortcut = useMemo(() => {
+    return resolvePluginShortcutTarget(plugins, settingsPluginShortcutTarget);
+  }, [plugins, settingsPluginShortcutTarget]);
+
+  const beginPluginShortcutRecording = () => {
+    if (!isDesktop()) {
+      showToast("浏览器预览不会注册插件全局快捷键；请在 iHub 桌面端设置。");
+      return;
+    }
+    if (isUpdatingPluginShortcut) return;
+    setPluginShortcutDraft(null);
+    setPluginShortcutError(null);
+    setIsRecordingPluginShortcut((current) => !current);
+  };
+
+  const updatePluginShortcut = async (accelerator: string | null) => {
+    if (!isDesktop() || !settingsPluginShortcut || isUpdatingPluginShortcut) return;
+    setIsRecordingPluginShortcut(false);
+    setPluginShortcutError(null);
+    setIsUpdatingPluginShortcut(true);
+    try {
+      await command<void>("set_plugin_command_shortcut", {
+        pluginId: settingsPluginShortcut.plugin.id,
+        commandId: settingsPluginShortcut.command.id,
+        accelerator,
+        autoCopy: settingsPluginShortcutTarget?.autoCopy === true,
+      });
+      setPluginShortcutDraft(null);
+      await refreshPlugins();
+      showToast(accelerator
+        ? `已更新「${settingsPluginShortcut.command.name}」的全局快捷键。`
+        : `已停用「${settingsPluginShortcut.command.name}」的全局快捷键。`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法更新插件指令快捷键。";
+      setPluginShortcutError(message);
+      showToast(message);
+    } finally {
+      setIsUpdatingPluginShortcut(false);
+    }
+  };
+
+  const resetPluginShortcut = async () => {
+    if (!isDesktop() || !settingsPluginShortcut || isUpdatingPluginShortcut) return;
+    setIsRecordingPluginShortcut(false);
+    setPluginShortcutError(null);
+    setIsUpdatingPluginShortcut(true);
+    try {
+      await command<void>("reset_plugin_command_shortcut", {
+        pluginId: settingsPluginShortcut.plugin.id,
+        commandId: settingsPluginShortcut.command.id,
+      });
+      setPluginShortcutDraft(null);
+      await refreshPlugins();
+      showToast(`已恢复「${settingsPluginShortcut.command.name}」的插件默认快捷键。`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法恢复插件默认快捷键。";
+      setPluginShortcutError(message);
+      showToast(message);
+    } finally {
+      setIsUpdatingPluginShortcut(false);
+    }
+  };
+
   const applyLauncherHotkey = async () => {
     if (!isDesktop() || !launcherHotkeyDraft || isUpdatingLauncherHotkey) {
       return;
@@ -3115,6 +3227,9 @@ export function App() {
   const launcherHotkeyPlatform = health?.platform ?? "windows";
   const launcherHotkeyDraftLabel = launcherHotkeyDraft
     ? formatLauncherHotkey(launcherHotkeyDraft, launcherHotkeyPlatform)
+    : null;
+  const pluginShortcutDraftLabel = pluginShortcutDraft
+    ? formatLauncherHotkey(pluginShortcutDraft, launcherHotkeyPlatform)
     : null;
   const hotkeyResetAction = launcherHotkeyResetAction(health?.launcherHotkey);
 
@@ -3286,6 +3401,7 @@ export function App() {
   const openSettings = () => {
     invalidateLauncherContextHandoff();
     setSettingsNavigationSection("preferences");
+    setSettingsPluginShortcutTarget(null);
     setSurface("settings");
   };
 
@@ -3810,6 +3926,21 @@ export function App() {
       showToast("该全局快捷键对应的插件命令已不存在；未执行任何内容。");
       return;
     }
+    if (
+      pendingPluginShortcut.input !== undefined
+      && (pluginCommand.execution === "frontend" || (plugin.frontendEntry && !plugin.hasNativeWorker))
+    ) {
+      invalidateLauncherContextHandoff();
+      setPendingPluginEvent(createFrontendCommandEvent(
+        plugin.id,
+        pluginCommand.id,
+        undefined,
+        pendingPluginShortcut.input,
+      ));
+      setActivePlugin(plugin);
+      setSurface("plugin");
+      return;
+    }
     void activateResult({
       id: `plugin-command:${plugin.id}:${pluginCommand.id}`,
       name: pluginCommand.name || pluginCommand.id,
@@ -4114,6 +4245,88 @@ export function App() {
                   <span />
                 </button>
               </section>
+
+              {settingsPluginShortcutTarget ? (
+                <section className="settings-section" aria-labelledby="plugin-shortcut-title">
+                  <div className="settings-section__icon">
+                    <Zap size={16} />
+                  </div>
+                  <div className="settings-section__copy">
+                    <h3 id="plugin-shortcut-title">插件指令快捷键</h3>
+                    {settingsPluginShortcut ? (
+                      <>
+                        <p>
+                          {settingsPluginShortcut.plugin.name} · {settingsPluginShortcut.command.name}
+                          {settingsPluginShortcutTarget.autoCopy ? " · 自动复制匹配内容" : ""}
+                        </p>
+                        {settingsPluginShortcut.command.shortcut ? (
+                          <p className="settings-hotkey-current">
+                            <span>当前</span>
+                            <kbd>{formatLauncherHotkey(settingsPluginShortcut.command.shortcut, launcherHotkeyPlatform)}</kbd>
+                          </p>
+                        ) : (
+                          <p>当前未注册全局快捷键。</p>
+                        )}
+                        <div className="settings-hotkey-controls">
+                          <button
+                            aria-pressed={isRecordingPluginShortcut}
+                            className={"settings-hotkey-recorder" + (isRecordingPluginShortcut ? " is-recording" : "")}
+                            disabled={!isDesktop() || isUpdatingPluginShortcut}
+                            onClick={beginPluginShortcutRecording}
+                            type="button"
+                          >
+                            {isUpdatingPluginShortcut ? <LoaderCircle className="spin" size={13} /> : <Keyboard size={13} />}
+                            {isRecordingPluginShortcut
+                              ? "请按组合键 · Esc 取消"
+                              : pluginShortcutDraftLabel
+                                ? `已录制 ${pluginShortcutDraftLabel}`
+                                : isDesktop() ? "录制新快捷键" : "仅桌面端可设置"}
+                          </button>
+                          {pluginShortcutDraft ? (
+                            <button
+                              className="settings-hotkey-apply"
+                              disabled={isUpdatingPluginShortcut}
+                              onClick={() => void updatePluginShortcut(pluginShortcutDraft)}
+                              type="button"
+                            >
+                              <Check size={13} />
+                              应用
+                            </button>
+                          ) : null}
+                          <button
+                            className="settings-hotkey-reset"
+                            disabled={!isDesktop() || isUpdatingPluginShortcut}
+                            onClick={() => void updatePluginShortcut(null)}
+                            type="button"
+                          >
+                            停用
+                          </button>
+                          <button
+                            className="settings-hotkey-reset"
+                            disabled={!isDesktop() || isUpdatingPluginShortcut}
+                            onClick={() => void resetPluginShortcut()}
+                            type="button"
+                          >
+                            <RefreshCw size={12} />
+                            恢复插件默认
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="settings-error" role="alert">
+                        <CircleAlert size={13} />
+                        插件没有找到与「{settingsPluginShortcutTarget.commandLabel}」匹配的已声明指令。
+                      </p>
+                    )}
+                    {pluginShortcutError ? (
+                      <p className="settings-error" role="alert">
+                        <CircleAlert size={13} />
+                        {pluginShortcutError}
+                      </p>
+                    ) : null}
+                  </div>
+                </section>
+              ) : null}
 
               <section className="settings-section" aria-labelledby="launcher-hotkey-title">
                 <div className="settings-section__icon">

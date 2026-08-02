@@ -25,6 +25,7 @@ pub(crate) struct PluginShortcutBinding {
     pub plugin_id: String,
     pub shortcut: String,
     pub target: PluginShortcutTarget,
+    pub auto_copy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +85,8 @@ pub(crate) struct PluginShortcutEvent {
     pub command_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyword: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
 }
 
 impl PluginShortcutEvent {
@@ -97,6 +100,7 @@ impl PluginShortcutEvent {
             shortcut: binding.shortcut.clone(),
             command_id,
             keyword,
+            input: None,
         }
     }
 }
@@ -123,6 +127,7 @@ fn shortcut_candidates(plugins: &[PluginInfo]) -> Vec<(bool, PluginShortcutBindi
                     plugin_id: plugin.id.clone(),
                     shortcut: shortcut.clone(),
                     target: PluginShortcutTarget::Command(command.id.clone()),
+                    auto_copy: false,
                 },
             ));
         }
@@ -141,6 +146,7 @@ fn shortcut_candidates(plugins: &[PluginInfo]) -> Vec<(bool, PluginShortcutBindi
                     plugin_id: plugin.id.clone(),
                     shortcut: shortcut.shortcut.clone(),
                     target,
+                    auto_copy: false,
                 },
             ));
         }
@@ -235,7 +241,13 @@ pub(crate) fn apply_plugin_shortcut_statuses(
 pub(crate) fn binding_is_current(plugins: &[PluginInfo], binding: &PluginShortcutBinding) -> bool {
     shortcut_candidates(plugins)
         .into_iter()
-        .any(|(enabled, candidate)| enabled && candidate == *binding)
+        .any(|(enabled, candidate)| {
+            enabled
+                && candidate.key == binding.key
+                && candidate.plugin_id == binding.plugin_id
+                && candidate.shortcut == binding.shortcut
+                && candidate.target == binding.target
+        })
 }
 
 /// A detached host owns only visible frontend commands for its exact plugin.
@@ -402,6 +414,7 @@ mod tests {
             plugin_id: "plugin-a".to_owned(),
             shortcut: "Alt+KeyF".to_owned(),
             target: PluginShortcutTarget::Keyword("find".to_owned()),
+            auto_copy: false,
         };
         assert!(!binding_targets_frontend_command(&plugins, &binding));
     }

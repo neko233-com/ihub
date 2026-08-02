@@ -586,6 +586,7 @@ pub struct AppState {
     plugin_assets: PluginAssetServer,
     plugin_crypto_storage: PluginCryptoStorage,
     plugin_settings: PluginSettingsStore,
+    plugin_shortcut_preferences: crate::plugin_shortcut_preferences::PluginShortcutPreferenceStore,
     ai_providers: AiProviderStore,
     ffmpeg: UtoolsFfmpegIntegration,
     utools_documents: crate::utools_db::UtoolsDocumentStore,
@@ -627,6 +628,10 @@ impl AppState {
         let plugins = PluginManager::new();
         let plugin_crypto_storage = PluginCryptoStorage::new(app_data_dir.clone());
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
+        let plugin_shortcut_preferences =
+            crate::plugin_shortcut_preferences::PluginShortcutPreferenceStore::new(
+                app_data_dir.clone(),
+            );
         let ai_providers =
             AiProviderStore::new(plugin_settings.clone(), plugin_crypto_storage.clone());
         let ffmpeg = UtoolsFfmpegIntegration::new(app_data_dir.clone());
@@ -655,6 +660,7 @@ impl AppState {
             plugin_assets: PluginAssetServer::new(),
             plugin_crypto_storage,
             plugin_settings,
+            plugin_shortcut_preferences,
             ai_providers,
             ffmpeg,
             utools_documents,
@@ -737,6 +743,12 @@ impl AppState {
     }
 
     fn project_plugin_shortcut_statuses(&self, plugins: &mut [PluginInfo]) {
+        if let Err(error) = self.plugin_shortcut_preferences.apply_to_plugins(plugins) {
+            host_log::error(
+                "hotkey",
+                format!("Could not apply plugin shortcut preferences: {error}"),
+            );
+        }
         let registry = self
             .plugin_shortcuts
             .lock()
@@ -2014,6 +2026,65 @@ pub fn list_plugins(state: State<'_, AppState>) -> Vec<PluginInfo> {
     project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
     state.project_plugin_shortcut_statuses(&mut plugins);
     plugins
+}
+
+#[tauri::command]
+pub fn set_plugin_command_shortcut(
+    app: AppHandle,
+    plugin_id: String,
+    command_id: String,
+    accelerator: Option<String>,
+    auto_copy: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.plugins.ensure_plugin_enabled(&plugin_id)?;
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.id == plugin_id)
+        .ok_or_else(|| "找不到要设置快捷键的插件。".to_owned())?;
+    if !plugin
+        .commands
+        .iter()
+        .any(|command| command.id == command_id)
+    {
+        return Err("找不到要设置快捷键的插件指令。".to_owned());
+    }
+    state.plugin_shortcut_preferences.set(
+        &plugin_id,
+        &command_id,
+        accelerator.as_deref(),
+        auto_copy,
+    )?;
+    refresh_plugin_shortcuts(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reset_plugin_command_shortcut(
+    app: AppHandle,
+    plugin_id: String,
+    command_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.plugins.ensure_plugin_enabled(&plugin_id)?;
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    if !plugins.iter().any(|plugin| {
+        plugin.id == plugin_id
+            && plugin
+                .commands
+                .iter()
+                .any(|command| command.id == command_id)
+    }) {
+        return Err("找不到要恢复快捷键的插件指令。".to_owned());
+    }
+    state
+        .plugin_shortcut_preferences
+        .reset(&plugin_id, &command_id)?;
+    refresh_plugin_shortcuts(&app);
+    Ok(())
 }
 
 fn populate_utools_runtime_system_config(
@@ -5472,11 +5543,14 @@ pub async fn plugin_host_call(
             Ok(section.to_owned())
         })?;
         show_launcher(&app);
-        app.emit(
-            "ihub://tray-navigation",
-            json!({ "surface": "settings", "section": section }),
-        )
-        .map_err(|error| format!("Could not open iHub settings: {error}"))?;
+        let mut navigation = json!({ "surface": "settings", "section": section });
+        if section == "shortcuts" {
+            navigation["pluginId"] = Value::String(request_plugin_id.clone());
+            navigation["commandLabel"] = request.params["commandLabel"].clone();
+            navigation["autoCopy"] = request.params["autoCopy"].clone();
+        }
+        app.emit("ihub://tray-navigation", navigation)
+            .map_err(|error| format!("Could not open iHub settings: {error}"))?;
         return Ok(json!({ "opened": true }));
     }
 
@@ -8296,6 +8370,7 @@ fn dispatch_utools_notification_click(app: &AppHandle, plugin_id: &str, feature_
         shortcut: "notification".to_owned(),
         command_id: Some(command_id),
         keyword: None,
+        input: None,
     };
     if let Err(error) = app.emit_to("main", "ihub://plugin-global-shortcut", payload) {
         host_log::warn(
@@ -11066,6 +11141,8 @@ pub fn run() {
             open_launcher_shortcut,
             unpin_launcher_shortcut,
             list_plugins,
+            set_plugin_command_shortcut,
+            reset_plugin_command_shortcut,
             crate::detached_plugin_window::open_detached_plugin_window,
             crate::detached_plugin_window::get_detached_plugin_window_bootstrap,
             crate::detached_plugin_window::close_detached_plugin_window,
@@ -11316,8 +11393,34 @@ fn refresh_plugin_shortcuts(app: &AppHandle) {
         .plugin_shortcut_change
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let plugins = state.plugins.list();
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    if let Err(error) = state
+        .plugin_shortcut_preferences
+        .apply_to_plugins(&mut plugins)
+    {
+        host_log::error(
+            "hotkey",
+            format!("Could not apply plugin shortcut preferences: {error}"),
+        );
+    }
     let mut plan = plan_plugin_shortcuts(&plugins, &launcher_reserved_plugin_shortcuts(&state));
+    match state.plugin_shortcut_preferences.auto_copy_targets() {
+        Ok(targets) => {
+            for binding in &mut plan.ready {
+                if let crate::plugin_shortcuts::PluginShortcutTarget::Command(command_id) =
+                    &binding.target
+                {
+                    binding.auto_copy =
+                        targets.contains(&(binding.plugin_id.clone(), command_id.clone()));
+                }
+            }
+        }
+        Err(error) => host_log::error(
+            "hotkey",
+            format!("Could not restore plugin shortcut auto-copy preferences: {error}"),
+        ),
+    }
     let mut eligibility = HashMap::<String, Result<(), String>>::new();
     plan.ready.retain(|binding| {
         let result = eligibility
@@ -11437,7 +11540,15 @@ fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
     // reaches the native registry. Re-read the validated manifest projection
     // so a stale callback can never invoke disabled or replaced code.
     let state = app.state::<AppState>();
-    let plugins = state.plugins.list();
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    if state
+        .plugin_shortcut_preferences
+        .apply_to_plugins(&mut plugins)
+        .is_err()
+    {
+        return;
+    }
     if state.host.auto_hide_is_suspended()
         || state
             .plugins
@@ -11447,8 +11558,16 @@ fn dispatch_plugin_shortcut(app: &AppHandle, accelerator: &str) {
     {
         return;
     }
-    let payload = PluginShortcutEvent::from_binding(&binding);
-    if binding_targets_frontend_command(&plugins, &binding) {
+    let mut payload = PluginShortcutEvent::from_binding(&binding);
+    if binding.auto_copy {
+        let input = crate::clipboard_access::with_clipboard(|clipboard| clipboard.get_text())
+            .ok()
+            .map(|text| truncate_utf8_bytes(text, MAX_PLUGIN_CLIPBOARD_TEXT_BYTES))
+            .filter(|text| !text.contains('\0'))
+            .unwrap_or_default();
+        payload.input = Some(input);
+    }
+    if !binding.auto_copy && binding_targets_frontend_command(&plugins, &binding) {
         match detached_plugin_event_target(app, &state, &binding.plugin_id) {
             Ok(Some(label)) => {
                 // The label can only come from the host registry's exact

@@ -103,6 +103,8 @@ commands.allow = [
   "quit_app",
   "set_launcher_hotkey",
   "reset_launcher_hotkey",
+  "set_plugin_command_shortcut",
+  "reset_plugin_command_shortcut",
   "get_app_health",
   "get_host_log",
   "clear_host_log",
