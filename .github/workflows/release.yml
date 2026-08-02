@@ -221,7 +221,13 @@ jobs:
                 ref: `refs/tags/${tag}`,
                 sha: releaseSha,
               });
-              tagCommit = await resolveTagCommit(tag);
+              // GitHub's ref read can briefly lag behind a successful create.
+              // Retry the authoritative read instead of failing the first
+              // release attempt with an undefined tag target.
+              for (let attempt = 0; attempt < 6 && !tagCommit; attempt += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+                tagCommit = await resolveTagCommit(tag);
+              }
             }
             if (tagCommit !== releaseSha) {
               throw new Error(`Tag ${tag} points to ${tagCommit}, not exact release commit ${releaseSha}.`);
