@@ -21,7 +21,8 @@ $workflowFiles = @(
         Sort-Object -Property FullName
 )
 if ($workflowFiles.Count -eq 0) {
-    throw "No workflow files found in $WorkflowDirectory"
+    Write-Host 'GitHub Actions are intentionally disabled: no workflow files are present.'
+    return
 }
 
 Write-Host "Linting $($workflowFiles.Count) GitHub Actions workflow(s) with $($actionlint.Path)"
