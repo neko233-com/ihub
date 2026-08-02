@@ -38,5 +38,7 @@ describe("iHub / uTools plugin import entry points", () => {
     expect(source).toContain('command<PluginInfo>("link_plugin_from_local"');
     expect(source).toContain('command<PluginInfo>("install_plugin_from_git"');
     expect(source).toContain('plugin.compatibility === "utools"');
+    expect(source).toMatch(/\.plugin-center__topbar\s*\{[^}]*overflow:\s*visible;[^}]*z-index:\s*20;/s);
+    expect(source).toMatch(/\.plugin-center__action-menu\s*\{[^}]*z-index:\s*100;/s);
   });
 });

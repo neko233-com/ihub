@@ -229,9 +229,12 @@ const pluginCenterStyles = `
     display: grid;
     gap: 12px;
     grid-template-columns: 220px minmax(127px, 1fr) auto;
+    isolation: isolate;
     min-height: 48px;
+    overflow: visible;
     padding: 0 12px;
     position: relative;
+    z-index: 20;
   }
 
   .plugin-center__drag-zone {
@@ -386,7 +389,7 @@ const pluginCenterStyles = `
     right: 0;
     top: calc(100% + 5px);
     transform-origin: top right;
-    z-index: 4;
+    z-index: 100;
   }
 
   .plugin-center__action-menu-item {
@@ -446,7 +449,7 @@ const pluginCenterStyles = `
     right: 0;
     top: calc(100% + 5px);
     width: min(240px, calc(100vw - 21px));
-    z-index: 4;
+    z-index: 100;
   }
 
   .plugin-center__import-popover label {
