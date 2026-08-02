@@ -7,6 +7,11 @@ interface PointerPosition {
   y: number;
 }
 
+interface WindowDragStart extends PointerPosition {
+  /** Mouse dragging starts as soon as intentional movement is detected. */
+  triggerOnMove: boolean;
+}
+
 interface WindowDragPointer {
   button: number;
   isPrimary: boolean;
@@ -23,7 +28,7 @@ interface LongPressWindowDragOptions {
 }
 
 export interface LongPressWindowDragController {
-  begin: (pointer: PointerPosition) => boolean;
+  begin: (pointer: WindowDragStart) => boolean;
   cancel: (pointerId?: number) => void;
   dispose: () => void;
   move: (pointer: PointerPosition) => void;
@@ -57,6 +62,7 @@ export function createLongPressWindowDragController({
   let startPoint: { x: number; y: number } | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let triggered = false;
+  let triggerOnMove = false;
   let disposed = false;
 
   const setPending = (pending: boolean) => {
@@ -77,9 +83,21 @@ export function createLongPressWindowDragController({
     activePointerId = null;
     startPoint = null;
     triggered = false;
+    triggerOnMove = false;
     if (notify) {
       setPending(false);
     }
+  };
+
+  const trigger = () => {
+    if (disposed || activePointerId === null || triggered) {
+      return;
+    }
+    clearTimer();
+    triggered = true;
+    startPoint = null;
+    setPending(false);
+    onTrigger();
   };
 
   return {
@@ -91,16 +109,14 @@ export function createLongPressWindowDragController({
       activePointerId = pointer.pointerId;
       startPoint = { x: pointer.x, y: pointer.y };
       triggered = false;
+      triggerOnMove = pointer.triggerOnMove;
       setPending(true);
       timer = schedule(() => {
         timer = null;
         if (disposed || activePointerId !== pointer.pointerId || triggered) {
           return;
         }
-        triggered = true;
-        startPoint = null;
-        setPending(false);
-        onTrigger();
+        trigger();
       }, delayMs);
       return true;
     },
@@ -110,7 +126,11 @@ export function createLongPressWindowDragController({
         return;
       }
       if (Math.hypot(pointer.x - startPoint.x, pointer.y - startPoint.y) > moveTolerancePx) {
-        reset();
+        if (triggerOnMove) {
+          trigger();
+        } else {
+          reset();
+        }
       }
     },
 
@@ -129,6 +149,7 @@ export function createLongPressWindowDragController({
       activePointerId = null;
       startPoint = null;
       triggered = false;
+      triggerOnMove = false;
       disposed = true;
     },
   };

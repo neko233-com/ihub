@@ -53,7 +53,7 @@ describe("long-press window drag", () => {
       schedule: scheduler.schedule,
     });
 
-    expect(controller.begin({ pointerId: 4, x: 80, y: 5 })).toBe(true);
+    expect(controller.begin({ pointerId: 4, triggerOnMove: true, x: 80, y: 5 })).toBe(true);
     controller.cancel(4);
     scheduler.flush();
 
@@ -62,7 +62,7 @@ describe("long-press window drag", () => {
     expect(scheduler.pendingCount()).toBe(0);
   });
 
-  it("cancels after meaningful movement while tolerating tiny pointer drift", () => {
+  it("starts a mouse drag after meaningful movement while tolerating tiny pointer drift", () => {
     const scheduler = createManualScheduler();
     const onTrigger = vi.fn();
     const controller = createLongPressWindowDragController({
@@ -71,13 +71,31 @@ describe("long-press window drag", () => {
       schedule: scheduler.schedule,
     });
 
-    controller.begin({ pointerId: 7, x: 50, y: 4 });
+    controller.begin({ pointerId: 7, triggerOnMove: true, x: 50, y: 4 });
     controller.move({ pointerId: 7, x: 53, y: 8 });
     expect(scheduler.pendingCount()).toBe(1);
     controller.move({ pointerId: 7, x: 57, y: 4 });
     scheduler.flush();
 
+    expect(onTrigger).toHaveBeenCalledTimes(1);
+    expect(scheduler.pendingCount()).toBe(0);
+  });
+
+  it("cancels touch movement before the long press fires", () => {
+    const scheduler = createManualScheduler();
+    const onTrigger = vi.fn();
+    const controller = createLongPressWindowDragController({
+      cancelScheduled: scheduler.cancel,
+      onTrigger,
+      schedule: scheduler.schedule,
+    });
+
+    controller.begin({ pointerId: 8, triggerOnMove: false, x: 50, y: 4 });
+    controller.move({ pointerId: 8, x: 57, y: 4 });
+    scheduler.flush();
+
     expect(onTrigger).not.toHaveBeenCalled();
+    expect(scheduler.pendingCount()).toBe(0);
   });
 
   it("triggers at most once until the active pointer is released", () => {
@@ -89,14 +107,14 @@ describe("long-press window drag", () => {
       schedule: scheduler.schedule,
     });
 
-    expect(controller.begin({ pointerId: 11, x: 50, y: 4 })).toBe(true);
-    expect(controller.begin({ pointerId: 12, x: 50, y: 4 })).toBe(false);
+    expect(controller.begin({ pointerId: 11, triggerOnMove: false, x: 50, y: 4 })).toBe(true);
+    expect(controller.begin({ pointerId: 12, triggerOnMove: false, x: 50, y: 4 })).toBe(false);
     scheduler.flush();
     expect(onTrigger).toHaveBeenCalledTimes(1);
-    expect(controller.begin({ pointerId: 11, x: 50, y: 4 })).toBe(false);
+    expect(controller.begin({ pointerId: 11, triggerOnMove: false, x: 50, y: 4 })).toBe(false);
 
     controller.cancel(11);
-    expect(controller.begin({ pointerId: 12, x: 50, y: 4 })).toBe(true);
+    expect(controller.begin({ pointerId: 12, triggerOnMove: false, x: 50, y: 4 })).toBe(true);
     scheduler.flush();
     expect(onTrigger).toHaveBeenCalledTimes(2);
   });
@@ -110,7 +128,7 @@ describe("long-press window drag", () => {
       schedule: scheduler.schedule,
     });
 
-    controller.begin({ pointerId: 20, x: 50, y: 4 });
+    controller.begin({ pointerId: 20, triggerOnMove: false, x: 50, y: 4 });
     controller.cancel(21);
     expect(scheduler.pendingCount()).toBe(1);
     controller.dispose();
@@ -118,6 +136,6 @@ describe("long-press window drag", () => {
 
     expect(onTrigger).not.toHaveBeenCalled();
     expect(scheduler.pendingCount()).toBe(0);
-    expect(controller.begin({ pointerId: 20, x: 50, y: 4 })).toBe(false);
+    expect(controller.begin({ pointerId: 20, triggerOnMove: false, x: 50, y: 4 })).toBe(false);
   });
 });

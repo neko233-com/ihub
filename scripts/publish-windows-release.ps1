@@ -6,8 +6,6 @@ param(
     [string]$UpdaterPrivateKeyPath,
     [string]$UpdaterPasswordPath,
     [switch]$DraftOnly,
-    [switch]$SkipValidation,
-    [switch]$SkipBuild,
     [switch]$PlanOnly
 )
 
@@ -289,12 +287,7 @@ try {
         }
     }
 
-    if (-not $SkipValidation) {
-        Invoke-ReleaseValidation -Root $root
-    }
-    else {
-        Write-Warning 'Complete validation was explicitly skipped.'
-    }
+    Invoke-ReleaseValidation -Root $root
 
     if ([string]::IsNullOrWhiteSpace($UpdaterPrivateKeyPath)) {
         if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -313,12 +306,7 @@ try {
         $UpdaterPasswordPath = [IO.Path]::GetFullPath($UpdaterPasswordPath)
     }
 
-    if (-not $SkipBuild) {
-        Invoke-SignedWindowsBuild -KeyPath $UpdaterPrivateKeyPath -PasswordPath $UpdaterPasswordPath
-    }
-    else {
-        Write-Warning 'Tauri build was explicitly skipped; existing exact-version artifacts will be used.'
-    }
+    Invoke-SignedWindowsBuild -KeyPath $UpdaterPrivateKeyPath -PasswordPath $UpdaterPasswordPath
 
     $cacheRoot = Join-Path $root '.cache\manual-release'
     $releaseRoot = Assert-ChildPath -Path (Join-Path $cacheRoot $Tag) -Root $cacheRoot -Description 'Release staging directory'
@@ -371,7 +359,7 @@ iHub $Tag 是 Windows 10/11 x64 稳定版。
 - 支持导入和运行兼容的 uTools 插件。
 - 支持从 GitHub 仓库或本地目录导入 iHub / uTools 插件。
 - JSON 编辑器、本地搜索、取色器与插件中心已按桌面工作流整合。
-- 启动器顶部支持长按 280ms 后拖动窗口。
+- 启动器顶部支持直接按住移动；触摸与笔输入长按后拖动。
 
 安装器已由本机打包并附 Tauri updater 签名与 SHA256SUMS.txt。`.sig` 不是 Windows Authenticode 发布者签名。
 "@

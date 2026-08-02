@@ -94,9 +94,14 @@ describe("PluginCenter Apple high-saturation visual contract", () => {
     expect(handleIndex).toBeGreaterThan(markup.indexOf('class="plugin-center__topbar"'));
     expect(searchIndex).toBeGreaterThan(handleIndex);
     expect(markup).toContain(`data-drag-long-press-ms="${WINDOW_DRAG_LONG_PRESS_MS}"`);
-    expect(markup).toContain(`title="长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口"`);
+    expect(markup).toContain(`title="按住并拖动窗口；触摸或笔长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒"`);
     expect(markup).toMatch(
       /\.plugin-center__topbar \{[^}]*cursor: grab;[^}]*grid-template-columns: 220px minmax\(127px, 1fr\) auto;/s,
+    );
+    expect(markup).toContain('class="plugin-center__native-drag-strip"');
+    expect(markup).toContain('data-tauri-drag-region="true"');
+    expect(markup).toMatch(
+      /\.plugin-center__native-drag-strip \{[^}]*height: 10px;[^}]*position: absolute;/s,
     );
     expect(markup).toMatch(
       /\.plugin-center__topbar \{[^}]*grid-template-columns: 220px minmax\(127px, 1fr\) auto;[^}]*min-height: 48px;/s,

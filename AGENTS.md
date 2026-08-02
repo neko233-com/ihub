@@ -24,6 +24,7 @@
 
 - 修改时维护 `.gitignore`，不得提交构建目录、安装产物、运行状态、缓存、临时截图或本机凭据。
 - 按功能阶段提交；所有功能、测试、浏览器验证、本机安装与桌面验证全部通过后才允许最终 `git push`。
+- 不得用递增版本号、创建 tag 或发布 Release 代替完成功能与验收。版本号只能在功能、测试、本机打包安装和桌面验收全部通过后变更一次；同一候选版失败时继续修复，不得靠连续 bump 版本号重试。
 - 最低验证包含 `pnpm check`、`pnpm test`、相关 Rust fmt/check/clippy/test，以及 `scripts/verify-windows-development-scripts.ps1`。
 - 已安装 iHub 正在运行时必须提示并等待它正常退出；不能为了完成安装而强制结束进程。
 
@@ -32,5 +33,6 @@
 - 禁止使用 GitHub Actions 执行 iHub 的 CI、构建、测试、打包、签名、上传或发布；仓库不得保留会触发 Actions 的 workflow。若误触发 Actions，必须立即取消。
 - 当前稳定版只发布 Windows 10/11 x64；不得上传 macOS 产物，也不得在没有真机验收时宣称 macOS 已发布。
 - 稳定版必须在本机通过 `scripts/publish-windows-release.ps1` 一次性完成验证、Tauri updater 签名、NSIS/MSI 打包、`latest.json`、SHA-256 清单、GitHub 草稿上传、远端回读校验与正式发布。
+- 稳定版发布不得跳过验证或复用旧打包产物；发布脚本必须重新执行完整验证并重新生成 NSIS、MSI 和 updater 签名，不提供 `SkipValidation`、`SkipBuild` 或同类逃生参数。
 - 发布脚本必须只读取本机密钥文件或进程环境变量，不得打印、复制、提交或上传私钥与密码。Tauri updater `.sig` 仍不等同于 Authenticode。
 - 发布 tag 必须等于源码版本且绑定已推送的 `main` 精确提交；不得移动或覆盖已存在的 tag，不得公开未经本地与远端双重校验的草稿。

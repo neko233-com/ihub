@@ -574,6 +574,18 @@ const spotlightLauncherStyles = `
     cursor: grabbing;
   }
 
+  .ihub-spotlight__native-drag-strip {
+    cursor: grab;
+    height: 10px;
+    left: 0;
+    position: absolute;
+    right: 56px;
+    top: 0;
+    z-index: 4;
+  }
+
+  .ihub-spotlight__native-drag-strip:active { cursor: grabbing; }
+
   .ihub-spotlight__brand,
   .ihub-spotlight__search-field > svg,
   .ihub-spotlight__top-button[aria-label="关闭启动器"],
@@ -1515,12 +1527,15 @@ export function SpotlightLauncher({
     if (!onStartWindowDrag || !supportsLongPressWindowDrag(event)) {
       return;
     }
-    if (event.target instanceof Element && event.target.closest("button, a, [role='button']")) {
+    if (event.target instanceof Element && event.target.closest(
+      "button, a, [role='button'], [data-tauri-drag-region]",
+    )) {
       return;
     }
     const windowDragController = getWindowDragController();
     if (!windowDragController.begin({
       pointerId: event.pointerId,
+      triggerOnMove: event.pointerType === "mouse",
       x: event.clientX,
       y: event.clientY,
     })) {
@@ -1539,6 +1554,19 @@ export function SpotlightLauncher({
       x: event.clientX,
       y: event.clientY,
     });
+  };
+
+  const handleNativeDragStripPointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (!onStartWindowDrag || !supportsLongPressWindowDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      void Promise.resolve(onStartWindowDrag()).catch(() => undefined);
+    } catch {
+      // Keep the launcher usable if the native shell declines a drag.
+    }
   };
 
   const activate = (item: SpotlightLauncherItem) => {
@@ -1847,8 +1875,15 @@ export function SpotlightLauncher({
                 onPointerDown={handleWindowDragPointerDown}
                 onPointerMove={handleWindowDragPointerMove}
                 onPointerUp={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
-                title={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
+                title={`按住并拖动窗口；触摸或笔长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒`}
               >
+                <div
+                  aria-hidden="true"
+                  className="ihub-spotlight__native-drag-strip"
+                  data-tauri-drag-region="true"
+                  onPointerDown={handleNativeDragStripPointerDown}
+                  title="拖动窗口"
+                />
                 <span aria-hidden="true" className="ihub-spotlight__brand"><Command size={18} strokeWidth={2.35} /></span>
                 <label className="ihub-spotlight__search-field">
                   <Search aria-hidden="true" size={20} strokeWidth={2} />
