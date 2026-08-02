@@ -43,9 +43,13 @@ const UTOOLS_SYNC_ICON_ROUTE: &str = "__ihub_utools_icon_sync";
 const UTOOLS_SYNC_ICON_HEADER: &str = "x-ihub-utools-icon";
 const UTOOLS_SYNC_DIALOG_ROUTE: &str = "__ihub_utools_dialog_sync";
 const UTOOLS_SYNC_DIALOG_HEADER: &str = "x-ihub-utools-dialog";
+const UTOOLS_SYNC_CLIPBOARD_ROUTE: &str = "__ihub_utools_clipboard_sync";
+const UTOOLS_SYNC_CLIPBOARD_HEADER: &str = "x-ihub-utools-clipboard";
 const MAX_UTOOLS_SYNC_DB_REQUEST_BYTES: usize = 15 * 1024 * 1024;
 const MAX_UTOOLS_SYNC_ICON_REQUEST_BYTES: usize = 12 * 1024;
 const MAX_UTOOLS_SYNC_DIALOG_REQUEST_BYTES: usize = 32 * 1024;
+const MAX_UTOOLS_COPIED_FILE_ITEMS: usize = 32;
+const MAX_UTOOLS_CLIPBOARD_FILE_LIST_SOURCE_BYTES: usize = 256 * 1024;
 #[cfg(not(test))]
 const UTOOLS_SYNC_ICON_TIMEOUT: Duration = Duration::from_millis(650);
 // Parallel Windows Shell tests can starve the process-wide STA briefly on a
@@ -799,6 +803,31 @@ fn handle_connection(
         drop(reservation);
         return;
     }
+    if is_utools_sync_clipboard_request(bundle, &request.target) {
+        let _guard = server
+            .operation
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shutdown.load(Ordering::Acquire) || !heartbeat_is_fresh(last_heartbeat) {
+            return;
+        }
+        let active = server
+            .leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_current_surface = active.get(&bundle.lease_id).is_some_and(|lease| {
+            lease.plugin_id == bundle.plugin_id
+                && lease.purpose == PluginFrontendPurpose::Surface
+                && bundle.purpose == PluginFrontendPurpose::Surface
+        });
+        drop(active);
+        if !is_current_surface {
+            let _ = write_status(stream, "403 Forbidden");
+            return;
+        }
+        handle_utools_sync_clipboard_request(stream, bundle, request);
+        return;
+    }
     if is_utools_sync_screen_request(bundle, &request.target) {
         let _guard = server
             .operation
@@ -897,6 +926,113 @@ fn is_utools_sync_icon_request(bundle: &ServedBundle, target: &str) -> bool {
 fn is_utools_sync_dialog_request(bundle: &ServedBundle, target: &str) -> bool {
     bundle.utools_compat_script.is_some()
         && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_DIALOG_ROUTE)
+}
+
+fn is_utools_sync_clipboard_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_compat_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_SYNC_CLIPBOARD_ROUTE)
+}
+
+fn handle_utools_sync_clipboard_request(
+    stream: &mut TcpStream,
+    bundle: &ServedBundle,
+    request: HttpRequest,
+) {
+    let result = execute_utools_sync_clipboard_request(request, || {
+        match crate::clipboard_access::try_with_bounded_file_clipboard(
+            MAX_UTOOLS_CLIPBOARD_FILE_LIST_SOURCE_BYTES,
+            |clipboard| clipboard.get().file_list(),
+        ) {
+            Some(Ok(paths)) => Ok(paths),
+            Some(Err(arboard::Error::ContentNotAvailable)) | None => Ok(Vec::new()),
+            Some(Err(error)) => Err(format!(
+                "Could not read the bounded clipboard file list: {error}"
+            )),
+        }
+    });
+    let (status, payload) = match result {
+        Ok(value) => ("200 OK", value),
+        Err(error) => ("400 Bad Request", json!({ "error": error })),
+    };
+    let encoded = serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"error":"Could not encode clipboard response."}"#.to_vec());
+    let _ = write_json_response(stream, status, &encoded, bundle.allows_remote_network);
+}
+
+fn execute_utools_sync_clipboard_request(
+    request: HttpRequest,
+    read_files: impl FnOnce() -> Result<Vec<PathBuf>, String>,
+) -> Result<Value, String> {
+    if !matches!(request.method, HttpMethod::Get) {
+        return Err("The synchronous uTools clipboard endpoint accepts only GET.".to_owned());
+    }
+    if request
+        .headers
+        .get(UTOOLS_SYNC_CLIPBOARD_HEADER)
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Err("The synchronous uTools clipboard request header is missing.".to_owned());
+    }
+    if !request.buffered_body.is_empty()
+        || request.headers.contains_key("content-length")
+        || request.headers.contains_key("transfer-encoding")
+    {
+        return Err("The synchronous uTools clipboard request accepts no body.".to_owned());
+    }
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value != "same-origin")
+    {
+        return Err("The synchronous uTools clipboard request is not same-origin.".to_owned());
+    }
+    let host = request.headers.get("host").ok_or_else(|| {
+        "The synchronous uTools clipboard request has no loopback host.".to_owned()
+    })?;
+    let valid_host = host
+        .strip_prefix("127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0);
+    if !valid_host {
+        return Err("The synchronous uTools clipboard request host is invalid.".to_owned());
+    }
+    if request
+        .headers
+        .get("origin")
+        .is_some_and(|origin| origin != &format!("http://{host}"))
+    {
+        return Err("The synchronous uTools clipboard request origin is invalid.".to_owned());
+    }
+
+    Ok(project_utools_copied_files(read_files()?))
+}
+
+fn project_utools_copied_files(paths: impl IntoIterator<Item = PathBuf>) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let files = paths
+        .into_iter()
+        .take(MAX_UTOOLS_COPIED_FILE_ITEMS)
+        .filter_map(|path| {
+            let prepared = crate::system_open::prepare_local_open(&path, None).ok()?;
+            let path = prepared.path().to_owned();
+            if !seen.insert(path.clone()) {
+                return None;
+            }
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.trim().is_empty())?;
+            let is_file = prepared.kind() == crate::system_open::LocalOpenKind::File;
+            Some(json!({
+                "path": crate::indexer::renderer_display_path(&path),
+                "isDiractory": !is_file,
+                "isFile": is_file,
+                "name": name,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Value::Array(files)
 }
 
 fn handle_utools_sync_dialog_request(
@@ -1733,6 +1869,7 @@ const syncDbRoute = "__ihub_utools_db_sync";
 const syncScreenRoute = "__ihub_utools_screen_sync";
 const syncIconRoute = "__ihub_utools_icon_sync";
 const syncDialogRoute = "__ihub_utools_dialog_sync";
+const syncClipboardRoute = "__ihub_utools_clipboard_sync";
 const mainPushProviderId = "utools-main-push";
 let sequence = 0;
 const pending = new Map();
@@ -1833,6 +1970,18 @@ function syncFileIcon(path) {{
   catch {{ throw new Error("iHub returned an invalid synchronous icon response."); }}
   if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous icon request failed.");
   return typeof result === "string" ? result : "";
+}}
+function syncCopiedFiles() {{
+  const request = new XMLHttpRequest();
+  request.open("GET", syncClipboardRoute, false);
+  request.setRequestHeader("X-IHub-Utools-Clipboard", "1");
+  request.send();
+  let result;
+  try {{ result = JSON.parse(request.responseText); }}
+  catch {{ throw new Error("iHub returned an invalid synchronous clipboard response."); }}
+  if (request.status !== 200) throw new Error(result && typeof result.error === "string" ? result.error : "iHub synchronous clipboard request failed.");
+  if (!Array.isArray(result) || result.length > 32 || result.some((item) => !item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).some((key) => !["path", "isDiractory", "isFile", "name"].includes(key)) || typeof item.path !== "string" || typeof item.name !== "string" || typeof item.isDiractory !== "boolean" || typeof item.isFile !== "boolean" || item.isDiractory === item.isFile)) throw new Error("iHub returned an invalid copied-file list.");
+  return result.map((item) => Object.freeze({{ ...item }}));
 }}
 function normalizedDialogOptions(kind, value) {{
   if (value === undefined) return {{}};
@@ -2580,6 +2729,10 @@ const utools = Object.freeze({{
       .catch((error) => console.error("iHub compatibility file copy failed", error));
     return true;
   }},
+  getCopyedFiles() {{
+    try {{ return syncCopiedFiles(); }}
+    catch (error) {{ console.error("iHub compatibility clipboard file read failed", error); return []; }}
+  }},
   showNotification(body, clickFeatureCode) {{
     if (typeof body !== "string") return;
     const trimmedBody = body.trim();
@@ -2855,7 +3008,8 @@ mod tests {
     };
 
     use super::{
-        inject_utools_compat_script, render_utools_compat_script, resolve_asset_path,
+        execute_utools_sync_clipboard_request, inject_utools_compat_script,
+        render_utools_compat_script, resolve_asset_path, HttpMethod, HttpRequest,
         PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose, ServedBundle,
         LOCKED_PLUGIN_CSP, NETWORKED_PLUGIN_CSP,
     };
@@ -2981,6 +3135,54 @@ mod tests {
             .expect("response status")
             .to_owned();
         let payload = serde_json::from_slice(&response[header_end..]).expect("response JSON");
+        (status, payload)
+    }
+
+    fn send_sync_clipboard_request(
+        lease: &super::PluginFrontendLease,
+        method: &str,
+        include_capability_header: bool,
+    ) -> (String, serde_json::Value) {
+        let url = url::Url::parse(&lease.url).expect("lease URL should parse");
+        let host = url.host_str().expect("lease host");
+        let port = url.port().expect("lease port");
+        let target = format!("{}{}", url.path(), super::UTOOLS_SYNC_CLIPBOARD_ROUTE);
+        let capability_header = if include_capability_header {
+            "X-IHub-Utools-Clipboard: 1\r\n"
+        } else {
+            ""
+        };
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\nOrigin: http://{host}:{port}\r\nSec-Fetch-Site: same-origin\r\n{capability_header}Connection: close\r\n\r\n"
+        );
+        let mut stream =
+            TcpStream::connect((host, port)).expect("clipboard endpoint should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("clipboard response timeout");
+        stream
+            .write_all(request.as_bytes())
+            .expect("clipboard request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("complete clipboard response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("complete response header");
+        let status = std::str::from_utf8(&response[..header_end])
+            .expect("UTF-8 response header")
+            .lines()
+            .next()
+            .expect("response status")
+            .to_owned();
+        let payload = if response.len() == header_end {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&response[header_end..]).expect("clipboard response JSON")
+        };
         (status, payload)
     }
 
@@ -3111,6 +3313,10 @@ mod tests {
         assert!(script.contains("compatibility.utools.clipboard.writeImage"));
         assert!(script.contains("copyFile"));
         assert!(script.contains("compatibility.utools.clipboard.writeFiles"));
+        assert!(script.contains("getCopyedFiles"));
+        assert!(script.contains("function syncCopiedFiles"));
+        assert!(script.contains("X-IHub-Utools-Clipboard"));
+        assert!(script.contains("isDiractory"));
         assert!(script.contains("showNotification"));
         assert!(script.contains("Array.from(trimmedBody).length > 1000"));
         assert!(script.contains("clickFeatureCode: clickFeatureCode.trim()"));
@@ -3651,6 +3857,101 @@ mod tests {
 
         assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn synchronous_utools_clipboard_projection_is_bounded_and_shape_exact() {
+        let root = std::env::temp_dir().join(format!(
+            "ihub-utools-copied-files-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let folder = root.join("folder");
+        let file = root.join("note.txt");
+        fs::create_dir_all(&folder).expect("clipboard fixture folder");
+        fs::write(&file, "iHub").expect("clipboard fixture file");
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            super::UTOOLS_SYNC_CLIPBOARD_HEADER.to_owned(),
+            "1".to_owned(),
+        );
+        headers.insert("host".to_owned(), "127.0.0.1:43123".to_owned());
+        headers.insert("origin".to_owned(), "http://127.0.0.1:43123".to_owned());
+        headers.insert("sec-fetch-site".to_owned(), "same-origin".to_owned());
+        let request = HttpRequest {
+            method: HttpMethod::Get,
+            target: String::new(),
+            headers,
+            buffered_body: Vec::new(),
+        };
+        let projection = execute_utools_sync_clipboard_request(request, || {
+            Ok(vec![
+                file.clone(),
+                folder.clone(),
+                file.clone(),
+                root.join("missing.txt"),
+            ])
+        })
+        .expect("bounded local clipboard paths should project");
+        let entries = projection.as_array().expect("copied files array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "note.txt");
+        assert_eq!(entries[0]["isFile"], true);
+        assert_eq!(entries[0]["isDiractory"], false);
+        assert_eq!(entries[1]["name"], "folder");
+        assert_eq!(entries[1]["isFile"], false);
+        assert_eq!(entries[1]["isDiractory"], true);
+        assert_eq!(entries[0].as_object().map(|entry| entry.len()), Some(4));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn synchronous_utools_clipboard_endpoint_requires_visible_surface_and_header() {
+        let server = PluginAssetServer::new();
+
+        let surface_id = "utools-sync-clipboard-surface";
+        let (surface_root, mut surface_bundle) = temporary_bundle(surface_id, false);
+        surface_bundle.utools_compat = Some(utools_runtime_config(surface_id));
+        let surface_documents = UtoolsDocumentStore::new(surface_root.join("app-data"));
+        let surface = server
+            .issue_with_utools_documents(
+                surface_bundle,
+                PluginFrontendPurpose::Surface,
+                Some(surface_documents),
+            )
+            .expect("uTools clipboard surface lease should issue");
+        let (status, rejection) = send_sync_clipboard_request(&surface, "GET", false);
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        assert!(rejection["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("header is missing")));
+
+        let runtime_id = "utools-sync-clipboard-runtime";
+        let (runtime_root, mut runtime_bundle) = temporary_bundle(runtime_id, false);
+        runtime_bundle.utools_compat = Some(utools_runtime_config(runtime_id));
+        let runtime_documents = UtoolsDocumentStore::new(runtime_root.join("app-data"));
+        let runtime = server
+            .issue_with_utools_documents(
+                runtime_bundle,
+                PluginFrontendPurpose::Runtime,
+                Some(runtime_documents),
+            )
+            .expect("uTools clipboard runtime lease should issue");
+        let (status, payload) = send_sync_clipboard_request(&runtime, "GET", true);
+        assert_eq!(status, "HTTP/1.1 403 Forbidden");
+        assert!(payload.is_null());
+
+        assert_eq!(
+            server.release(&surface.lease_id).as_deref(),
+            Some(surface_id)
+        );
+        assert_eq!(
+            server.release(&runtime.lease_id).as_deref(),
+            Some(runtime_id)
+        );
+        let _ = fs::remove_dir_all(surface_root);
+        let _ = fs::remove_dir_all(runtime_root);
     }
 
     #[test]

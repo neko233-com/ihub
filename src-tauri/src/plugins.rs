@@ -4861,6 +4861,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.mainPush.oneShotInput".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.getCopyedFiles.visibleBounded".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5311,14 +5314,14 @@ mod tests {
         automatic_update_skip_reason, command_execution, command_timeout,
         configure_git_command_environment, ensure_update_security_declaration_matches,
         is_trusted_official_auto_update_source, load_manifest_artwork,
-        normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response, read_manifest,
-        read_source_metadata, resolve_official_workspace_plugin_at, snapshot_integrity,
-        validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
-        ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
-        PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
-        MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS, MAX_PERMISSION_VALUE_CHARS,
-        MAX_PROJECTED_ARTWORK_DATA_URL_BYTES, OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
-        UTOOLS_MAIN_PUSH_PROVIDER_ID,
+        normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response,
+        plugin_security_declaration, read_manifest, read_source_metadata,
+        resolve_official_workspace_plugin_at, snapshot_integrity, validate_manifest,
+        verify_snapshot_integrity, wait_for_child_with_timeout, ChildWaitOutcome, CommandExecution,
+        GitSource, GitTransportPolicy, PluginManager, PluginManifest, LEGACY_SOURCE_RECORD,
+        LIFECYCLE_RECORD, LOCAL_LINKS_RECORD, MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS,
+        MAX_PERMISSION_VALUE_CHARS, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
+        OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK, UTOOLS_MAIN_PUSH_PROVIDER_ID,
     };
 
     fn temporary_directory(label: &str) -> PathBuf {
@@ -5400,6 +5403,9 @@ mod tests {
         assert!(manifest.utools_commands[0].main_push);
         assert_eq!(manifest.utools_commands[0].keywords, vec!["取色"]);
         assert_eq!(manifest.commands[0].keywords, vec!["取色"]);
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.getCopyedFiles.visibleBounded"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);

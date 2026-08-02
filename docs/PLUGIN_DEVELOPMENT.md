@@ -213,6 +213,8 @@ Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDispl
 
 `utools.db` 及其 `promises` 成员均提供 `get(id)`、`put(doc)`、`remove(idOrDoc)`、`bulkDocs(docs)`、`allDocs(prefixOrIds)`、`postAttachment(id, bytes, mime)`、`getAttachment(id)` 与 `getAttachmentType(id)`。同步版通过当前插件随机 loopback origin 内的固定协议直接取得真实宿主结果；只接受随机租约路径、自定义同源请求头、固定 JSON 形状和 15 MiB 请求上限，不使用“页面缓存后异步落盘”模拟同步成功。文档按已验证的插件 ID 分库持久化，写入使用 `_rev` 乐观并发控制和原子文件替换；单文档（包含宿主写入的 `_id/_rev`）最多 1 MiB，每库最多 2,048 个文档、32 MiB，单次 bulk 最多 16 个文档且输入最多 8 MiB。`allDocs()` 按 `_id` 排序，无参数返回全部，字符串选择器匹配前缀，字符串数组按请求顺序去重取回。附件接受 1 byte–10 MiB 的 `Uint8Array`，只允许在新 ID 上创建，使用独立原子文件和 SHA-256 元数据校验，随对应文档删除；插件卸载时会清除该插件的数据库与附件。iHub 不提供 uTools 云同步，因此同步及 Promise 版 `replicateStateFromCloud()` 均如实返回 `null`。
 
+`utools.getCopyedFiles()` 保留官方同步返回形状（包括兼容字段名 `isDiractory`）。它只对当前有效的可见插件 surface 开放；隐藏搜索 runtime 会收到拒绝。Windows 在读取前验证原生 `CF_HDROP` 源不超过 256 KiB，并在读取前后校验剪贴板序列号，随后只返回最多 32 个仍可解析、非重解析点的本地文件或文件夹；不读取文件内容，也不把路径写入历史或日志。剪贴板没有文件、正忙、在校验期间变化或无法证明边界时返回空数组。
+
 这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、键鼠模拟或其他应用窗口枚举；上述有界显示器元数据也不包含窗口、句柄或像素。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。

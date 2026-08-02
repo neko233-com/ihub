@@ -127,6 +127,45 @@ pub fn try_with_bounded_background_clipboard<T>(
     Some(result)
 }
 
+/// Reads a native clipboard file list only after proving its source payload
+/// is bounded. Unlike the background sampler this ignores unrelated text and
+/// image formats, so an explicit visible-surface file query is not rejected
+/// merely because Explorer also advertised auxiliary clipboard data.
+///
+/// `None` means the shared clipboard gate was busy, the Windows preflight
+/// could not prove a stable bounded source, or the clipboard changed during
+/// the handoff to arboard. Callers should treat that as no available list.
+pub fn try_with_bounded_file_clipboard<T>(
+    max_file_list_source_bytes: usize,
+    operation: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Option<Result<T, arboard::Error>> {
+    let gate = CLIPBOARD_GATE.get_or_init(|| Mutex::new(()));
+    let _guard = match gate.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return None,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+
+    #[cfg(target_os = "windows")]
+    let sequence = windows_file_clipboard_preflight(max_file_list_source_bytes)?;
+    #[cfg(not(target_os = "windows"))]
+    let _ = max_file_list_source_bytes;
+
+    #[cfg(target_os = "windows")]
+    if windows_clipboard_sequence() != Some(sequence) {
+        return None;
+    }
+
+    let result = arboard::Clipboard::new().and_then(|mut clipboard| operation(&mut clipboard));
+
+    #[cfg(target_os = "windows")]
+    if windows_clipboard_sequence() != Some(sequence) {
+        return None;
+    }
+
+    Some(result)
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn image_dimensions_within_limits(
     width: u32,
@@ -211,6 +250,18 @@ fn windows_background_clipboard_preflight(limits: BackgroundClipboardReadLimits)
 
     // `OpenClipboard` prevents the source from changing during inspection;
     // this final check detects a change that happened before the lock opened.
+    (windows_clipboard_sequence() == Some(sequence)).then_some(sequence)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_file_clipboard_preflight(max_file_list_source_bytes: usize) -> Option<u32> {
+    let sequence = windows_clipboard_sequence()?;
+    let _clipboard = WindowsClipboardGuard::open()?;
+    if !windows_format_is_present(CF_HDROP)?
+        || !windows_format_is_within_limit(CF_HDROP, max_file_list_source_bytes, |_| true)
+    {
+        return None;
+    }
     (windows_clipboard_sequence() == Some(sequence)).then_some(sequence)
 }
 
