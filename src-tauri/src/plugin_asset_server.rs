@@ -2320,6 +2320,14 @@ function normalizedUtoolsFilePaths(value) {{
   }}
   return normalized;
 }}
+function validUtoolsPaymentOptions(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (Object.keys(value).some((key) => !["goodsId", "outOrderId", "attach"].includes(key))) return false;
+  if (typeof value.goodsId !== "string" || value.goodsId.length === 0 || Array.from(value.goodsId).length > 160 || /[\u0000-\u001f\u007f]/.test(value.goodsId)) return false;
+  if (value.outOrderId !== undefined && (typeof value.outOrderId !== "string" || Array.from(value.outOrderId).length < 6 || Array.from(value.outOrderId).length > 64 || /[\u0000-\u001f\u007f]/.test(value.outOrderId))) return false;
+  if (value.attach !== undefined && (typeof value.attach !== "string" || Array.from(value.attach).length > 256 || value.attach.includes("\u0000"))) return false;
+  return true;
+}}
 const dbStorage = Object.freeze({{
   setItem(rawKey, value) {{
     const key = dbStorageKey(rawKey);
@@ -2998,7 +3006,22 @@ const utools = Object.freeze({{
   getAppName() {{ return "iHub"; }},
   getAppVersion() {{ return config.appVersion; }},
   getUser() {{ return null; }},
-  isDev() {{ return false; }},
+  fetchUserServerTemporaryToken() {{
+    return Promise.reject(new Error("iHub has no uTools account session and cannot issue a uTools user token."));
+  }},
+  isPurchasedUser() {{ return false; }},
+  openPurchase(options, callback) {{
+    if (!validUtoolsPaymentOptions(options) || (callback !== undefined && typeof callback !== "function")) return;
+    console.error("iHub cannot open uTools purchases because no uTools billing session is available.");
+  }},
+  openPayment(options, callback) {{
+    if (!validUtoolsPaymentOptions(options) || (callback !== undefined && typeof callback !== "function")) return;
+    console.error("iHub cannot open uTools payments because no uTools billing session is available.");
+  }},
+  fetchUserPayments() {{
+    return Promise.reject(new Error("iHub has no uTools account session and cannot read uTools payment records."));
+  }},
+  isDev() {{ return config.isDevelopment === true; }},
   isDarkColors() {{ return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches; }},
   isWindows() {{ return /\\bwindows?\\b|\\bwin(?:32|64)\\b/.test((navigator.platform + " " + navigator.userAgent).toLowerCase()); }},
   isMacOS() {{ const platform = (navigator.platform + " " + navigator.userAgent).toLowerCase(); return platform.includes("mac") || platform.includes("darwin"); }},
@@ -3157,6 +3180,7 @@ mod tests {
     fn utools_runtime_config(plugin_id: &str) -> UtoolsCompatRuntimeConfig {
         UtoolsCompatRuntimeConfig {
             app_version: "0.1.0".to_owned(),
+            is_development: false,
             plugin_id: plugin_id.to_owned(),
             commands: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
@@ -3396,6 +3420,7 @@ mod tests {
     fn utools_bootstrap_is_host_owned_and_precedes_page_scripts() {
         let config = UtoolsCompatRuntimeConfig {
             app_version: "0.1.0".to_owned(),
+            is_development: true,
             plugin_id: "utools-color-picker".to_owned(),
             commands: vec![UtoolsCompatCommand {
                 command_id: "utools-feature-1".to_owned(),
@@ -3487,6 +3512,13 @@ mod tests {
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
         assert!(script.contains("startDrag(value)"));
         assert!(script.contains("compatibility.utools.window.startDrag"));
+        assert!(script.contains("fetchUserServerTemporaryToken"));
+        assert!(script.contains("isPurchasedUser"));
+        assert!(script.contains("openPurchase(options, callback)"));
+        assert!(script.contains("openPayment(options, callback)"));
+        assert!(script.contains("fetchUserPayments"));
+        assert!(script.contains("config.isDevelopment === true"));
+        assert!(script.contains("\"isDevelopment\":true"));
         assert!(script.contains("dbCryptoStorage"));
         assert!(script.contains("compatibility.utools.dbCryptoStorage.snapshot"));
         assert!(script.contains("compatibility.utools.dbCryptoStorage.set"));

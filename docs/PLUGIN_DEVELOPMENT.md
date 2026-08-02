@@ -301,6 +301,10 @@ if (preview.canApply && preview.previewId) {
 
 `startDrag(path | paths)` 保留官方的 `void` 签名，并在 Windows 上进入 Shell/OLE 原生文件拖放循环。它只接受当前可见 uTools surface 在本轮 `showOpenDialog` 中明确选中的文件或文件夹，最多 16 项；宿主把返回路径与插件 ID、随机 lease ID、对象类型和文件系统身份绑定，拖动前重新打开并核对同一对象，未授权路径不会触发文件系统探测。文件被替换、surface 重载/关闭、插件停用/更新/卸载都会撤销授权；拖放进行时保留对象句柄和 native-operation reservation，因此路径不能在 Shell 接管前被同名对象替换，也不能与插件源变更并发。macOS 尚未完成真机拖放验收时会明确拒绝，不伪造成功。
 
+### uTools 账号与付费边界
+
+`getUser()` 在 iHub 没有 uTools 登录会话时返回官方定义的 `null`，`isPurchasedUser()` 返回 `false`；临时 token 和支付记录 Promise 会明确拒绝，购买/支付入口不会回调成功。iHub 不生成虚假 uTools 身份、令牌、订单或授权状态。本地开发链接中的 uTools 插件由 `isDev()` 返回 `true`，受管安装快照返回 `false`。
+
 ### 用户选择文件与原生 worker
 
 图片、OCR 等插件不应要求用户把本地绝对路径粘贴进网页。声明 `filesystem.read: ["user-selected"]` 与 `nativeApi: true` 后，前端可以在用户点击时选择文件，再将短期 `grantId` 交给自身已声明的 worker：

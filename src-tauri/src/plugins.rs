@@ -262,6 +262,7 @@ pub(crate) struct PluginFrontendAssetBundle {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UtoolsCompatRuntimeConfig {
     pub(crate) app_version: String,
+    pub(crate) is_development: bool,
     pub(crate) plugin_id: String,
     pub(crate) commands: Vec<UtoolsCompatCommand>,
     pub(crate) native_id: String,
@@ -1833,7 +1834,15 @@ impl PluginManager {
         }
 
         self.ensure_plugin_enabled(plugin_id)?;
+        let active_development_root = self
+            .read_local_links()?
+            .links
+            .get(plugin_id)
+            .and_then(|link| self.resolve_local_link_root(plugin_id, link).ok());
         let plugin_root = self.resolve_plugin_root(plugin_id)?;
+        let is_development = active_development_root
+            .as_ref()
+            .is_some_and(|root| root == &plugin_root);
         let manifest_path = canonical_manifest_path(&plugin_root)?;
 
         let manifest = read_manifest(&manifest_path)?;
@@ -1901,6 +1910,7 @@ impl PluginManager {
                 .is_utools()
                 .then(|| UtoolsCompatRuntimeConfig {
                     app_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    is_development,
                     plugin_id: plugin_id.to_owned(),
                     commands: manifest.utools_commands,
                     native_id: String::new(),
@@ -8247,6 +8257,49 @@ mod tests {
                 .frontend_path("ihub-plugin-local-demo")
                 .expect("frontend path"),
             canonical_source.join("dist/index.html")
+        );
+
+        let _ = fs::remove_dir_all(storage);
+        let _ = fs::remove_dir_all(source);
+    }
+
+    #[test]
+    fn linked_utools_bundle_reports_the_development_runtime() {
+        let storage = temporary_directory("utools-development-storage");
+        let source = temporary_directory("utools-development-source");
+        fs::create_dir_all(source.join("dist")).expect("uTools dist should be created");
+        fs::write(
+            source.join("dist/index.html"),
+            "<main>uTools development</main>",
+        )
+        .expect("uTools frontend should be written");
+        write_test_png(&source.join("logo.png"), [10, 132, 255, 255]);
+        fs::write(source.join("preload.js"), "window.localDemo = true;")
+            .expect("uTools preload fixture should be written");
+        fs::write(
+            source.join("plugin.json"),
+            r#"{
+  "name": "Local uTools development demo",
+  "version": "0.1.0",
+  "logo": "logo.png",
+  "preload": "preload.js",
+  "main": "dist/index.html",
+  "features": [{ "code": "local-demo", "explain": "Local demo", "cmds": ["Local demo"] }]
+}"#,
+        )
+        .expect("uTools development manifest should be written");
+        let manager = manager_at(storage.clone());
+        let linked = manager
+            .link_from_local(&source.to_string_lossy())
+            .expect("uTools development package should link");
+        let bundle = manager
+            .frontend_asset_bundle(&linked.id)
+            .expect("linked uTools frontend bundle");
+        assert!(
+            bundle
+                .utools_compat
+                .expect("uTools runtime configuration")
+                .is_development
         );
 
         let _ = fs::remove_dir_all(storage);
