@@ -25,9 +25,15 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use crate::{
+    ai_providers::{
+        execute_chat_round, initial_wire_messages, tool_result_wire_message, validate_ai_option,
+        AiProviderProfileView, AiProviderStore, AiProviderTestResult, AiToolCall,
+        SaveAiProviderProfileInput, UtoolsAiMessage, UtoolsAiModelView, UtoolsAiOption,
+    },
     background_process::background_command,
     clipboard_history::{
         ClipboardHistory, ClipboardHistoryRestoreResult, ClipboardHistorySnapshot,
@@ -577,6 +583,7 @@ pub struct AppState {
     plugin_assets: PluginAssetServer,
     plugin_crypto_storage: PluginCryptoStorage,
     plugin_settings: PluginSettingsStore,
+    ai_providers: AiProviderStore,
     utools_documents: crate::utools_db::UtoolsDocumentStore,
     host: Arc<PluginHostState>,
     launcher_focus: LauncherFocusGate,
@@ -616,6 +623,8 @@ impl AppState {
         let plugins = PluginManager::new();
         let plugin_crypto_storage = PluginCryptoStorage::new(app_data_dir.clone());
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
+        let ai_providers =
+            AiProviderStore::new(plugin_settings.clone(), plugin_crypto_storage.clone());
         let utools_documents = crate::utools_db::UtoolsDocumentStore::new(app_data_dir.clone());
         let super_panel = Arc::new(SuperPanelState::with_storage(app_data_dir.clone()));
         // Older development builds persisted every setting. Before plugin
@@ -641,6 +650,7 @@ impl AppState {
             plugin_assets: PluginAssetServer::new(),
             plugin_crypto_storage,
             plugin_settings,
+            ai_providers,
             utools_documents,
             host: Arc::new(PluginHostState::default()),
             launcher_focus: LauncherFocusGate::default(),
@@ -795,6 +805,11 @@ struct PluginHostState {
     /// must match plugin, tool, request, and lease before they can resolve the
     /// trusted caller's wait.
     pending_utools_tool_calls: Mutex<HashMap<String, PendingUtoolsToolCall>>,
+    /// Every plugin AI request is bound to its exact iframe lease and owns an
+    /// abort handle. Closing or replacing a runtime therefore cancels both
+    /// remote I/O and any outstanding Function Calling rendezvous.
+    utools_ai_requests: Mutex<HashMap<String, ActiveUtoolsAiRequest>>,
+    pending_utools_ai_function_calls: Mutex<HashMap<String, PendingUtoolsAiFunctionCall>>,
     /// A frontend can access only a directory selected through the native
     /// picker during its own session. The opaque id is scoped to the plugin
     /// and expires quickly; it is never a reusable filesystem path grant.
@@ -855,6 +870,8 @@ impl Default for PluginHostState {
             pending_utools_main_push_selections: Mutex::new(HashMap::new()),
             utools_tools: RwLock::new(HashMap::new()),
             pending_utools_tool_calls: Mutex::new(HashMap::new()),
+            utools_ai_requests: Mutex::new(HashMap::new()),
+            pending_utools_ai_function_calls: Mutex::new(HashMap::new()),
             filesystem_grants: Mutex::new(HashMap::new()),
             file_grants: Mutex::new(HashMap::new()),
             launcher_contexts: Mutex::new(HashMap::new()),
@@ -1396,6 +1413,31 @@ struct PendingUtoolsToolCall {
     response: SyncSender<Result<Value, String>>,
 }
 
+struct ActiveUtoolsAiRequest {
+    plugin_id: String,
+    lease_id: String,
+    cancelled: Arc<AtomicBool>,
+    abort_handle: Option<AbortHandle>,
+}
+
+struct UtoolsAiStartContext {
+    app: AppHandle,
+    host: Arc<PluginHostState>,
+    plugin_assets: PluginAssetServer,
+    providers: AiProviderStore,
+    plugin_id: String,
+    lease_id: String,
+    window_label: String,
+}
+
+struct PendingUtoolsAiFunctionCall {
+    request_id: String,
+    plugin_id: String,
+    lease_id: String,
+    name: String,
+    response: SyncSender<Result<Value, String>>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UtoolsToolCatalogEntry {
@@ -1446,6 +1488,11 @@ const MAX_UTOOLS_TOOL_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_UTOOLS_TOOL_VALUE_NODES: usize = 16_384;
 const MAX_UTOOLS_TOOL_VALUE_DEPTH: usize = 32;
 const UTOOLS_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MAX_ACTIVE_UTOOLS_AI_REQUESTS: usize = 8;
+const MAX_ACTIVE_UTOOLS_AI_REQUESTS_PER_PLUGIN: usize = 2;
+const MAX_UTOOLS_AI_ROUNDS: usize = 8;
+const MAX_UTOOLS_AI_FUNCTION_CALLS: usize = 16;
+const UTOOLS_AI_FUNCTION_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const FILESYSTEM_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const BATCH_RENAME_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_FILESYSTEM_GRANTS: usize = 48;
@@ -3216,6 +3263,42 @@ pub fn restore_hosts_backup(
     crate::hosts_manager::restore_hosts_backup(&state.hosts_manager, expected_fingerprint)
 }
 
+#[tauri::command]
+pub fn list_ai_provider_profiles(
+    state: State<'_, AppState>,
+) -> Result<Vec<AiProviderProfileView>, String> {
+    state.ai_providers.list_profiles()
+}
+
+#[tauri::command]
+pub fn save_ai_provider_profile(
+    input: SaveAiProviderProfileInput,
+    state: State<'_, AppState>,
+) -> Result<AiProviderProfileView, String> {
+    state.ai_providers.save_profile(input)
+}
+
+#[tauri::command]
+pub fn delete_ai_provider_profile(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state.ai_providers.delete_profile(&profile_id)
+}
+
+#[tauri::command]
+pub fn list_ai_models(state: State<'_, AppState>) -> Result<Vec<UtoolsAiModelView>, String> {
+    state.ai_providers.list_models()
+}
+
+#[tauri::command]
+pub async fn test_ai_provider_profile(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<AiProviderTestResult, String> {
+    state.ai_providers.test_profile(&profile_id).await
+}
+
 /// Returns display-only profile metadata. Reading this list never touches the
 /// OS credential vault, so merely opening Cloud Drive cannot trigger a
 /// Keychain/Credential Manager prompt.
@@ -4613,6 +4696,7 @@ pub async fn plugin_host_call(
             || request.method.starts_with("search.")
             || request.method.starts_with("compatibility.utools.features.")
             || request.method.starts_with("compatibility.utools.tools.")
+            || request.method.starts_with("compatibility.utools.ai.")
             || matches!(
                 request.method.as_str(),
                 "lifecycle.ready" | "lifecycle.dispose"
@@ -5061,6 +5145,49 @@ pub async fn plugin_host_call(
         });
     }
 
+    if request.method.starts_with("compatibility.utools.ai.") {
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_for(&request.lease_id, &request_plugin_id) {
+                return Err(
+                    "This uTools AI runtime session has expired. Reopen the plugin to continue."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            match request.method.as_str() {
+                "compatibility.utools.ai.models" => {
+                    serde_json::to_value(state.ai_providers.list_models()?)
+                        .map_err(|error| format!("Could not encode AI model catalog: {error}"))
+                }
+                "compatibility.utools.ai.start" => start_utools_ai_request(
+                    UtoolsAiStartContext {
+                        app: app.clone(),
+                        host: state.host.clone(),
+                        plugin_assets: state.plugin_assets.clone(),
+                        providers: state.ai_providers.clone(),
+                        plugin_id: request_plugin_id.clone(),
+                        lease_id: request.lease_id.clone(),
+                        window_label: window.label().to_owned(),
+                    },
+                    &request.params,
+                ),
+                "compatibility.utools.ai.abort" => abort_utools_ai_request(
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                ),
+                "compatibility.utools.ai.toolComplete" => complete_utools_ai_function_call(
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                ),
+                _ => Err("Unsupported uTools AI runtime method.".to_owned()),
+            }
+        });
+    }
+
     plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
         if !server.is_active_for(&request.lease_id, &request_plugin_id) {
             return Err(
@@ -5466,6 +5593,419 @@ pub fn cancel_utools_tool(
         );
     }
     Ok(true)
+}
+
+fn start_utools_ai_request(context: UtoolsAiStartContext, params: &Value) -> Result<Value, String> {
+    let UtoolsAiStartContext {
+        app,
+        host,
+        plugin_assets,
+        providers,
+        plugin_id,
+        lease_id,
+        window_label,
+    } = context;
+    validate_exact_plugin_params(params, &["requestId", "option", "stream"])?;
+    let request_id = required_string(params, "requestId")?;
+    let parsed_id = Uuid::parse_str(request_id)
+        .map_err(|_| "utools.ai requestId must be a UUID.".to_owned())?;
+    if parsed_id.get_version() != Some(uuid::Version::Random) {
+        return Err("utools.ai requestId must be a version 4 UUID.".to_owned());
+    }
+    let stream = params
+        .get("stream")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "utools.ai start requires a boolean stream value.".to_owned())?;
+    let option = params
+        .get("option")
+        .cloned()
+        .ok_or_else(|| "utools.ai start requires options.".to_owned())?;
+    let option = serde_json::from_value::<UtoolsAiOption>(option)
+        .map_err(|error| format!("Invalid utools.ai options: {error}"))?;
+    let option = validate_ai_option(option)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut active = host
+            .utools_ai_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(request_id) {
+            return Err("This uTools AI requestId is already active.".to_owned());
+        }
+        if active.len() >= MAX_ACTIVE_UTOOLS_AI_REQUESTS {
+            return Err(format!(
+                "iHub already has {MAX_ACTIVE_UTOOLS_AI_REQUESTS} uTools AI requests in progress."
+            ));
+        }
+        let per_plugin = active
+            .values()
+            .filter(|request| request.plugin_id == plugin_id)
+            .count();
+        if per_plugin >= MAX_ACTIVE_UTOOLS_AI_REQUESTS_PER_PLUGIN {
+            return Err(format!(
+                "Plugin '{plugin_id}' already has {MAX_ACTIVE_UTOOLS_AI_REQUESTS_PER_PLUGIN} AI requests in progress."
+            ));
+        }
+        active.insert(
+            request_id.to_owned(),
+            ActiveUtoolsAiRequest {
+                plugin_id: plugin_id.clone(),
+                lease_id: lease_id.clone(),
+                cancelled: cancelled.clone(),
+                abort_handle: None,
+            },
+        );
+    }
+
+    let task_host = host.clone();
+    let task_plugin_id = plugin_id;
+    let task_lease_id = lease_id;
+    let task_window_label = window_label;
+    let task_request_id = request_id.to_owned();
+    let task_cancelled = cancelled.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        let outcome = execute_utools_ai_request(
+            &app,
+            &task_host,
+            &plugin_assets,
+            &providers,
+            &task_plugin_id,
+            &task_lease_id,
+            &task_window_label,
+            &task_request_id,
+            option,
+            stream,
+            &task_cancelled,
+        )
+        .await;
+        let still_owned = {
+            let mut active = task_host
+                .utools_ai_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let still_owned = active.get(&task_request_id).is_some_and(|request| {
+                request.plugin_id == task_plugin_id && request.lease_id == task_lease_id
+            });
+            if still_owned {
+                active.remove(&task_request_id);
+            }
+            still_owned
+        };
+        if !still_owned || task_cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let event_name = format!("ihub://plugin/{task_plugin_id}/event/utools.ai.complete");
+        let payload = match outcome {
+            Ok(message) => json!({
+                "requestId": task_request_id,
+                "ok": true,
+                "result": message,
+                "error": null,
+            }),
+            Err(error) => json!({
+                "requestId": task_request_id,
+                "ok": false,
+                "result": null,
+                "error": bounded_utools_ai_error(&error),
+            }),
+        };
+        let _ = app.emit_to(&task_window_label, &event_name, payload);
+    });
+    let abort_handle = handle.inner().abort_handle();
+    let mut active = host
+        .utools_ai_requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(request) = active.get_mut(request_id) {
+        request.abort_handle = Some(abort_handle);
+    } else {
+        abort_handle.abort();
+    }
+    Ok(json!({ "accepted": true, "requestId": request_id }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_utools_ai_request(
+    app: &AppHandle,
+    host: &Arc<PluginHostState>,
+    plugin_assets: &PluginAssetServer,
+    providers: &AiProviderStore,
+    plugin_id: &str,
+    lease_id: &str,
+    window_label: &str,
+    request_id: &str,
+    option: UtoolsAiOption,
+    stream: bool,
+    cancelled: &AtomicBool,
+) -> Result<UtoolsAiMessage, String> {
+    let resolved = providers.resolve_model(option.model.as_deref())?;
+    let mut messages = initial_wire_messages(&option);
+    let mut function_calls = 0usize;
+    for _ in 0..MAX_UTOOLS_AI_ROUNDS {
+        ensure_utools_ai_request_current(plugin_assets, plugin_id, lease_id, cancelled)?;
+        let chunk_event = format!("ihub://plugin/{plugin_id}/event/utools.ai.chunk");
+        let round = execute_chat_round(&resolved, &messages, &option.tools, stream, |message| {
+            ensure_utools_ai_request_current(plugin_assets, plugin_id, lease_id, cancelled)?;
+            app.emit_to(
+                window_label,
+                &chunk_event,
+                json!({ "requestId": request_id, "message": message }),
+            )
+            .map_err(|error| format!("Could not emit uTools AI stream chunk: {error}"))
+        })
+        .await?;
+        if round.tool_calls.is_empty() {
+            return Ok(round.message);
+        }
+        function_calls = function_calls.saturating_add(round.tool_calls.len());
+        if function_calls > MAX_UTOOLS_AI_FUNCTION_CALLS {
+            return Err(format!(
+                "utools.ai exceeded {MAX_UTOOLS_AI_FUNCTION_CALLS} function calls."
+            ));
+        }
+        messages.push(round.assistant_wire_message);
+        for call in round.tool_calls {
+            if !option
+                .tools
+                .iter()
+                .any(|tool| tool.function.name == call.name)
+            {
+                return Err(format!(
+                    "AI provider requested undeclared function '{}'.",
+                    call.name
+                ));
+            }
+            let result = match invoke_utools_ai_function(
+                app,
+                host,
+                plugin_assets,
+                plugin_id,
+                lease_id,
+                window_label,
+                request_id,
+                &call,
+                cancelled,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => json!({ "error": bounded_utools_ai_error(&error) }),
+            };
+            messages.push(tool_result_wire_message(&call, &result)?);
+        }
+    }
+    Err(format!(
+        "utools.ai exceeded {MAX_UTOOLS_AI_ROUNDS} model rounds."
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn invoke_utools_ai_function(
+    app: &AppHandle,
+    host: &Arc<PluginHostState>,
+    plugin_assets: &PluginAssetServer,
+    plugin_id: &str,
+    lease_id: &str,
+    window_label: &str,
+    request_id: &str,
+    call: &AiToolCall,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    ensure_utools_ai_request_current(plugin_assets, plugin_id, lease_id, cancelled)?;
+    let invocation_id = Uuid::new_v4().to_string();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    {
+        let mut pending = host
+            .pending_utools_ai_function_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_ACTIVE_UTOOLS_AI_REQUESTS * MAX_UTOOLS_AI_FUNCTION_CALLS {
+            return Err("The host has too many pending uTools AI functions.".to_owned());
+        }
+        pending.insert(
+            invocation_id.clone(),
+            PendingUtoolsAiFunctionCall {
+                request_id: request_id.to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                lease_id: lease_id.to_owned(),
+                name: call.name.clone(),
+                response: sender,
+            },
+        );
+    }
+    let event_name = format!("ihub://plugin/{plugin_id}/event/utools.ai.tool.invoke");
+    if let Err(error) = app.emit_to(
+        window_label,
+        &event_name,
+        json!({
+            "requestId": request_id,
+            "invocationId": invocation_id,
+            "toolCallId": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        }),
+    ) {
+        host.pending_utools_ai_function_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&invocation_id);
+        return Err(format!("Could not dispatch uTools AI function: {error}"));
+    }
+    let wait_id = invocation_id.clone();
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        receiver.recv_timeout(UTOOLS_AI_FUNCTION_TIMEOUT)
+    })
+    .await
+    .map_err(|error| format!("uTools AI function wait failed: {error}"))?;
+    match response {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            host.pending_utools_ai_function_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&wait_id);
+            Err("uTools AI function timed out after two minutes.".to_owned())
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            Err("uTools AI function runtime stopped before responding.".to_owned())
+        }
+    }
+}
+
+fn complete_utools_ai_function_call(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(
+        params,
+        &["requestId", "invocationId", "name", "ok", "result", "error"],
+    )?;
+    let request_id = required_string(params, "requestId")?;
+    let invocation_id = required_string(params, "invocationId")?;
+    let name = required_string(params, "name")?;
+    let ok = params
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "uTools AI function completion requires boolean ok.".to_owned())?;
+    let pending = {
+        let mut calls = host
+            .pending_utools_ai_function_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let call = calls
+            .get(invocation_id)
+            .ok_or_else(|| "This uTools AI function call expired or was cancelled.".to_owned())?;
+        if call.request_id != request_id
+            || call.plugin_id != plugin_id
+            || call.lease_id != lease_id
+            || call.name != name
+        {
+            return Err("This AI function completion belongs to another request.".to_owned());
+        }
+        calls
+            .remove(invocation_id)
+            .expect("the verified pending AI function still exists")
+    };
+    let outcome = if ok {
+        let result = params.get("result").cloned().unwrap_or(Value::Null);
+        validate_utools_tool_json_value(&result, "AI function result")?;
+        Ok(result)
+    } else {
+        Err(params
+            .get("error")
+            .and_then(Value::as_str)
+            .map(bounded_utools_ai_error)
+            .unwrap_or_else(|| "uTools AI function failed.".to_owned()))
+    };
+    let _ = pending.response.send(outcome);
+    Ok(json!({ "completed": true }))
+}
+
+fn abort_utools_ai_request(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(params, &["requestId"])?;
+    let request_id = required_string(params, "requestId")?;
+    if Uuid::parse_str(request_id).is_err() {
+        return Err("Invalid uTools AI request ID.".to_owned());
+    }
+    let request = {
+        let mut active = host
+            .utools_ai_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(request) = active.get(request_id) else {
+            return Ok(json!({ "aborted": false }));
+        };
+        if request.plugin_id != plugin_id || request.lease_id != lease_id {
+            return Err("This uTools AI request belongs to another runtime.".to_owned());
+        }
+        active
+            .remove(request_id)
+            .expect("the verified active AI request still exists")
+    };
+    request.cancelled.store(true, Ordering::Release);
+    if let Some(abort_handle) = request.abort_handle {
+        abort_handle.abort();
+    }
+    reject_pending_utools_ai_functions(
+        host,
+        |call| call.request_id == request_id && call.plugin_id == plugin_id,
+        "uTools AI request was aborted.",
+    );
+    Ok(json!({ "aborted": true }))
+}
+
+fn reject_pending_utools_ai_functions<F>(host: &PluginHostState, mut predicate: F, message: &str)
+where
+    F: FnMut(&PendingUtoolsAiFunctionCall) -> bool,
+{
+    let removed = {
+        let mut pending = host
+            .pending_utools_ai_function_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ids = pending
+            .iter()
+            .filter_map(|(id, call)| predicate(call).then_some(id.clone()))
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    for call in removed {
+        let _ = call.response.send(Err(message.to_owned()));
+    }
+}
+
+fn ensure_utools_ai_request_current(
+    plugin_assets: &PluginAssetServer,
+    plugin_id: &str,
+    lease_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("uTools AI request was aborted.".to_owned());
+    }
+    if !plugin_assets.is_active_for(lease_id, plugin_id) {
+        return Err("uTools AI runtime session expired.".to_owned());
+    }
+    Ok(())
+}
+
+fn bounded_utools_ai_error(error: &str) -> String {
+    let error = error.trim();
+    let error = if error.is_empty() {
+        "uTools AI request failed."
+    } else {
+        error
+    };
+    error.chars().take(2_000).collect()
 }
 
 fn validate_utools_browser_message<'a>(
@@ -8337,6 +8877,33 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
             "uTools MCP runtime '{plugin_id}' stopped before responding."
         )));
     }
+    let ai_requests = {
+        let mut active = host
+            .utools_ai_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request_ids = active
+            .iter()
+            .filter_map(|(request_id, request)| {
+                (request.plugin_id == plugin_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| active.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+    for request in ai_requests {
+        request.cancelled.store(true, Ordering::Release);
+        if let Some(abort_handle) = request.abort_handle {
+            abort_handle.abort();
+        }
+    }
+    reject_pending_utools_ai_functions(
+        host,
+        |call| call.plugin_id == plugin_id,
+        "uTools AI runtime stopped before the function responded.",
+    );
     host.issued_search_results
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -9779,6 +10346,11 @@ pub fn run() {
             preview_batch_rename,
             apply_batch_rename,
             crate::builtin_tools::write_clipboard_text,
+            list_ai_provider_profiles,
+            save_ai_provider_profile,
+            delete_ai_provider_profile,
+            list_ai_models,
+            test_ai_provider_profile,
             list_cloud_profiles,
             connect_webdav,
             connect_cloud_profile,
@@ -11406,18 +11978,18 @@ mod tests {
         CaptureFocusLease, CursorColorApproval, DetachedPluginFrontendEventRequest,
         IssuedPluginSearchResults, LauncherFocusGate, LauncherHotkeyToggleGate,
         LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
-        LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PendingUtoolsMainPushSelection,
-        PendingUtoolsToolCall, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
-        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
-        PluginLauncherContextRequest, PluginLogAdmission, RegisteredUtoolsTool,
-        TemporaryPathOpenKind, TemporaryPathOpenStore, UtoolsMouseButton, UtoolsSimulationAction,
-        LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE,
-        LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES,
-        MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_CLIPBOARD_TEXT_BYTES,
-        MAX_PLUGIN_LOGS_PER_WINDOW, MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW,
-        MAX_PLUGIN_NOTIFICATION_BODY_CHARS, MAX_PLUGIN_SEARCH_PAYLOAD_BYTES,
-        MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_NOTIFICATION_WINDOW,
-        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
+        LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PendingUtoolsAiFunctionCall,
+        PendingUtoolsMainPushSelection, PendingUtoolsToolCall, PluginBatchRenamePreview,
+        PluginCursorColor, PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
+        PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
+        RegisteredUtoolsTool, TemporaryPathOpenKind, TemporaryPathOpenStore, UtoolsMouseButton,
+        UtoolsSimulationAction, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
+        LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
+        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
+        MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
+        MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
+        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW,
+        PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
     #[test]
@@ -12383,6 +12955,20 @@ mod tests {
                     response: sender,
                 },
             );
+        let (ai_sender, ai_receiver) = mpsc::sync_channel(1);
+        host.pending_utools_ai_function_calls
+            .lock()
+            .expect("pending AI function lock")
+            .insert(
+                "650e8400-e29b-41d4-a716-446655440000".to_owned(),
+                PendingUtoolsAiFunctionCall {
+                    request_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+                    plugin_id: "utools-owner".to_owned(),
+                    lease_id: "runtime-lease-owner".to_owned(),
+                    name: "getSystemInfo".to_owned(),
+                    response: ai_sender,
+                },
+            );
 
         clear_plugin_runtime_state(&host, "utools-owner");
         assert!(host.utools_tools.read().expect("registry lock").is_empty());
@@ -12392,6 +12978,12 @@ mod tests {
             .expect("pending lock")
             .is_empty());
         assert!(receiver.recv().expect("dispose response").is_err());
+        assert!(host
+            .pending_utools_ai_function_calls
+            .lock()
+            .expect("pending AI function lock")
+            .is_empty());
+        assert!(ai_receiver.recv().expect("AI dispose response").is_err());
     }
 
     #[test]

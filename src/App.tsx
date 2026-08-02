@@ -52,6 +52,7 @@ import {
   pluginCommandArtworkSrc,
   pluginSearchResultArtworkSrc,
 } from "./components/PluginArtwork";
+import { AiProviderSettings } from "./components/AiProviderSettings";
 import type { RecordingPhase, ToolboxLaunchContext, ToolboxTab } from "./components/ToolboxDrawer";
 import {
   availableLauncherContextActions,
@@ -4247,6 +4248,8 @@ export function App() {
                   <span />
                 </button>
               </section>
+
+              <AiProviderSettings />
 
               <section
                 className="settings-section settings-section--diagnostics"

@@ -1122,7 +1122,10 @@ export function PluginFrontendFrame({
         | "event/search.select"
         | "event/utools.dbPull"
         | "event/utools.tool.invoke"
-        | "event/utools.tool.cancel",
+        | "event/utools.tool.cancel"
+        | "event/utools.ai.chunk"
+        | "event/utools.ai.tool.invoke"
+        | "event/utools.ai.complete",
     ) => {
       try {
         const stop = await listen<unknown>(`ihub://plugin/${pluginId}/${kind}`, (event) => {
@@ -1173,6 +1176,9 @@ export function PluginFrontendFrame({
       subscribe("event/utools.dbPull"),
       subscribe("event/utools.tool.invoke"),
       subscribe("event/utools.tool.cancel"),
+      subscribe("event/utools.ai.chunk"),
+      subscribe("event/utools.ai.tool.invoke"),
+      subscribe("event/utools.ai.complete"),
       subscribeBrowserEvent("ihub://utools-browser/parent-message", "ipc"),
       subscribeBrowserEvent("ihub://utools-browser/ready", "ready"),
     ]);

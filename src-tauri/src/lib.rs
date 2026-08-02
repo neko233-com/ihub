@@ -1,3 +1,4 @@
+mod ai_providers;
 mod app;
 mod background_process;
 mod builtin_tools;

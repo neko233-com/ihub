@@ -2053,6 +2053,7 @@ const declaredTools = new Map(Array.isArray(config.tools)
   : []);
 const toolHandlers = new Map();
 const activeToolCalls = new Map();
+const activeAiRequests = new Map();
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
 function call(method, params, interactionId, timeoutMs) {{
@@ -2901,6 +2902,75 @@ function invokeRegisteredTool(payload) {{
     }}, undefined, 125000).catch(() => undefined))
     .finally(() => activeToolCalls.delete(requestId));
 }}
+function boundedAiFunctionResult(value) {{
+  if (value === undefined) return null;
+  let encoded;
+  try {{ encoded = JSON.stringify(value); }} catch {{ throw new TypeError("uTools AI function result must be JSON-serializable."); }}
+  if (typeof encoded !== "string" || new TextEncoder().encode(encoded).byteLength > 1048576) throw new RangeError("uTools AI function result exceeds 1 MiB.");
+  return JSON.parse(encoded);
+}}
+function abortAiRequest(requestId, reason) {{
+  const state = activeAiRequests.get(requestId);
+  if (!state || state.settled) return;
+  state.settled = true;
+  activeAiRequests.delete(requestId);
+  const error = new Error(reason || "uTools AI request was aborted.");
+  error.name = "AbortError";
+  state.reject(error);
+  void state.started.then(() => call("compatibility.utools.ai.abort", {{ requestId }})).catch(() => undefined);
+}}
+function invokeAiFunction(payload) {{
+  const requestId = payload && payload.requestId;
+  const invocationId = payload && payload.invocationId;
+  const name = payload && payload.name;
+  const args = payload && payload.arguments;
+  if (typeof requestId !== "string" || typeof invocationId !== "string" || typeof name !== "string" || !activeAiRequests.has(requestId)) return;
+  const handler = globalThis[name];
+  void Promise.resolve()
+    .then(() => {{
+      if (typeof handler !== "function") throw new Error("uTools AI function '" + name + "' is not attached to window.");
+      return handler(args);
+    }})
+    .then((value) => boundedAiFunctionResult(value))
+    .then((result) => call("compatibility.utools.ai.toolComplete", {{ requestId, invocationId, name, ok: true, result, error: null }}, undefined, 125000))
+    .catch((error) => call("compatibility.utools.ai.toolComplete", {{
+      requestId,
+      invocationId,
+      name,
+      ok: false,
+      result: null,
+      error: String(error instanceof Error ? error.message : error).slice(0, 2000)
+    }}, undefined, 125000).catch(() => undefined));
+}}
+function ai(option, streamCallback) {{
+  if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot start AI requests.");
+  if (!option || typeof option !== "object" || Array.isArray(option)) throw new TypeError("utools.ai requires an options object.");
+  if (streamCallback !== undefined && typeof streamCallback !== "function") throw new TypeError("utools.ai stream callback must be a function.");
+  let encoded;
+  try {{ encoded = JSON.stringify(option); }} catch {{ throw new TypeError("utools.ai options must be JSON-serializable."); }}
+  if (typeof encoded !== "string" || new TextEncoder().encode(encoded).byteLength > 1048576) throw new RangeError("utools.ai options exceed 1 MiB.");
+  const snapshot = JSON.parse(encoded);
+  const requestId = crypto.randomUUID();
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {{ resolvePromise = resolve; rejectPromise = reject; }});
+  const state = {{ resolve: resolvePromise, reject: rejectPromise, streamCallback, settled: false, started: null }};
+  activeAiRequests.set(requestId, state);
+  state.started = call("compatibility.utools.ai.start", {{ requestId, option: snapshot, stream: typeof streamCallback === "function" }}, undefined, 125000);
+  void state.started.catch((error) => {{
+    if (state.settled) return;
+    state.settled = true;
+    activeAiRequests.delete(requestId);
+    rejectPromise(error);
+  }});
+  Object.defineProperty(promise, "abort", {{
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: () => abortAiRequest(requestId)
+  }});
+  return promise;
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -2920,6 +2990,28 @@ window.addEventListener("message", (event) => {{
     const requestId = message.payload && message.payload.requestId;
     const state = typeof requestId === "string" ? activeToolCalls.get(requestId) : null;
     if (state) state.cancelled = true;
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.ai.chunk") {{
+    const payload = message.payload;
+    const state = payload && typeof payload.requestId === "string" ? activeAiRequests.get(payload.requestId) : null;
+    if (!state || state.settled || typeof state.streamCallback !== "function" || !payload.message || typeof payload.message !== "object") return;
+    try {{ state.streamCallback(Object.freeze({{ ...payload.message }})); }}
+    catch (error) {{ abortAiRequest(payload.requestId, error instanceof Error ? error.message : "uTools AI stream callback failed."); }}
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.ai.tool.invoke") {{
+    invokeAiFunction(message.payload);
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.ai.complete") {{
+    const payload = message.payload;
+    const state = payload && typeof payload.requestId === "string" ? activeAiRequests.get(payload.requestId) : null;
+    if (!state || state.settled) return;
+    state.settled = true;
+    activeAiRequests.delete(payload.requestId);
+    if (payload.ok === true) state.resolve(typeof state.streamCallback === "function" ? undefined : Object.freeze({{ ...(payload.result || {{}}) }}));
+    else state.reject(new Error(typeof payload.error === "string" ? payload.error : "uTools AI request failed."));
     return;
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.ipc") {{
@@ -3101,6 +3193,8 @@ const utools = Object.freeze({{
       .catch((error) => console.error("iHub ubrowser cache clearing failed", error));
     return true;
   }},
+  ai,
+  allAiModels() {{ return call("compatibility.utools.ai.models", {{}}); }},
   registerTool(name, handler) {{
     if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot register MCP tools.");
     if (typeof name !== "string" || !declaredTools.has(name)) throw new TypeError("uTools registerTool name must exactly match plugin.json tools.");
@@ -4124,6 +4218,12 @@ mod tests {
         assert!(script.contains("compatibility.utools.tools.complete"));
         assert!(script.contains("compatibility.utools.tools.progress"));
         assert!(script.contains("event/utools.tool.invoke"));
+        assert!(script.contains("function ai(option, streamCallback)"));
+        assert!(script.contains("compatibility.utools.ai.start"));
+        assert!(script.contains("compatibility.utools.ai.abort"));
+        assert!(script.contains("compatibility.utools.ai.toolComplete"));
+        assert!(script.contains("event/utools.ai.chunk"));
+        assert!(script.contains("allAiModels()"));
         assert!(script.contains("const sandboxModule"));
         assert!(script.contains("getAppVersion"));
         assert!(script.contains("getNativeId"));

@@ -95,6 +95,34 @@ describe("plugin iframe Bridge boundary", () => {
       total: 100,
       message: "处理中",
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.models", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.start", {
+      requestId: "550e8400-e29b-41d4-a716-446655440000",
+      stream: true,
+      option: {
+        model: "provider:model",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [{
+          type: "function",
+          function: {
+            name: "getSystemInfo",
+            description: "Read plugin-owned system information",
+            parameters: { type: "object", properties: {} },
+          },
+        }],
+      },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.abort", {
+      requestId: browserId,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.toolComplete", {
+      requestId: "550e8400-e29b-41d4-a716-446655440000",
+      invocationId: browserId,
+      name: "getSystemInfo",
+      ok: true,
+      result: { platform: "win32" },
+      error: null,
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -282,6 +310,8 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.sendToParent")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.ubrowser.run")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.tools.complete")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.ai.start")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.ai.toolComplete")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.tools.register", {
       name: "VideoConvert",
     })).ok).toBe(false);
@@ -291,6 +321,21 @@ describe("plugin iframe Bridge boundary", () => {
       progress: 101,
       total: 100,
       message: null,
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.start", {
+      requestId: "550e8400-e29b-41d4-a716-446655440000",
+      stream: false,
+      option: {
+        messages: [{ role: "tool", content: "not public input" }],
+      },
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ai.toolComplete", {
+      requestId: "550e8400-e29b-41d4-a716-446655440000",
+      invocationId: "not-a-request",
+      name: "getSystemInfo",
+      ok: true,
+      result: null,
+      error: null,
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",

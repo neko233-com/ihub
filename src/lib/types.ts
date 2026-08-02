@@ -161,6 +161,36 @@ export interface UtoolsToolProgressEvent {
   message?: string;
 }
 
+export interface AiProviderModel {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface AiProviderProfile {
+  id: string;
+  label: string;
+  endpoint: string;
+  models: AiProviderModel[];
+  defaultModel: string;
+  hasApiKey: boolean;
+  isDefault: boolean;
+}
+
+export interface AiProviderTestResult {
+  reachable: boolean;
+  modelIds: string[];
+  message: string;
+}
+
+export interface UtoolsAiModel {
+  id: string;
+  label: string;
+  description: string;
+  icon: string;
+  cost: number;
+}
+
 /** Native-validated availability for a first-party plugin that can be linked
  * only from the source checkout trusted by this development installation. */
 export interface OfficialWorkspacePluginProject {

@@ -223,6 +223,12 @@ Windows 上的 `simulateKeyboardTap`、`simulateMouseMove`、`simulateMouseClick
 
 公开 uTools `plugin.json.tools` 支持小写 `snake_case` 名称、必填 `description/inputSchema` 与可选 `outputSchema`；每插件最多 64 项，每份 schema 最多 64 KiB、2,048 个节点和 32 层，只允许文档内 `$ref`。schema 会在导入和每次调用前由 Rust JSON Schema 实现编译；参数与 handler 返回值分别按输入/输出 schema 验证，单次值最多 1 MiB、16,384 节点和 32 层。只有当前 lifecycle owner 在初始化阶段调用 `utools.registerTool(name, handler)` 后才显示为已注册；BrowserWindow、未声明名称和旧租约均拒绝。`ctx.requestId` 是调用 UUID，`ctx.sendProgress({ progress, total?, message? })` 会向可信主窗口发出 `ihub://utools-tool-progress`。可信主窗口通过 `list_utools_tools`、`invoke_utools_tool` 与 `cancel_utools_tool` 路由调用；调用全局最多 16 个、单插件最多 4 个，并在十分钟后超时。tools-only 包可以省略 `main/features`，但必须同时声明 `preload` 与非空 `tools`；宿主为其创建不可见的合成页面，并且不会把插件目录变成可读取的静态资源根。
 
+### uTools AI 与可配置 Provider
+
+兼容层实现官方 Promise-like `utools.ai(option[, streamCallback])` 与 `utools.allAiModels()`。用户先在 iHub 偏好设置中配置一个或多个 OpenAI-compatible Chat Completions Provider；远程地址必须是 HTTPS 且以 `/v1` 结尾，本机 `localhost`/loopback 才允许 HTTP。模型目录返回宿主生成的 provider-scoped ID，插件应保存并使用 `allAiModels()` 返回的 `id`，不要自行拼接。未指定模型时使用用户设置的默认 Provider 与默认模型。Provider 元数据保存在 iHub 自有设置命名空间，API key 使用系统凭据保护的加密存储，列表与插件 Bridge 都不会返回明文密钥。
+
+`option.messages` 只接受 `system`、`user`、`assistant`，`tools` 只接受有界 function schema。非流式调用 resolve 最终 assistant message；提供 callback 时会按 SSE 增量投递 `{ role: "assistant", content?, reasoning_content? }`，完成后 resolve `undefined`。返回 Promise 带 `abort()`，iframe 销毁、租约替换、插件停用/更新/卸载也会取消原生请求。模型发起 function tool call 时，兼容层仅调用同一 iframe 全局对象中同名的函数，并把有界 JSON 结果送回模型；全局请求最多 8 个、单插件最多 2 个，最多 8 轮和 16 次函数调用，单次函数等待最多 2 分钟。BrowserWindow 不开放 AI 调用，避免脱离当前 surface 生命周期的后台网络请求。Provider 的网络请求禁用重定向并限制连接、总时长、单行 SSE、错误正文和总响应大小；Provider 或插件返回的无界数据会被拒绝。
+
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 
 不要主动导入 `@tauri-apps/api`。iHub 会为 `entry.frontend` 创建每 iframe 独立的 `127.0.0.1` loopback 资源来源；SDK 在该 iframe 中通过父窗口 `postMessage` Bridge 访问宿主。该 remote origin 不匹配 iHub 的 Tauri capability，父窗口还会验证消息来源窗口与精确 origin，并由宿主附加租约。`window.__IHUB_PLUGIN_API__` 是 SDK 预留给未来受控宿主表面的接口，当前 launcher 不会注入它。SDK 不提供直接调用 Tauri 的后备路径；这条边界只覆盖 TypeScript 前端，不会限制插件附带的原生 worker，因此 GitHub 导入的前端和二进制仍必须仅来自你信任的发布者。浏览器预览或测试必须显式传入 `createDevelopmentBridge()` 或自定义 `HostBridge`。
