@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Rewrites updater asset API URLs emitted by tauri-action to the immutable
-// browser_download_url values returned for the exact draft release. No URL is
-// synthesized for an updater entry: every mapping must exist in the supplied
-// GitHub release metadata.
+// Rewrites updater asset API URLs emitted by tauri-action to the canonical
+// tagged download URLs that become live when the exact draft is published.
+// GitHub exposes draft assets under a temporary `untagged-*` download segment,
+// so every target URL is derived only after validating the draft release ID,
+// tag, asset ID, name, state, API URL, and temporary browser URL.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -137,6 +138,41 @@ function assertCanonicalUrl(value, expected, label) {
   }
 }
 
+function validateDraftAssetBrowserUrl(value, {
+  repository,
+  tag,
+  assetName,
+  label,
+}) {
+  const parsed = parseStrictHttpsUrl(value, label);
+  if (parsed.hostname.toLowerCase() !== 'github.com') {
+    fail(`${label} must use github.com.`);
+  }
+
+  const segments = decodePathSegments(parsed, label);
+  const [owner, repo] = repository.split('/');
+  if (
+    segments.length !== 6
+    || segments[0] !== owner
+    || segments[1] !== repo
+    || segments[2] !== 'releases'
+    || segments[3] !== 'download'
+    || segments[5] !== assetName
+  ) {
+    fail(`${label} is not the expected draft asset download URL.`);
+  }
+
+  const downloadSegment = segments[4];
+  if (downloadSegment !== tag && !/^untagged-[0-9a-f]{12,64}$/u.test(downloadSegment)) {
+    fail(`${label} has an invalid draft download segment.`);
+  }
+  const expected = `https://github.com/${strictPathSegment(owner)}/${strictPathSegment(repo)}/releases/download/${strictPathSegment(downloadSegment)}/${strictPathSegment(assetName)}`;
+  if (value !== expected) {
+    fail(`${label} must use the exact GitHub draft asset URL.`);
+  }
+  return downloadSegment;
+}
+
 export function parseBrowserDownloadUrl(value, { repository, tag, label = 'Updater URL' }) {
   parseRepository(repository);
   assertSimpleTag(tag);
@@ -218,6 +254,7 @@ export function indexDraftReleaseAssets({ releaseMetadata, repository, tag, rele
   const byId = new Map();
   const byBrowserUrl = new Map();
   const names = new Set();
+  const downloadSegments = new Set();
   for (const asset of releaseMetadata.assets) {
     if (!asset || typeof asset !== 'object' || Array.isArray(asset)) {
       fail('Release metadata contains an invalid asset.');
@@ -229,7 +266,12 @@ export function indexDraftReleaseAssets({ releaseMetadata, repository, tag, rele
     }
     assertCanonicalUrl(asset.url, assetApiUrl(repository, assetId), `Release asset '${name}' API URL`);
     const expectedBrowserUrl = browserDownloadUrl(repository, tag, name);
-    assertCanonicalUrl(asset.browser_download_url, expectedBrowserUrl, `Release asset '${name}' browser download URL`);
+    downloadSegments.add(validateDraftAssetBrowserUrl(asset.browser_download_url, {
+      repository,
+      tag,
+      assetName: name,
+      label: `Release asset '${name}' browser download URL`,
+    }));
     if (byId.has(assetId)) {
       fail(`Release metadata repeats asset ID ${assetId}.`);
     }
@@ -244,6 +286,9 @@ export function indexDraftReleaseAssets({ releaseMetadata, repository, tag, rele
     byId.set(assetId, indexedAsset);
     byBrowserUrl.set(expectedBrowserUrl, indexedAsset);
     names.add(name);
+  }
+  if (downloadSegments.size > 1) {
+    fail('Release metadata mixes multiple draft download segments.');
   }
   return { byId, byBrowserUrl };
 }

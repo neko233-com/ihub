@@ -14,6 +14,7 @@ import { validateLatestJson, verifyReleaseDirectory } from './verify-release-ass
 const REPOSITORY = 'neko233-com/ihub';
 const TAG = 'v0.1.0';
 const RELEASE_ID = 7001;
+const DRAFT_DOWNLOAD_SEGMENT = 'untagged-0123456789abcdef';
 const ASSETS = [
   { id: 8101, name: 'ihub_0.1.0_windows_x64_setup.exe' },
   { id: 8102, name: 'ihub_0.1.0_darwin_aarch64.dmg' },
@@ -40,7 +41,7 @@ function makeReleaseMetadata() {
       name,
       state: 'uploaded',
       url: apiAssetUrl(id),
-      browser_download_url: browserDownloadUrl(REPOSITORY, TAG, name),
+      browser_download_url: browserDownloadUrl(REPOSITORY, DRAFT_DOWNLOAD_SEGMENT, name),
     })),
   };
 }
@@ -83,7 +84,7 @@ test('normalizer maps only current draft asset API IDs to browser download URLs'
   }
 });
 
-test('normalizer accepts canonical browser URLs only when metadata contains them', () => {
+test('normalizer accepts canonical updater URLs only for assets in the exact draft', () => {
   const latest = makeLatest(({ name }) => browserDownloadUrl(REPOSITORY, TAG, name));
   const normalized = normalizeUpdaterJson({
     latest,
@@ -106,6 +107,14 @@ test('normalizer rejects release metadata that is not the exact current draft', 
     ['asset state', (metadata) => { metadata.assets[0].state = 'new'; }],
     ['asset API URL', (metadata) => { metadata.assets[0].url += '?token=unsafe'; }],
     ['browser URL', (metadata) => { metadata.assets[0].browser_download_url += '#fragment'; }],
+    ['draft download segment', (metadata) => {
+      metadata.assets[0].browser_download_url = metadata.assets[0].browser_download_url
+        .replace(DRAFT_DOWNLOAD_SEGMENT, 'untagged-not-hex');
+    }],
+    ['mixed draft download segments', (metadata) => {
+      metadata.assets[0].browser_download_url = metadata.assets[0].browser_download_url
+        .replace(DRAFT_DOWNLOAD_SEGMENT, 'untagged-fedcba9876543210');
+    }],
     ['duplicate asset ID', (metadata) => { metadata.assets[1].id = metadata.assets[0].id; }],
     ['duplicate asset name', (metadata) => { metadata.assets[1].name = metadata.assets[0].name; }],
   ];
