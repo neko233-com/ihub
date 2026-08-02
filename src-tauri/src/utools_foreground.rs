@@ -10,10 +10,28 @@
 #[cfg(windows)]
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ForegroundWindowTarget {
     hwnd: isize,
     process_id: u32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MatchWindowPayload {
+    pub(crate) id: i64,
+    #[serde(rename = "class")]
+    pub(crate) class_name: String,
+    pub(crate) title: String,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) app_path: String,
+    pub(crate) pid: u32,
+    pub(crate) app: String,
 }
 
 #[cfg(windows)]
@@ -67,7 +85,7 @@ fn validate_live_target(target: ForegroundWindowTarget) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn process_image_name(process_id: u32) -> Result<String, String> {
+fn process_image_path(process_id: u32) -> Result<PathBuf, String> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{
@@ -99,12 +117,116 @@ fn process_image_name(process_id: u32) -> Result<String, String> {
         {
             return Err("Windows could not identify the preceding window process.".to_owned());
         }
-        let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .ok_or_else(|| "The preceding window process name is unavailable.".to_owned())
+        Ok(PathBuf::from(String::from_utf16_lossy(
+            &buffer[..length as usize],
+        )))
     }
+}
+
+#[cfg(windows)]
+fn process_image_name(process_id: u32) -> Result<String, String> {
+    process_image_path(process_id)?
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "The preceding window process name is unavailable.".to_owned())
+}
+
+#[cfg(windows)]
+pub(crate) fn read_window_payload(
+    target: ForegroundWindowTarget,
+) -> Result<MatchWindowPayload, String> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    };
+
+    validate_live_target(target)?;
+    let hwnd = target.hwnd as *mut core::ffi::c_void;
+    let title_length = unsafe { GetWindowTextLengthW(hwnd) }.clamp(0, 16_384) as usize;
+    let mut title_buffer = vec![0_u16; title_length.saturating_add(1)];
+    let title_written = unsafe {
+        GetWindowTextW(
+            hwnd,
+            title_buffer.as_mut_ptr(),
+            i32::try_from(title_buffer.len()).unwrap_or(i32::MAX),
+        )
+    }
+    .max(0) as usize;
+    let title = String::from_utf16_lossy(&title_buffer[..title_written.min(title_buffer.len())]);
+
+    let mut class_buffer = vec![0_u16; 1_024];
+    let class_written = unsafe {
+        GetClassNameW(
+            hwnd,
+            class_buffer.as_mut_ptr(),
+            i32::try_from(class_buffer.len()).unwrap_or(i32::MAX),
+        )
+    };
+    if class_written <= 0 {
+        return Err("Windows could not read the preceding window class.".to_owned());
+    }
+    let class_name = String::from_utf16_lossy(&class_buffer[..class_written as usize]);
+
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return Err("Windows could not read the preceding window bounds.".to_owned());
+    }
+    let width = rect.right.saturating_sub(rect.left);
+    let height = rect.bottom.saturating_sub(rect.top);
+    if width <= 0 || height <= 0 {
+        return Err("The preceding window has invalid bounds.".to_owned());
+    }
+
+    let app_path = process_image_path(target.process_id)?;
+    let app = app_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The preceding window application name is unavailable.".to_owned())?
+        .to_owned();
+    let app_path = app_path.to_string_lossy().into_owned();
+    if app_path.is_empty()
+        || app_path.len() > 8_192
+        || app_path.chars().any(char::is_control)
+        || title.chars().count() > 16_384
+        || title.chars().any(char::is_control)
+        || class_name.chars().count() > 1_023
+        || class_name.chars().any(char::is_control)
+    {
+        return Err("The preceding window metadata exceeds the host limits.".to_owned());
+    }
+    let id = i64::try_from(target.hwnd)
+        .map_err(|_| "The preceding window handle is not representable.".to_owned())?;
+    if id <= 0 || id > 9_007_199_254_740_991 {
+        return Err(
+            "The preceding window handle is outside JavaScript's safe integer range.".to_owned(),
+        );
+    }
+    Ok(MatchWindowPayload {
+        id,
+        class_name,
+        title,
+        x: rect.left,
+        y: rect.top,
+        width,
+        height,
+        app_path,
+        pid: target.process_id,
+        app,
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn read_window_payload(
+    _target: ForegroundWindowTarget,
+) -> Result<MatchWindowPayload, String> {
+    Err("window matcher payloads have been runtime-verified on Windows only.".to_owned())
 }
 
 #[cfg(windows)]

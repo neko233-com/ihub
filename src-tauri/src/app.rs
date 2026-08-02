@@ -68,8 +68,8 @@ use crate::{
         PluginShortcutStatus,
     },
     plugins::{
-        validate_utools_tool_value, PluginManager, UtoolsCompatRuntimeConfig,
-        UTOOLS_MAIN_PUSH_PROVIDER_ID,
+        project_utools_matcher_value, validate_utools_tool_value, PluginManager,
+        UtoolsCompatRuntimeConfig, UTOOLS_MAIN_PUSH_PROVIDER_ID,
     },
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
@@ -139,7 +139,7 @@ struct UtoolsDynamicFeature {
     main_hide: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     main_push: Option<bool>,
-    cmds: Vec<String>,
+    cmds: Vec<Value>,
 }
 
 /// A small, platform-neutral work-area snapshot used to calculate the next
@@ -2106,6 +2106,394 @@ pub fn match_utools_text_commands(
         }
     }
     Ok(matches)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UtoolsContextMatchRequest {
+    matcher_type: String,
+    payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsContextCommandMatch {
+    plugin_id: String,
+    command_id: String,
+    label: String,
+    matcher_type: String,
+    matcher_index: usize,
+}
+
+#[derive(Debug)]
+struct PreparedUtoolsContextFile {
+    prepared: PreparedLocalOpen,
+    name: String,
+}
+
+fn prepare_utools_context_files(payload: &Value) -> Result<Vec<PreparedUtoolsContextFile>, String> {
+    let paths = payload
+        .as_array()
+        .ok_or_else(|| "uTools files matcher payload must be an array of paths.".to_owned())?;
+    if paths.is_empty() || paths.len() > MAX_UTOOLS_COPY_FILE_ITEMS {
+        return Err(format!(
+            "uTools files matcher accepts 1-{MAX_UTOOLS_COPY_FILE_ITEMS} pasted items."
+        ));
+    }
+    let mut total_bytes = 0usize;
+    let mut seen = HashSet::new();
+    let mut files = Vec::with_capacity(paths.len());
+    for value in paths {
+        let path = value
+            .as_str()
+            .ok_or_else(|| "Every uTools files matcher path must be a string.".to_owned())?;
+        total_bytes = total_bytes.saturating_add(path.len());
+        if path.is_empty()
+            || path.chars().count() > MAX_UTOOLS_COPY_FILE_PATH_CHARS
+            || total_bytes > MAX_LAUNCHER_CONTEXT_PATH_BYTES
+            || path.chars().any(char::is_control)
+        {
+            return Err("A pasted uTools matcher path is invalid or too long.".to_owned());
+        }
+        let prepared = crate::system_open::prepare_local_open(Path::new(path), None)?;
+        if !seen.insert(prepared.path().to_owned()) {
+            continue;
+        }
+        let name = prepared
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| "A pasted uTools matcher item needs a UTF-8 file name.".to_owned())?
+            .to_owned();
+        files.push(PreparedUtoolsContextFile { prepared, name });
+    }
+    if files.is_empty() {
+        return Err("The pasted uTools matcher file list is empty.".to_owned());
+    }
+    Ok(files)
+}
+
+fn utools_files_matcher_accepts(
+    matcher: &crate::models::UtoolsTextMatcherInfo,
+    files: &[PreparedUtoolsContextFile],
+) -> Result<bool, String> {
+    if matcher
+        .min_length
+        .is_some_and(|minimum| files.len() < minimum)
+        || matcher
+            .max_length
+            .is_some_and(|maximum| files.len() > maximum)
+    {
+        return Ok(false);
+    }
+    if let Some(file_type) = matcher.file_type.as_deref() {
+        let all_match = files.iter().all(|file| match file_type {
+            "file" => file.prepared.kind() == LocalOpenKind::File,
+            "directory" => file.prepared.kind() == LocalOpenKind::Folder,
+            _ => false,
+        });
+        if !all_match {
+            return Ok(false);
+        }
+    }
+    if !matcher.extensions.is_empty()
+        && !files.iter().all(|file| {
+            file.prepared.kind() == LocalOpenKind::File
+                && matcher.extensions.iter().any(|extension| {
+                    file.name
+                        .to_ascii_lowercase()
+                        .ends_with(&format!(".{extension}"))
+                })
+        })
+    {
+        return Ok(false);
+    }
+    if let Some(pattern) = matcher.pattern.as_deref() {
+        let expression = RegexBuilder::new(pattern)
+            .case_insensitive(matcher.flags.contains('i'))
+            .multi_line(matcher.flags.contains('m'))
+            .dot_matches_new_line(matcher.flags.contains('s'))
+            .unicode(true)
+            .build()
+            .map_err(|error| format!("Stored uTools files matcher is invalid: {error}"))?;
+        if !files.iter().all(|file| expression.is_match(&file.name)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn utools_window_matcher_accepts(
+    matcher: &crate::models::UtoolsTextMatcherInfo,
+    window: &crate::utools_foreground::MatchWindowPayload,
+) -> Result<bool, String> {
+    if matcher.matcher_type != "window"
+        || !matcher
+            .window_apps
+            .iter()
+            .any(|app| app.eq_ignore_ascii_case(&window.app))
+    {
+        return Ok(false);
+    }
+    if !matcher.window_classes.is_empty()
+        && !matcher
+            .window_classes
+            .iter()
+            .any(|class_name| class_name.eq_ignore_ascii_case(&window.class_name))
+    {
+        return Ok(false);
+    }
+    if let Some(pattern) = matcher.pattern.as_deref() {
+        let expression = RegexBuilder::new(pattern)
+            .case_insensitive(matcher.flags.contains('i'))
+            .multi_line(matcher.flags.contains('m'))
+            .dot_matches_new_line(matcher.flags.contains('s'))
+            .unicode(true)
+            .build()
+            .map_err(|error| format!("Stored uTools window matcher is invalid: {error}"))?;
+        if !expression.is_match(&window.title) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_utools_context_image(payload: &Value) -> Result<String, String> {
+    let data_url = payload
+        .as_str()
+        .ok_or_else(|| "uTools img matcher payload must be a PNG data URL.".to_owned())?;
+    let _ = decode_utools_clipboard_png_data_url(data_url)?;
+    Ok(data_url.to_owned())
+}
+
+fn utools_context_matcher_accepts(
+    matcher: &crate::models::UtoolsTextMatcherInfo,
+    request: &UtoolsContextMatchRequest,
+    files: Option<&[PreparedUtoolsContextFile]>,
+) -> Result<bool, String> {
+    if matcher.matcher_type != request.matcher_type {
+        return Ok(false);
+    }
+    match request.matcher_type.as_str() {
+        "img" => {
+            let _ = validate_utools_context_image(&request.payload)?;
+            Ok(true)
+        }
+        "files" => utools_files_matcher_accepts(
+            matcher,
+            files.ok_or_else(|| "Prepared uTools files are unavailable.".to_owned())?,
+        ),
+        _ => Ok(false),
+    }
+}
+
+#[tauri::command]
+pub fn match_utools_context_commands(
+    action: UtoolsContextMatchRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<UtoolsContextCommandMatch>, String> {
+    if !matches!(action.matcher_type.as_str(), "img" | "files") {
+        return Err("uTools context matcher type must be img or files.".to_owned());
+    }
+    let files = if action.matcher_type == "files" {
+        Some(prepare_utools_context_files(&action.payload)?)
+    } else {
+        let _ = validate_utools_context_image(&action.payload)?;
+        None
+    };
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    let mut matches = Vec::new();
+    for plugin in plugins.into_iter().filter(|plugin| plugin.enabled) {
+        for command in plugin.commands {
+            for (matcher_index, matcher) in command.utools_text_matchers.iter().enumerate() {
+                if utools_context_matcher_accepts(matcher, &action, files.as_deref())? {
+                    matches.push(UtoolsContextCommandMatch {
+                        plugin_id: plugin.id.clone(),
+                        command_id: command.id.clone(),
+                        label: matcher.label.clone(),
+                        matcher_type: matcher.matcher_type.clone(),
+                        matcher_index,
+                    });
+                    if matches.len() >= 12 {
+                        return Ok(matches);
+                    }
+                }
+            }
+        }
+    }
+    Ok(matches)
+}
+
+#[tauri::command]
+pub fn match_utools_window_commands(
+    state: State<'_, AppState>,
+) -> Result<Vec<UtoolsContextCommandMatch>, String> {
+    let Some(window) = state
+        .previous_foreground()
+        .ok()
+        .and_then(|target| crate::utools_foreground::read_window_payload(target).ok())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    let mut matches = Vec::new();
+    for plugin in plugins.into_iter().filter(|plugin| plugin.enabled) {
+        for command in plugin.commands {
+            for (matcher_index, matcher) in command.utools_text_matchers.iter().enumerate() {
+                if utools_window_matcher_accepts(matcher, &window)? {
+                    matches.push(UtoolsContextCommandMatch {
+                        plugin_id: plugin.id.clone(),
+                        command_id: command.id.clone(),
+                        label: matcher.label.clone(),
+                        matcher_type: "window".to_owned(),
+                        matcher_index,
+                    });
+                    if matches.len() >= 12 {
+                        return Ok(matches);
+                    }
+                }
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn remember_utools_context_file_grants(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    files: &[PreparedUtoolsContextFile],
+) {
+    let mut grants = host
+        .utools_drag_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lease_grants = grants
+        .entry((plugin_id.to_owned(), lease_id.to_owned()))
+        .or_default();
+    for file in files {
+        let grant = UtoolsDragGrant {
+            path: file.prepared.path().to_owned(),
+            kind: file.prepared.kind(),
+            identity: file.prepared.identity(),
+        };
+        lease_grants.retain(|existing| existing.path != grant.path);
+        lease_grants.push(grant);
+    }
+    if lease_grants.len() > MAX_UTOOLS_DRAG_GRANTS_PER_LEASE {
+        lease_grants.drain(..lease_grants.len() - MAX_UTOOLS_DRAG_GRANTS_PER_LEASE);
+    }
+}
+
+fn utools_projected_command_matchers(
+    state: &AppState,
+    plugin_id: &str,
+    command_id: &str,
+) -> Result<Vec<crate::models::UtoolsTextMatcherInfo>, String> {
+    if let Ok(matchers) = state.plugins.utools_command_matchers(plugin_id, command_id) {
+        return Ok(matchers);
+    }
+    if !state.plugins.uses_utools_compatibility(plugin_id)? {
+        return Err("Context matcher authorization requires a verified uTools package.".to_owned());
+    }
+    let feature = utools_dynamic_features(&state.plugin_settings, plugin_id)
+        .into_iter()
+        .find(|feature| {
+            utools_dynamic_feature_matches_platform(feature)
+                && utools_dynamic_feature_command_id(&feature.code) == command_id
+        })
+        .ok_or_else(|| "The selected uTools dynamic matcher no longer exists.".to_owned())?;
+    let matchers = feature
+        .cmds
+        .iter()
+        .filter(|value| value.is_object())
+        .map(project_utools_matcher_value)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if matchers.is_empty() {
+        return Err("The selected uTools dynamic command has no context matchers.".to_owned());
+    }
+    Ok(matchers)
+}
+
+#[tauri::command]
+pub fn authorize_utools_context_command(
+    plugin_id: String,
+    command_id: String,
+    matcher_index: usize,
+    frontend_lease_id: String,
+    action: UtoolsContextMatchRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if !state
+        .plugin_assets
+        .is_active_surface_for(&frontend_lease_id, &plugin_id)
+    {
+        return Err("The uTools matcher surface changed before context authorization.".to_owned());
+    }
+    let matchers = utools_projected_command_matchers(&state, &plugin_id, &command_id)?;
+    let matcher = matchers
+        .get(matcher_index)
+        .ok_or_else(|| "The selected uTools matcher no longer exists.".to_owned())?;
+    let files = if action.matcher_type == "files" {
+        Some(prepare_utools_context_files(&action.payload)?)
+    } else {
+        None
+    };
+    let window = if action.matcher_type == "window" {
+        if !action.payload.is_null() {
+            return Err(
+                "uTools window matcher authorization accepts no renderer payload.".to_owned(),
+            );
+        }
+        Some(crate::utools_foreground::read_window_payload(
+            state.previous_foreground()?,
+        )?)
+    } else {
+        None
+    };
+    let accepted = if let Some(window) = window.as_ref() {
+        utools_window_matcher_accepts(matcher, window)?
+    } else {
+        utools_context_matcher_accepts(matcher, &action, files.as_deref())?
+    };
+    if !accepted {
+        return Err("The selected content no longer matches this uTools command.".to_owned());
+    }
+    match action.matcher_type.as_str() {
+        "img" => Ok(json!({
+            "type": "img",
+            "payload": validate_utools_context_image(&action.payload)?,
+        })),
+        "files" => {
+            let files = files.expect("files matcher authorization prepares files");
+            remember_utools_context_file_grants(
+                &state.host,
+                &plugin_id,
+                &frontend_lease_id,
+                &files,
+            );
+            Ok(json!({
+                "type": "file",
+                "payload": files.iter().map(|file| json!({
+                    "isFile": file.prepared.kind() == LocalOpenKind::File,
+                    "isDirectory": file.prepared.kind() == LocalOpenKind::Folder,
+                    "name": file.name,
+                    "path": renderer_display_path(file.prepared.path()),
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        "window" => Ok(json!({
+            "type": "window",
+            "payload": window.expect("window matcher authorization prepares a window"),
+        })),
+        _ => Err("uTools context matcher type must be img, files, or window.".to_owned()),
+    }
 }
 
 #[tauri::command]
@@ -11222,6 +11610,9 @@ pub fn run() {
             unpin_launcher_shortcut,
             list_plugins,
             match_utools_text_commands,
+            match_utools_context_commands,
+            match_utools_window_commands,
+            authorize_utools_context_command,
             set_plugin_command_shortcut,
             reset_plugin_command_shortcut,
             crate::detached_plugin_window::open_detached_plugin_window,
@@ -12612,20 +13003,44 @@ fn validate_utools_dynamic_feature(value: &Value) -> Result<UtoolsDynamicFeature
     }
     if feature.cmds.is_empty() || feature.cmds.len() > MAX_UTOOLS_DYNAMIC_COMMANDS {
         return Err(format!(
-            "uTools dynamic features require 1-{MAX_UTOOLS_DYNAMIC_COMMANDS} direct text commands."
+            "uTools dynamic features require 1-{MAX_UTOOLS_DYNAMIC_COMMANDS} direct text commands or matcher objects."
         ));
     }
     let mut commands = Vec::with_capacity(feature.cmds.len());
     for command in feature.cmds {
-        let command = command.trim().to_owned();
-        if command.is_empty()
-            || command.chars().count() > 80
-            || command.chars().any(char::is_control)
-        {
+        if let Some(command) = command.as_str() {
+            let command = command.trim().to_owned();
+            if command.is_empty()
+                || command.chars().count() > 80
+                || command.chars().any(char::is_control)
+            {
+                return Err(
+                    "uTools dynamic feature commands must contain 1-80 non-control characters."
+                        .to_owned(),
+                );
+            }
+            let command = Value::String(command);
+            if !commands.contains(&command) {
+                commands.push(command);
+            }
+            continue;
+        }
+        if !command.is_object() {
             return Err(
-                "uTools dynamic feature commands must contain 1-80 non-control characters."
-                    .to_owned(),
+                "uTools dynamic feature commands must be strings or matcher objects.".to_owned(),
             );
+        }
+        if project_utools_matcher_value(&command)?.is_none() {
+            return Err(
+                "This uTools dynamic matcher type is not projected by the host.".to_owned(),
+            );
+        }
+        if serde_json::to_vec(&command)
+            .map_err(|error| format!("Could not encode uTools dynamic matcher: {error}"))?
+            .len()
+            > 4_096
+        {
+            return Err("A uTools dynamic matcher exceeds the 4 KiB declaration limit.".to_owned());
         }
         if !commands.contains(&command) {
             commands.push(command);
@@ -12727,17 +13142,31 @@ fn project_utools_dynamic_features(
             {
                 continue;
             }
+            let keywords = feature
+                .cmds
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let matchers = feature
+                .cmds
+                .iter()
+                .filter(|value| value.is_object())
+                .filter_map(|value| project_utools_matcher_value(value).ok().flatten())
+                .collect::<Vec<_>>();
+            let fallback_name = keywords
+                .first()
+                .cloned()
+                .or_else(|| matchers.first().map(|matcher| matcher.label.clone()))
+                .unwrap_or_else(|| feature.code.clone());
             plugin.commands.push(PluginCommandInfo {
                 id: command_id,
-                name: feature
-                    .explain
-                    .clone()
-                    .unwrap_or_else(|| feature.cmds[0].clone()),
+                name: feature.explain.clone().unwrap_or(fallback_name),
                 description: feature.explain.clone(),
                 icon_src: None,
                 execution: "frontend".to_owned(),
-                keywords: feature.cmds,
-                utools_text_matchers: Vec::new(),
+                keywords,
+                utools_text_matchers: matchers,
                 shortcut: None,
                 shortcut_registration: None,
                 shortcut_error: None,
@@ -12974,6 +13403,10 @@ mod tests {
             flags: "i".to_owned(),
             min_length: Some(7),
             max_length: Some(7),
+            file_type: None,
+            extensions: Vec::new(),
+            window_apps: Vec::new(),
+            window_classes: Vec::new(),
         };
         assert!(super::utools_text_matcher_accepts(&regex, "#0A84FF", 7).unwrap());
         assert!(!super::utools_text_matcher_accepts(&regex, "#fff", 4).unwrap());
@@ -12985,9 +13418,55 @@ mod tests {
             flags: String::new(),
             min_length: Some(1),
             max_length: Some(500),
+            file_type: None,
+            extensions: Vec::new(),
+            window_apps: Vec::new(),
+            window_classes: Vec::new(),
         };
         assert!(super::utools_text_matcher_accepts(&over, "hello", 5).unwrap());
         assert!(!super::utools_text_matcher_accepts(&over, "hello\nworld", 11).unwrap());
+    }
+
+    #[test]
+    fn utools_window_matchers_require_exact_app_class_and_safe_title_regex() {
+        let matcher = UtoolsTextMatcherInfo {
+            matcher_type: "window".to_owned(),
+            label: "Pin Notepad".to_owned(),
+            pattern: Some("Notepad|记事本".to_owned()),
+            flags: "i".to_owned(),
+            min_length: None,
+            max_length: None,
+            file_type: None,
+            extensions: Vec::new(),
+            window_apps: vec!["notepad.exe".to_owned()],
+            window_classes: vec!["notepad".to_owned()],
+        };
+        let window = crate::utools_foreground::MatchWindowPayload {
+            id: 42,
+            class_name: "Notepad".to_owned(),
+            title: "Untitled - Notepad".to_owned(),
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+            app_path: r"C:\Windows\System32\notepad.exe".to_owned(),
+            pid: 1234,
+            app: "NOTEPAD.EXE".to_owned(),
+        };
+
+        assert!(super::utools_window_matcher_accepts(&matcher, &window).unwrap());
+
+        let mut wrong_app = window.clone();
+        wrong_app.app = "write.exe".to_owned();
+        assert!(!super::utools_window_matcher_accepts(&matcher, &wrong_app).unwrap());
+
+        let mut wrong_class = window.clone();
+        wrong_class.class_name = "Chrome_WidgetWin_1".to_owned();
+        assert!(!super::utools_window_matcher_accepts(&matcher, &wrong_class).unwrap());
+
+        let mut wrong_title = window;
+        wrong_title.title = "Calculator".to_owned();
+        assert!(!super::utools_window_matcher_accepts(&matcher, &wrong_title).unwrap());
     }
 
     #[test]
@@ -13012,12 +13491,26 @@ mod tests {
             "explain": " Documentation ",
             "platform": ["win32", "darwin"],
             "mainHide": true,
-            "cmds": [" Docs ", "Docs", "文档"]
+            "cmds": [" Docs ", "Docs", "文档", {
+                "type": "regex",
+                "label": "打开工单",
+                "match": "/^IHUB-[0-9]+$/i",
+                "minLength": 6,
+                "maxLength": 32
+            }]
         }))
         .expect("bounded direct commands should be accepted");
         assert_eq!(feature.code, "docs");
         assert_eq!(feature.explain.as_deref(), Some("Documentation"));
-        assert_eq!(feature.cmds, vec!["Docs", "文档"]);
+        assert_eq!(feature.cmds[0], json!("Docs"));
+        assert_eq!(feature.cmds[1], json!("文档"));
+        assert_eq!(
+            super::project_utools_matcher_value(&feature.cmds[2])
+                .expect("dynamic matcher should validate")
+                .expect("regex matcher should project")
+                .matcher_type,
+            "regex"
+        );
         assert_eq!(
             utools_dynamic_feature_command_id("docs"),
             "utools-dynamic-dc47fd6761f51d72"

@@ -2718,6 +2718,46 @@ function dynamicFeatureCommandId(code) {{
   }}
   return "utools-dynamic-" + hash.toString(16).padStart(16, "0");
 }}
+function normalizeDynamicMatcher(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = value.type;
+  const label = typeof value.label === "string" ? value.label.trim() : "";
+  if (!["regex", "over", "img", "files", "window"].includes(type)
+    || !label || Array.from(label).length > 160 || /[\u0000-\u001f\u007f]/.test(label)) return null;
+  const lengthKeysValid = (allowed) => Object.keys(value).every((key) => allowed.has(key))
+    && ["minLength", "maxLength"].every((key) => value[key] === undefined
+      || (Number.isInteger(value[key]) && value[key] >= 0 && value[key] <= 10000));
+  if (type === "regex") {{
+    if (!lengthKeysValid(new Set(["type", "label", "match", "minLength", "maxLength"]))
+      || typeof value.match !== "string" || value.match.length < 2 || value.match.length > 4096) return null;
+  }} else if (type === "over") {{
+    if (!lengthKeysValid(new Set(["type", "label", "exclude", "minLength", "maxLength"]))
+      || (value.exclude !== undefined && (typeof value.exclude !== "string" || value.exclude.length < 2 || value.exclude.length > 4096))) return null;
+  }} else if (type === "img") {{
+    if (Object.keys(value).some((key) => key !== "type" && key !== "label")) return null;
+  }} else if (type === "files") {{
+    if (!lengthKeysValid(new Set(["type", "label", "fileType", "extensions", "match", "minLength", "maxLength"]))) return null;
+    if (value.fileType !== undefined && !["file", "directory"].includes(value.fileType)) return null;
+    if (value.extensions !== undefined && (!Array.isArray(value.extensions) || value.extensions.length > 64
+      || value.extensions.some((extension) => typeof extension !== "string" || !extension.trim() || Array.from(extension).length > 32))) return null;
+    if (value.match !== undefined && (typeof value.match !== "string" || value.match.length < 2 || value.match.length > 4096)) return null;
+    if (value.match !== undefined && Array.isArray(value.extensions) && value.extensions.length) return null;
+  }} else {{
+    if (Object.keys(value).some((key) => key !== "type" && key !== "label" && key !== "match")) return null;
+    const match = value.match;
+    if (!match || typeof match !== "object" || Array.isArray(match)
+      || Object.keys(match).some((key) => !["app", "title", "class"].includes(key))
+      || !Array.isArray(match.app) || match.app.length < 1 || match.app.length > 64
+      || match.app.some((app) => typeof app !== "string" || !app.trim() || Array.from(app).length > 255)
+      || (match.class !== undefined && (!Array.isArray(match.class) || match.class.length > 64
+        || match.class.some((name) => typeof name !== "string" || !name.trim() || Array.from(name).length > 255)))
+      || (match.title !== undefined && (typeof match.title !== "string" || match.title.length < 2 || match.title.length > 4096))) return null;
+  }}
+  let serialized;
+  try {{ serialized = JSON.stringify(value); }} catch {{ return null; }}
+  if (new TextEncoder().encode(serialized).byteLength > 4096) return null;
+  return JSON.parse(serialized);
+}}
 function normalizeDynamicFeature(value) {{
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const allowed = new Set(["code", "explain", "icon", "platform", "mainHide", "mainPush", "cmds"]);
@@ -2727,10 +2767,16 @@ function normalizeDynamicFeature(value) {{
   if (!Array.isArray(value.cmds) || value.cmds.length < 1 || value.cmds.length > 16) return null;
   const cmds = [];
   for (const rawCommand of value.cmds) {{
-    if (typeof rawCommand !== "string") return null;
-    const command = rawCommand.trim();
-    if (!command || Array.from(command).length > 80 || /[\u0000-\u001f\u007f]/.test(command)) return null;
-    if (!cmds.includes(command)) cmds.push(command);
+    if (typeof rawCommand === "string") {{
+      const command = rawCommand.trim();
+      if (!command || Array.from(command).length > 80 || /[\u0000-\u001f\u007f]/.test(command)) return null;
+      if (!cmds.includes(command)) cmds.push(command);
+      continue;
+    }}
+    const matcher = normalizeDynamicMatcher(rawCommand);
+    if (!matcher) return null;
+    const serialized = JSON.stringify(matcher);
+    if (!cmds.some((command) => typeof command === "object" && JSON.stringify(command) === serialized)) cmds.push(matcher);
   }}
   const feature = {{ code, cmds }};
   if (value.explain !== undefined) {{
@@ -3139,9 +3185,37 @@ window.addEventListener("message", (event) => {{
     return;
   }}
   const matchAction = message.payload && message.payload.utoolsMatchAction;
-  if (matchAction && typeof matchAction === "object" && ["regex", "over"].includes(matchAction.type) && typeof matchAction.payload === "string") {{
-    invoke(enterCallbacks, {{ code: command.code, type: matchAction.type, payload: matchAction.payload, from: "main" }});
-    return;
+  if (matchAction && typeof matchAction === "object") {{
+    const textMatch = ["regex", "over"].includes(matchAction.type) && typeof matchAction.payload === "string";
+    const imageMatch = matchAction.type === "img"
+      && typeof matchAction.payload === "string"
+      && matchAction.payload.startsWith("data:image/png;base64,")
+      && matchAction.payload.length <= 5592430;
+    const fileMatch = matchAction.type === "file"
+      && Array.isArray(matchAction.payload)
+      && matchAction.payload.length >= 1
+      && matchAction.payload.length <= 16
+      && matchAction.payload.every((file) => file && typeof file === "object"
+        && typeof file.isFile === "boolean" && typeof file.isDirectory === "boolean"
+        && file.isFile !== file.isDirectory
+        && typeof file.name === "string" && file.name.length >= 1 && file.name.length <= 1024
+        && typeof file.path === "string" && file.path.length >= 1 && file.path.length <= 8192);
+    const window = matchAction.type === "window" && matchAction.payload && typeof matchAction.payload === "object"
+      ? matchAction.payload
+      : null;
+    const windowMatch = window
+      && Number.isSafeInteger(window.id) && window.id > 0
+      && Number.isInteger(window.pid) && window.pid > 0
+      && [window.x, window.y, window.width, window.height].every(Number.isInteger)
+      && window.width > 0 && window.height > 0
+      && typeof window.class === "string" && window.class.length <= 1024
+      && typeof window.title === "string" && window.title.length <= 16384
+      && typeof window.appPath === "string" && window.appPath.length >= 1 && window.appPath.length <= 8192
+      && typeof window.app === "string" && window.app.length >= 1 && window.app.length <= 255;
+    if (textMatch || imageMatch || fileMatch || windowMatch) {{
+      invoke(enterCallbacks, {{ code: command.code, type: matchAction.type, payload: matchAction.payload, from: "main" }});
+      return;
+    }}
   }}
   const redirectAction = projectedRedirectAction(message.payload && message.payload.utoolsAction);
   if (redirectAction) {{
@@ -4355,6 +4429,8 @@ mod tests {
         assert!(script.contains("getFeatures"));
         assert!(script.contains("setFeature"));
         assert!(script.contains("removeFeature"));
+        assert!(script.contains("normalizeDynamicMatcher"));
+        assert!(script.contains("[\"regex\", \"over\", \"img\", \"files\", \"window\"]"));
         assert!(script.contains("compatibility.utools.features.snapshot"));
         assert!(script.contains("compatibility.utools.features.set"));
         assert!(script.contains("compatibility.utools.features.remove"));

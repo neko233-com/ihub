@@ -74,6 +74,11 @@ import {
   type UtoolsTextCommandMatch,
 } from "./lib/utools-text-matchers";
 import {
+  normalizeUtoolsMatcherImage,
+  utoolsContextMatcherSearchResults,
+  type UtoolsContextCommandMatch,
+} from "./lib/utools-context-matchers";
+import {
   completePluginSearchProviderReadiness,
   createPluginSearchProviderReadinessBootstrap,
   transitionPluginSearchProviderReadiness,
@@ -849,7 +854,7 @@ function createFrontendCommandEvent(
   commandId: string,
   utoolsAction?: UtoolsRedirectAction,
   input?: string,
-  utoolsMatchAction?: { type: string; payload: string },
+  utoolsMatchAction?: { type: string; payload: unknown },
 ): PluginFrontendEvent {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -928,6 +933,16 @@ interface PendingLauncherContextDispatch {
   generation: number;
   /** The exact frontend source that was visible when the person confirmed.
    * A plugin refresh can keep its id while replacing its code/lease. */
+  pluginSourceKey: string;
+}
+
+interface PendingUtoolsContextDispatch {
+  plugin: PluginInfo;
+  command: PluginCommandInfo;
+  matcherType: "img" | "files" | "window";
+  matcherIndex: number;
+  payload: string | string[] | null;
+  generation: number;
   pluginSourceKey: string;
 }
 
@@ -1097,6 +1112,8 @@ export function App() {
   }
   const hostLogCoordinator = hostLogCoordinatorRef.current;
   const pendingLauncherContextDispatchRef = useRef<PendingLauncherContextDispatch | null>(null);
+  const pendingUtoolsContextDispatchRef = useRef<PendingUtoolsContextDispatch | null>(null);
+  const pastedImageNormalizationRef = useRef(0);
   const activeLauncherContextSurfaceRef = useRef<ActiveLauncherContextSurface | null>(null);
   const issuedLauncherContextRef = useRef<IssuedLauncherContext | null>(null);
   const issuedLauncherContextExpiryTimerRef = useRef<number | null>(null);
@@ -1109,6 +1126,7 @@ export function App() {
   const [query, setQuery] = useState("");
   const [pastedFileResults, setPastedFileResults] = useState<SearchResult[]>([]);
   const [pastedImage, setPastedImage] = useState<LauncherPastedImage | null>(null);
+  const [pastedImageDataUrl, setPastedImageDataUrl] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>(mockResults);
   const [searchIconCache, setSearchIconCache] = useState<SystemIconMap>(() =>
     isDesktop()
@@ -1118,6 +1136,8 @@ export function App() {
     useState<SpotlightNativeIconPendingBatch | null>(null);
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [utoolsMatcherResults, setUtoolsMatcherResults] = useState<SearchResult[]>([]);
+  const [utoolsContextMatcherResults, setUtoolsContextMatcherResults] = useState<SearchResult[]>([]);
+  const [utoolsWindowMatcherResults, setUtoolsWindowMatcherResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
   const [quickNotes, setQuickNotes] = useState(readLauncherQuickNotes);
@@ -1274,6 +1294,7 @@ export function App() {
     launcherContextGenerationRef.current += 1;
     launcherContextDispatchKeyRef.current = null;
     pendingLauncherContextDispatchRef.current = null;
+    pendingUtoolsContextDispatchRef.current = null;
     activeLauncherContextSurfaceRef.current = null;
     const issued = issuedLauncherContextRef.current;
     clearIssuedLauncherContextReference(issued);
@@ -1448,12 +1469,23 @@ export function App() {
     [pastedFileResults, pastedImage, plugins, query],
   );
   const launcherContextActionItems = useMemo<SpotlightLauncherItem[]>(
-    () => launcherContextActions.map(spotlightItemForContextAction),
-    [launcherContextActions],
+    () => [
+      ...launcherContextActions.map(spotlightItemForContextAction),
+      ...utoolsContextMatcherResults.map((result) => spotlightItemForSearchResult(result)),
+      ...utoolsWindowMatcherResults.map((result) => spotlightItemForSearchResult(result)),
+    ],
+    [launcherContextActions, utoolsContextMatcherResults, utoolsWindowMatcherResults],
   );
   const launcherContextActionById = useMemo<Map<string, LauncherContextAction>>(
     () => new Map(launcherContextActions.map((action) => [action.id, action] as const)),
     [launcherContextActions],
+  );
+  const utoolsContextMatcherById = useMemo(
+    () => new Map(
+      [...utoolsContextMatcherResults, ...utoolsWindowMatcherResults]
+        .map((result) => [result.id, result] as const),
+    ),
+    [utoolsContextMatcherResults, utoolsWindowMatcherResults],
   );
   const pluginCenterLauncherContextPreview = useMemo(
     () => pluginCenterLauncherContext
@@ -1948,7 +1980,9 @@ export function App() {
         showToast("剪贴板中的文件已不存在或无法读取。");
         return;
       }
+      pastedImageNormalizationRef.current += 1;
       setPastedImage(null);
+      setPastedImageDataUrl(null);
       setPastedFileResults(next);
       setQuery("");
       showToast(`已接收 ${next.length} 个文件；选择后按 Enter 打开。`);
@@ -1960,8 +1994,21 @@ export function App() {
   const handlePastedImage = useCallback((image: LauncherPastedImage) => {
     setPastedFileResults([]);
     setPastedImage(image);
+    setPastedImageDataUrl(null);
     setQuery("");
     showToast("已接收图片；请选择一个上下文操作。图片不会自动保存或交给插件。");
+    const generation = pastedImageNormalizationRef.current + 1;
+    pastedImageNormalizationRef.current = generation;
+    void normalizeUtoolsMatcherImage(image.blob).then((dataUrl) => {
+      if (pastedImageNormalizationRef.current === generation) {
+        setPastedImageDataUrl(dataUrl);
+      }
+    }).catch((error) => {
+      if (pastedImageNormalizationRef.current === generation) {
+        setPastedImageDataUrl(null);
+        showToast(error instanceof Error ? error.message : "无法准备 uTools 图片匹配器。内置图片工具仍可使用。");
+      }
+    });
   }, [showToast]);
 
   const handleNativePastedImage = useCallback(async () => {
@@ -1991,8 +2038,65 @@ export function App() {
   }, [handlePastedImage, showToast]);
 
   const clearPastedImage = useCallback(() => {
+    pastedImageNormalizationRef.current += 1;
     setPastedImage(null);
+    setPastedImageDataUrl(null);
   }, []);
+
+  useEffect(() => {
+    if (!pastedImage) {
+      pastedImageNormalizationRef.current += 1;
+      setPastedImageDataUrl(null);
+    }
+  }, [pastedImage]);
+
+  useEffect(() => {
+    if (!isDesktop()) {
+      setUtoolsContextMatcherResults([]);
+      return;
+    }
+    const filePaths = pastedFileResults.flatMap((result) => result.path ? [result.path] : []);
+    const action = filePaths.length > 0
+      ? { matcherType: "files", payload: filePaths }
+      : pastedImageDataUrl
+        ? { matcherType: "img", payload: pastedImageDataUrl }
+        : null;
+    if (!action) {
+      setUtoolsContextMatcherResults([]);
+      return;
+    }
+    let disposed = false;
+    setUtoolsContextMatcherResults([]);
+    void command<UtoolsContextCommandMatch[]>("match_utools_context_commands", { action })
+      .then((matches) => {
+        if (!disposed) setUtoolsContextMatcherResults(utoolsContextMatcherSearchResults(matches));
+      })
+      .catch(() => {
+        if (!disposed) setUtoolsContextMatcherResults([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [pastedFileResults, pastedImageDataUrl, plugins]);
+
+  useEffect(() => {
+    if (!isDesktop() || surface !== "launcher") {
+      setUtoolsWindowMatcherResults([]);
+      return;
+    }
+    let disposed = false;
+    setUtoolsWindowMatcherResults([]);
+    void command<UtoolsContextCommandMatch[]>("match_utools_window_commands")
+      .then((matches) => {
+        if (!disposed) setUtoolsWindowMatcherResults(utoolsContextMatcherSearchResults(matches));
+      })
+      .catch(() => {
+        if (!disposed) setUtoolsWindowMatcherResults([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [launcherFocusSignal, plugins, surface]);
 
   const refreshStatus = useCallback(async () => {
     if (!isDesktop()) {
@@ -3412,6 +3516,60 @@ export function App() {
     setSurface("plugin-center");
   };
 
+  const beginUtoolsContextMatcherDispatch = (result: SearchResult) => {
+    if (!isDesktop()) {
+      showToast("uTools 图片、文件与窗口匹配指令只在 iHub 桌面版中可用。");
+      return;
+    }
+    const matcherType = result.utoolsMatcherType;
+    const matcherIndex = result.utoolsMatcherIndex;
+    if (matcherType !== "img" && matcherType !== "files" && matcherType !== "window") {
+      showToast("该 uTools 上下文匹配指令类型无效；未共享任何内容。");
+      return;
+    }
+    const plugin = plugins.find((candidate) => candidate.id === result.pluginId && candidate.enabled !== false);
+    const pluginCommand = plugin && Array.isArray(plugin.commands)
+      ? plugin.commands.find((candidate) => candidate.id === result.commandId)
+      : undefined;
+    const pluginSourceKey = pluginFrontendSourceKey(plugin ?? null);
+    const filePaths = pastedFileResults.flatMap((candidate) => candidate.path ? [candidate.path] : []);
+    const payload = matcherType === "files"
+      ? filePaths.length >= 1 && filePaths.length <= 16 ? filePaths : null
+      : matcherType === "img"
+        ? pastedImageDataUrl
+        : matcherType === "window"
+          ? null
+          : undefined;
+    if (
+      !plugin
+      || !pluginCommand
+      || !pluginSourceKey
+      || !Number.isInteger(matcherIndex)
+      || matcherIndex === undefined
+      || matcherIndex < 0
+      || payload === undefined
+      || (matcherType !== "window" && !payload)
+    ) {
+      showToast("该 uTools 匹配指令或已粘贴内容已经变化；未共享任何内容。");
+      return;
+    }
+
+    invalidateLauncherContextHandoff();
+    pendingUtoolsContextDispatchRef.current = {
+      plugin,
+      command: pluginCommand,
+      matcherType,
+      matcherIndex,
+      payload,
+      generation: launcherContextGenerationRef.current,
+      pluginSourceKey,
+    };
+    setPendingPluginEvent(null);
+    setActivePlugin(plugin);
+    setSurface("plugin");
+    showToast(`正在验证“${plugin.name} / ${result.name}”的已粘贴内容…`);
+  };
+
   const openSettings = () => {
     invalidateLauncherContextHandoff();
     setSettingsNavigationSection("preferences");
@@ -3629,10 +3787,100 @@ export function App() {
     showToast,
   ]);
 
+  const dispatchUtoolsContextAfterSurfaceReady = useCallback((pluginId: string, frontendLeaseId: string) => {
+    const pending = pendingUtoolsContextDispatchRef.current;
+    const currentPlugin = pluginsRef.current.find((plugin) => plugin.id === pluginId) ?? null;
+    if (!pending || pending.plugin.id !== pluginId) {
+      return;
+    }
+    if (
+      pending.plugin.enabled === false
+      || !currentPlugin
+      || pluginFrontendSourceKey(currentPlugin) !== pending.pluginSourceKey
+    ) {
+      invalidateLauncherContextHandoff();
+      return;
+    }
+    const dispatchKey = [
+      "utools-context",
+      pending.generation,
+      pending.plugin.id,
+      pending.command.id,
+      pending.matcherType,
+      pending.matcherIndex,
+      frontendLeaseId,
+    ].join(":");
+    if (launcherContextDispatchKeyRef.current === dispatchKey) {
+      return;
+    }
+    launcherContextDispatchKeyRef.current = dispatchKey;
+    activeLauncherContextSurfaceRef.current = {
+      pluginId,
+      leaseId: frontendLeaseId,
+      generation: pending.generation,
+      pluginSourceKey: pending.pluginSourceKey,
+    };
+    pendingUtoolsContextDispatchRef.current = null;
+
+    const isStillCurrent = () => {
+      const active = activeLauncherContextSurfaceRef.current;
+      const latestPlugin = pluginsRef.current.find((plugin) => plugin.id === pluginId) ?? null;
+      return (
+        launcherContextGenerationRef.current === pending.generation
+        && active?.pluginId === pluginId
+        && active?.leaseId === frontendLeaseId
+        && active?.generation === pending.generation
+        && active?.pluginSourceKey === pending.pluginSourceKey
+        && pluginFrontendSourceKey(latestPlugin) === pending.pluginSourceKey
+      );
+    };
+
+    void command<{ type: "img" | "file" | "window"; payload: unknown }>("authorize_utools_context_command", {
+      pluginId: pending.plugin.id,
+      commandId: pending.command.id,
+      matcherIndex: pending.matcherIndex,
+      frontendLeaseId,
+      action: {
+        matcherType: pending.matcherType,
+        payload: pending.payload,
+      },
+    }).then((action) => {
+      if (!isStillCurrent()) {
+        return;
+      }
+      setPendingPluginEvent(createFrontendCommandEvent(
+        pending.plugin.id,
+        pending.command.id,
+        undefined,
+        undefined,
+        action,
+      ));
+      showToast(`已向“${pending.plugin.name}”发送一次${action.type === "img" ? "图片" : action.type === "window" ? "窗口" : "文件"}匹配内容。`);
+    }).catch((error) => {
+      if (launcherContextGenerationRef.current === pending.generation) {
+        showToast(error instanceof Error ? error.message : "无法验证该 uTools 匹配指令；未共享任何内容。");
+      }
+    }).finally(() => {
+      if (launcherContextDispatchKeyRef.current === dispatchKey) {
+        launcherContextDispatchKeyRef.current = null;
+      }
+    });
+  }, [invalidateLauncherContextHandoff, showToast]);
+
+  const dispatchPluginContextAfterSurfaceReady = useCallback((pluginId: string, frontendLeaseId: string) => {
+    dispatchLauncherContextAfterSurfaceReady(pluginId, frontendLeaseId);
+    dispatchUtoolsContextAfterSurfaceReady(pluginId, frontendLeaseId);
+  }, [dispatchLauncherContextAfterSurfaceReady, dispatchUtoolsContextAfterSurfaceReady]);
+
   const discardPendingLauncherContextForSurface = useCallback((pluginId: string, leaseId?: string) => {
     const pending = pendingLauncherContextDispatchRef.current;
+    const pendingUtools = pendingUtoolsContextDispatchRef.current;
     const active = activeLauncherContextSurfaceRef.current;
-    if (pending?.plugin.id !== pluginId && active?.pluginId !== pluginId) {
+    if (
+      pending?.plugin.id !== pluginId
+      && pendingUtools?.plugin.id !== pluginId
+      && active?.pluginId !== pluginId
+    ) {
       return;
     }
     // An error from an old iframe must not cancel a newer source for the same
@@ -4029,6 +4277,11 @@ export function App() {
   };
 
   const activateSpotlightItem = (item: SpotlightLauncherItem) => {
+    const utoolsContextMatcher = utoolsContextMatcherById.get(item.id);
+    if (utoolsContextMatcher) {
+      beginUtoolsContextMatcherDispatch(utoolsContextMatcher);
+      return;
+    }
     const contextAction = launcherContextActionById.get(item.id);
     if (contextAction) {
       activateContextAction(contextAction);
@@ -4732,7 +4985,7 @@ export function App() {
             onRuntimeDisposed={clearPluginSearchProviders}
             onSearchProviderRegistered={markSearchProviderRegistered}
             onSearchProviderUnregistered={unmarkSearchProvider}
-            onSurfaceReady={dispatchLauncherContextAfterSurfaceReady}
+            onSurfaceReady={dispatchPluginContextAfterSurfaceReady}
             onSurfaceUnavailable={discardPendingLauncherContextForSurface}
             onShowMainWindow={showPluginHostWindow}
             onToast={showToast}

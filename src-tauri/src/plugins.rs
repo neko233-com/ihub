@@ -462,6 +462,16 @@ struct UtoolsFeatureMatcher {
     extensions: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UtoolsWindowMatcherRule {
+    app: Vec<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default, rename = "class")]
+    classes: Vec<String>,
+}
+
 /// The subset of a manifest that can enlarge what a plugin can ask the host
 /// to do or introduce executable code. It is intentionally normalized into
 /// sets: reordering scopes or target-specific binary entries is not a new
@@ -2395,6 +2405,36 @@ impl PluginManager {
         Ok(manifest.compatibility.is_utools())
     }
 
+    /// Returns the immutable matcher catalog for one declared uTools frontend
+    /// command. Callers use the exact index as a short-lived UI selection
+    /// coordinate, then re-read this catalog before disclosing context.
+    pub(crate) fn utools_command_matchers(
+        &self,
+        plugin_id: &str,
+        command_id: &str,
+    ) -> Result<Vec<UtoolsTextMatcherInfo>, String> {
+        self.ensure_frontend_command(plugin_id, command_id)?;
+        let plugin_root = self.resolve_plugin_root(plugin_id)?;
+        let manifest_path = canonical_manifest_path(&plugin_root)?;
+        let manifest = read_manifest(&manifest_path)?;
+        validate_manifest(&manifest)?;
+        if manifest.id != plugin_id || !manifest.compatibility.is_utools() {
+            return Err(format!(
+                "Plugin '{plugin_id}' is not an enabled verified uTools package."
+            ));
+        }
+        manifest
+            .utools_commands
+            .iter()
+            .find(|command| command.command_id == command_id)
+            .map(|command| command.text_matchers.clone())
+            .ok_or_else(|| {
+                format!(
+                    "uTools command '{plugin_id}/{command_id}' has no declared matcher catalog."
+                )
+            })
+    }
+
     /// Returns the manifest-locked MCP catalog for one enabled uTools package.
     /// Callers receive owned JSON values so no package path or mutable manifest
     /// handle crosses the native/runtime boundary.
@@ -4080,6 +4120,10 @@ fn project_utools_text_matcher(
                 flags,
                 min_length: matcher.min_length,
                 max_length: matcher.max_length,
+                file_type: None,
+                extensions: Vec::new(),
+                window_apps: Vec::new(),
+                window_classes: Vec::new(),
             }))
         }
         "over" => {
@@ -4106,9 +4150,169 @@ fn project_utools_text_matcher(
                 flags,
                 min_length: matcher.min_length,
                 max_length: matcher.max_length,
+                file_type: None,
+                extensions: Vec::new(),
+                window_apps: Vec::new(),
+                window_classes: Vec::new(),
             }))
         }
-        "img" | "files" | "window" => Ok(None),
+        "img" => {
+            if matcher.r#match.is_some()
+                || matcher.exclude.is_some()
+                || matcher.min_length.is_some()
+                || matcher.max_length.is_some()
+                || matcher.file_type.is_some()
+                || !matcher.extensions.is_empty()
+            {
+                return Err("uTools img matcher accepts only type and label.".to_owned());
+            }
+            Ok(Some(UtoolsTextMatcherInfo {
+                matcher_type: "img".to_owned(),
+                label: label.to_owned(),
+                pattern: None,
+                flags: String::new(),
+                min_length: None,
+                max_length: None,
+                file_type: None,
+                extensions: Vec::new(),
+                window_apps: Vec::new(),
+                window_classes: Vec::new(),
+            }))
+        }
+        "files" => {
+            if matcher.exclude.is_some() {
+                return Err("uTools files matcher does not accept exclude.".to_owned());
+            }
+            let file_type = matcher
+                .file_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| match value {
+                    "file" | "directory" => Ok(value.to_owned()),
+                    _ => Err("uTools files matcher fileType must be file or directory.".to_owned()),
+                })
+                .transpose()?;
+            if matcher.r#match.is_some() && !matcher.extensions.is_empty() {
+                return Err(
+                    "uTools files matcher match and extensions are mutually exclusive.".to_owned(),
+                );
+            }
+            if matcher.extensions.len() > 64 {
+                return Err("uTools files matcher accepts at most 64 extensions.".to_owned());
+            }
+            let mut extensions = Vec::with_capacity(matcher.extensions.len());
+            for extension in &matcher.extensions {
+                let normalized = extension
+                    .trim()
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase();
+                if normalized.is_empty()
+                    || normalized.chars().count() > 32
+                    || normalized.chars().any(|character| {
+                        !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+                    })
+                {
+                    return Err("uTools files matcher contains an invalid extension.".to_owned());
+                }
+                if !extensions.contains(&normalized) {
+                    extensions.push(normalized);
+                }
+            }
+            let (pattern, flags) = matcher
+                .r#match
+                .as_ref()
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        "uTools files matcher match must be a regex string.".to_owned()
+                    })
+                })
+                .transpose()?
+                .map(parse_utools_regex_literal)
+                .transpose()?
+                .map_or((None, String::new()), |(pattern, flags)| {
+                    (Some(pattern), flags)
+                });
+            Ok(Some(UtoolsTextMatcherInfo {
+                matcher_type: "files".to_owned(),
+                label: label.to_owned(),
+                pattern,
+                flags,
+                min_length: matcher.min_length,
+                max_length: matcher.max_length,
+                file_type,
+                extensions,
+                window_apps: Vec::new(),
+                window_classes: Vec::new(),
+            }))
+        }
+        "window" => {
+            if matcher.exclude.is_some()
+                || matcher.min_length.is_some()
+                || matcher.max_length.is_some()
+                || matcher.file_type.is_some()
+                || !matcher.extensions.is_empty()
+            {
+                return Err(
+                    "uTools window matcher contains fields for another matcher type.".to_owned(),
+                );
+            }
+            let rule: UtoolsWindowMatcherRule = serde_json::from_value(
+                matcher
+                    .r#match
+                    .clone()
+                    .ok_or_else(|| "uTools window matcher requires a match object.".to_owned())?,
+            )
+            .map_err(|error| format!("uTools window matcher rule is invalid: {error}"))?;
+            if rule.app.is_empty() || rule.app.len() > 64 || rule.classes.len() > 64 {
+                return Err(
+                    "uTools window matcher app/class lists are outside host limits.".to_owned(),
+                );
+            }
+            let normalize_values = |values: Vec<String>, field: &str| {
+                let mut normalized = Vec::with_capacity(values.len());
+                for value in values {
+                    let value = value.trim();
+                    if value.is_empty()
+                        || value.chars().count() > 255
+                        || value.chars().any(|character| {
+                            character.is_control() || matches!(character, '/' | '\\')
+                        })
+                    {
+                        return Err(format!(
+                            "uTools window matcher {field} contains an invalid value."
+                        ));
+                    }
+                    let value = value.to_ascii_lowercase();
+                    if !normalized.contains(&value) {
+                        normalized.push(value);
+                    }
+                }
+                Ok(normalized)
+            };
+            let window_apps = normalize_values(rule.app, "app")?;
+            let window_classes = normalize_values(rule.classes, "class")?;
+            let (pattern, flags) = rule
+                .title
+                .as_deref()
+                .map(parse_utools_regex_literal)
+                .transpose()?
+                .map_or((None, String::new()), |(pattern, flags)| {
+                    (Some(pattern), flags)
+                });
+            Ok(Some(UtoolsTextMatcherInfo {
+                matcher_type: "window".to_owned(),
+                label: label.to_owned(),
+                pattern,
+                flags,
+                min_length: None,
+                max_length: None,
+                file_type: None,
+                extensions: Vec::new(),
+                window_apps,
+                window_classes,
+            }))
+        }
         _ => Err(format!(
             "Unsupported uTools feature matcher type '{}'.",
             matcher.matcher_type
@@ -4116,12 +4320,20 @@ fn project_utools_text_matcher(
     }
 }
 
+pub(crate) fn project_utools_matcher_value(
+    value: &Value,
+) -> Result<Option<UtoolsTextMatcherInfo>, String> {
+    let matcher = serde_json::from_value::<UtoolsFeatureMatcher>(value.clone())
+        .map_err(|error| format!("uTools matcher fields are malformed: {error}"))?;
+    project_utools_text_matcher(&matcher)
+}
+
 impl UtoolsManifest {
     /// Projects the public manifest/feature subset into iHub's existing,
     /// manifest-locked command model. One feature becomes one command so a
     /// plugin sees its original `code` when the host dispatches it. Regex and
-    /// over matchers are validated for the native launcher; file, image and
-    /// window context stay out until their host-owned handoff is projected.
+    /// over, image, file and window matchers are validated for the native
+    /// launcher and remain bound to host-owned context handoffs.
     /// Node/Electron preload authority is never inherited.
     fn into_plugin_manifest(self, manifest_path: &Path) -> Result<PluginManifest, String> {
         let main = self
@@ -4200,7 +4412,7 @@ impl UtoolsManifest {
             }
             if keywords.is_empty() && text_matchers.is_empty() {
                 return Err(format!(
-                    "uTools feature '{}' has no direct, regex, or over text command; image, file, and window matchers are not imported yet.",
+                    "uTools feature '{}' has no supported direct or matcher command.",
                     feature.code
                 ));
             }
@@ -6043,7 +6255,7 @@ mod tests {
     "code": "pick-color",
     "explain": "屏幕取色",
     "mainPush": true,
-    "cmds": ["取色", { "type": "regex", "label": "从文本取色", "match": "/^#[0-9a-f]{6}$/i", "minLength": 7, "maxLength": 7 }, { "type": "over", "label": "分析文本", "exclude": "/\\n/", "maxLength": 500 }]
+    "cmds": ["取色", { "type": "regex", "label": "从文本取色", "match": "/^#[0-9a-f]{6}$/i", "minLength": 7, "maxLength": 7 }, { "type": "over", "label": "分析文本", "exclude": "/\\n/", "maxLength": 500 }, { "type": "img", "label": "分析图片" }, { "type": "files", "label": "批量处理图片", "fileType": "file", "extensions": ["png", ".JPG"], "minLength": 1, "maxLength": 16 }, { "type": "window", "label": "置顶记事本", "match": { "app": ["notepad.exe"], "title": "/记事本|Notepad/i", "class": ["Notepad"] } }]
   }]
 }"#,
         )
@@ -6058,7 +6270,7 @@ mod tests {
         assert_eq!(manifest.utools_commands[0].code, "pick-color");
         assert!(manifest.utools_commands[0].main_push);
         assert_eq!(manifest.utools_commands[0].keywords, vec!["取色"]);
-        assert_eq!(manifest.utools_commands[0].text_matchers.len(), 2);
+        assert_eq!(manifest.utools_commands[0].text_matchers.len(), 5);
         assert_eq!(
             manifest.utools_commands[0].text_matchers[0].matcher_type,
             "regex"
@@ -6066,6 +6278,18 @@ mod tests {
         assert_eq!(
             manifest.utools_commands[0].text_matchers[1].matcher_type,
             "over"
+        );
+        assert_eq!(
+            manifest.utools_commands[0].text_matchers[2].matcher_type,
+            "img"
+        );
+        assert_eq!(
+            manifest.utools_commands[0].text_matchers[3].extensions,
+            vec!["png", "jpg"]
+        );
+        assert_eq!(
+            manifest.utools_commands[0].text_matchers[4].window_apps,
+            vec!["notepad.exe"]
         );
         assert!(plugin_security_declaration(&manifest)
             .native_declarations

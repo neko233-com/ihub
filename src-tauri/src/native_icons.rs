@@ -2047,7 +2047,20 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn sta_service_extracts_icons_from_production_prepared_paths() {
-        let shell_item = std::env::current_exe().expect("current executable");
+        // Rust test executables do not consistently carry an application icon
+        // resource, so Windows Shell can legitimately return no image for the
+        // current test binary. Exercise the production prepared-path bridge
+        // with a stable, icon-bearing system executable by default while
+        // retaining an explicit CI override.
+        let shell_item = std::env::var_os("IHUB_NATIVE_ICON_TEST_PATH")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("WINDIR")
+                    .map(PathBuf::from)
+                    .map(|root| root.join("System32").join("notepad.exe"))
+                    .filter(|path| path.is_file())
+            })
+            .unwrap_or_else(|| std::env::current_exe().expect("current executable"));
         let prepared = crate::system_open::prepare_local_open(
             &shell_item,
             Some(crate::system_open::LocalOpenKind::File),

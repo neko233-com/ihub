@@ -126,8 +126,10 @@ pub struct PluginCommandInfo {
     /// Runtime command registration cannot add or replace them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    /// Host-validated public uTools text matcher declarations. Ordinary iHub
-    /// commands project an empty list.
+    /// Host-validated public uTools matcher declarations. Ordinary iHub
+    /// commands project an empty list. The field name stays wire-compatible
+    /// with the first text-matcher release while image/file matchers use the
+    /// same bounded declaration model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub utools_text_matchers: Vec<UtoolsTextMatcherInfo>,
     /// Canonical manifest-declared global accelerator, when present.
@@ -156,6 +158,14 @@ pub struct UtoolsTextMatcherInfo {
     pub min_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_apps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_classes: Vec<String>,
 }
 
 /// A plugin-level declarative mapping from a global accelerator to either a

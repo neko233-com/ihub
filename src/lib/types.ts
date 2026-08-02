@@ -28,8 +28,9 @@ export interface SearchResult {
   pluginSearchRequestId?: string;
   pluginSearchResultId?: string;
   pluginPayload?: unknown;
-  utoolsMatcherType?: "regex" | "over" | string;
+  utoolsMatcherType?: "regex" | "over" | "img" | "files" | "window" | string;
   utoolsMatcherPayload?: string;
+  utoolsMatcherIndex?: number;
 }
 
 /** A host-owned pinned file/folder/application. Its ID is opaque: neither the
@@ -302,12 +303,16 @@ export interface PluginCommandInfo {
 }
 
 export interface UtoolsTextMatcherInfo {
-  matcherType: "regex" | "over" | string;
+  matcherType: "regex" | "over" | "img" | "files" | "window" | string;
   label: string;
   pattern?: string;
   flags?: string;
   minLength?: number;
   maxLength?: number;
+  fileType?: "file" | "directory" | string;
+  extensions?: string[];
+  windowApps?: string[];
+  windowClasses?: string[];
 }
 
 export interface PluginGlobalShortcutInfo {
