@@ -12,6 +12,7 @@ use std::{
 };
 
 use chrono::Utc;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ use crate::models::{
     PluginAutomaticUpdateSkip, PluginCommandInfo, PluginCommandResult, PluginGlobalShortcutInfo,
     PluginInfo, PluginLauncherContextPermissionsInfo, PluginLifecycleUpdate,
     PluginSearchProviderInfo, PluginSnapshotIntegrity, PluginSourceLock, PluginUninstallResult,
-    PluginUpdateCheck, PluginUpdateResult,
+    PluginUpdateCheck, PluginUpdateResult, UtoolsTextMatcherInfo,
 };
 use crate::plugin_artwork::{load_plugin_artwork, validate_artwork_relative_path, PluginArtwork};
 
@@ -314,6 +315,8 @@ pub(crate) struct UtoolsCompatCommand {
     pub(crate) code: String,
     pub(crate) keywords: Vec<String>,
     pub(crate) main_push: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) text_matchers: Vec<UtoolsTextMatcherInfo>,
 }
 
 /// Fixed provider identity owned by the compatibility host. Imported package
@@ -440,7 +443,24 @@ enum UtoolsFeatureCommand {
 }
 
 #[derive(Debug, Deserialize)]
-struct UtoolsFeatureMatcher {}
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UtoolsFeatureMatcher {
+    #[serde(rename = "type")]
+    matcher_type: String,
+    label: String,
+    #[serde(default)]
+    r#match: Option<Value>,
+    #[serde(default)]
+    exclude: Option<String>,
+    #[serde(default)]
+    min_length: Option<usize>,
+    #[serde(default)]
+    max_length: Option<usize>,
+    #[serde(default)]
+    file_type: Option<String>,
+    #[serde(default)]
+    extensions: Vec<String>,
+}
 
 /// The subset of a manifest that can enlarge what a plugin can ask the host
 /// to do or introduce executable code. It is intentionally normalized into
@@ -2968,6 +2988,12 @@ impl PluginManager {
                     icon_src,
                     execution: command_execution(&manifest, command).as_str().to_owned(),
                     keywords: normalized_shortcut_keywords(&command.keywords),
+                    utools_text_matchers: manifest
+                        .utools_commands
+                        .iter()
+                        .find(|candidate| candidate.command_id == command.id)
+                        .map(|candidate| candidate.text_matchers.clone())
+                        .unwrap_or_default(),
                     shortcut: command
                         .shortcut
                         .as_deref()
@@ -3962,13 +3988,141 @@ fn read_manifest(path: &Path) -> Result<PluginManifest, String> {
     }
 }
 
+fn parse_utools_regex_literal(value: &str) -> Result<(String, String), String> {
+    if value.len() < 2 || !value.starts_with('/') || value.len() > 4_096 {
+        return Err("uTools text matcher requires a bounded /pattern/flags expression.".to_owned());
+    }
+    let bytes = value.as_bytes();
+    let mut delimiter = None;
+    for index in (1..bytes.len()).rev() {
+        if bytes[index] != b'/' {
+            continue;
+        }
+        let mut escapes = 0usize;
+        let mut cursor = index;
+        while cursor > 0 && bytes[cursor - 1] == b'\\' {
+            escapes += 1;
+            cursor -= 1;
+        }
+        if escapes % 2 == 0 {
+            delimiter = Some(index);
+            break;
+        }
+    }
+    let delimiter =
+        delimiter.ok_or_else(|| "uTools regex matcher is missing its closing '/'.".to_owned())?;
+    let pattern = &value[1..delimiter];
+    let flags = &value[delimiter + 1..];
+    if pattern.is_empty()
+        || pattern.chars().count() > 2_048
+        || flags.len() > 4
+        || !flags
+            .bytes()
+            .all(|flag| matches!(flag, b'i' | b'm' | b's' | b'u'))
+        || flags.bytes().collect::<BTreeSet<_>>().len() != flags.len()
+    {
+        return Err("uTools regex matcher pattern or flags are invalid.".to_owned());
+    }
+    if matches!(pattern, ".*" | "^.*$" | "[\\s\\S]*" | "(.)+" | "(.+)") {
+        return Err(
+            "uTools ignores match-all regex commands; iHub rejects them at import.".to_owned(),
+        );
+    }
+    RegexBuilder::new(pattern)
+        .case_insensitive(flags.contains('i'))
+        .multi_line(flags.contains('m'))
+        .dot_matches_new_line(flags.contains('s'))
+        .unicode(true)
+        .build()
+        .map_err(|error| {
+            format!("uTools regex matcher is not supported by the safe host engine: {error}")
+        })?;
+    Ok((pattern.to_owned(), flags.to_owned()))
+}
+
+fn project_utools_text_matcher(
+    matcher: &UtoolsFeatureMatcher,
+) -> Result<Option<UtoolsTextMatcherInfo>, String> {
+    let label = matcher.label.trim();
+    if label.is_empty() || label.chars().count() > 160 || label.chars().any(char::is_control) {
+        return Err("Each uTools matcher requires a bounded non-control label.".to_owned());
+    }
+    let default_max = 10_000usize;
+    let min_length = matcher.min_length.unwrap_or(1);
+    let max_length = matcher.max_length.unwrap_or(default_max);
+    if min_length > max_length || max_length > default_max {
+        return Err(
+            "uTools text matcher length bounds are invalid or exceed 10,000 characters.".to_owned(),
+        );
+    }
+    match matcher.matcher_type.as_str() {
+        "regex" => {
+            if matcher.exclude.is_some()
+                || matcher.file_type.is_some()
+                || !matcher.extensions.is_empty()
+            {
+                return Err(
+                    "uTools regex matcher contains fields for another matcher type.".to_owned(),
+                );
+            }
+            let literal = matcher
+                .r#match
+                .as_ref()
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "uTools regex matcher requires a string match expression.".to_owned()
+                })?;
+            let (pattern, flags) = parse_utools_regex_literal(literal)?;
+            Ok(Some(UtoolsTextMatcherInfo {
+                matcher_type: "regex".to_owned(),
+                label: label.to_owned(),
+                pattern: Some(pattern),
+                flags,
+                min_length: matcher.min_length,
+                max_length: matcher.max_length,
+            }))
+        }
+        "over" => {
+            if matcher.r#match.is_some()
+                || matcher.file_type.is_some()
+                || !matcher.extensions.is_empty()
+            {
+                return Err(
+                    "uTools over matcher contains fields for another matcher type.".to_owned(),
+                );
+            }
+            let (pattern, flags) = matcher
+                .exclude
+                .as_deref()
+                .map(parse_utools_regex_literal)
+                .transpose()?
+                .map_or((None, String::new()), |(pattern, flags)| {
+                    (Some(pattern), flags)
+                });
+            Ok(Some(UtoolsTextMatcherInfo {
+                matcher_type: "over".to_owned(),
+                label: label.to_owned(),
+                pattern,
+                flags,
+                min_length: matcher.min_length,
+                max_length: matcher.max_length,
+            }))
+        }
+        "img" | "files" | "window" => Ok(None),
+        _ => Err(format!(
+            "Unsupported uTools feature matcher type '{}'.",
+            matcher.matcher_type
+        )),
+    }
+}
+
 impl UtoolsManifest {
     /// Projects the public manifest/feature subset into iHub's existing,
     /// manifest-locked command model. One feature becomes one command so a
-    /// plugin sees its original `code` when the host dispatches it. Matchers,
-    /// files, images and Node/Electron preload authority remain unsupported on
-    /// purpose: iHub local search is native and never delegates its
-    /// index/context to a third-party source-compatibility layer.
+    /// plugin sees its original `code` when the host dispatches it. Regex and
+    /// over matchers are validated for the native launcher; file, image and
+    /// window context stay out until their host-owned handoff is projected.
+    /// Node/Electron preload authority is never inherited.
     fn into_plugin_manifest(self, manifest_path: &Path) -> Result<PluginManifest, String> {
         let main = self
             .main
@@ -4026,14 +4180,16 @@ impl UtoolsManifest {
             let command_id = format!("utools-feature-{}", index + 1);
             debug_assert!(command_ids.insert(command_id.clone()));
             let mut keywords = Vec::new();
+            let mut text_matchers = Vec::new();
             for command in &feature.cmds {
                 let candidate = match command {
                     UtoolsFeatureCommand::Keyword(keyword) => Some(keyword),
-                    // uTools matcher objects depend on uTools-owned text,
-                    // files, images, windows, or regex dispatch. iHub keeps
-                    // its local index and launcher context native, so only
-                    // direct text commands enter this compatibility surface.
-                    UtoolsFeatureCommand::Matcher(_) => None,
+                    UtoolsFeatureCommand::Matcher(matcher) => {
+                        if let Some(projected) = project_utools_text_matcher(matcher)? {
+                            text_matchers.push(projected);
+                        }
+                        None
+                    }
                 };
                 if let Some(keyword) = candidate {
                     let keyword = keyword.trim();
@@ -4042,9 +4198,9 @@ impl UtoolsManifest {
                     }
                 }
             }
-            if keywords.is_empty() {
+            if keywords.is_empty() && text_matchers.is_empty() {
                 return Err(format!(
-                    "uTools feature '{}' has no direct text command; matchers are not imported into iHub local search.",
+                    "uTools feature '{}' has no direct, regex, or over text command; image, file, and window matchers are not imported yet.",
                     feature.code
                 ));
             }
@@ -4052,6 +4208,7 @@ impl UtoolsManifest {
                 .explain
                 .clone()
                 .or_else(|| keywords.first().cloned())
+                .or_else(|| text_matchers.first().map(|matcher| matcher.label.clone()))
                 .unwrap_or_else(|| feature.code.clone());
             commands.push(PluginCommandDeclaration {
                 id: command_id.clone(),
@@ -4072,6 +4229,7 @@ impl UtoolsManifest {
                 code: feature.code,
                 keywords,
                 main_push: feature.main_push,
+                text_matchers,
             });
         }
 
@@ -5334,6 +5492,15 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
                 .permissions
                 .insert("compatibility.utools.mcpTools.manifestLocked".to_owned());
         }
+        for command in &manifest.utools_commands {
+            for matcher in &command.text_matchers {
+                if let Ok(encoded) = serde_json::to_string(matcher) {
+                    declaration
+                        .native_declarations
+                        .insert(format!("utools.textMatcher:{}:{encoded}", command.code));
+                }
+            }
+        }
         if manifest.utools_preload.is_some() {
             declaration
                 .permissions
@@ -5790,14 +5957,26 @@ mod tests {
         configure_git_command_environment, ensure_update_security_declaration_matches,
         is_trusted_official_auto_update_source, load_manifest_artwork,
         normalized_shortcut_keywords, parse_git_source, parse_jsonl_rpc_response,
-        plugin_security_declaration, read_manifest, read_source_metadata,
-        resolve_official_workspace_plugin_at, snapshot_integrity, validate_manifest,
-        verify_snapshot_integrity, wait_for_child_with_timeout, ChildWaitOutcome, CommandExecution,
-        GitSource, GitTransportPolicy, PluginManager, PluginManifest, LEGACY_SOURCE_RECORD,
-        LIFECYCLE_RECORD, LOCAL_LINKS_RECORD, MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS,
-        MAX_PERMISSION_VALUE_CHARS, MAX_PROJECTED_ARTWORK_DATA_URL_BYTES,
-        OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK, UTOOLS_MAIN_PUSH_PROVIDER_ID,
+        parse_utools_regex_literal, plugin_security_declaration, read_manifest,
+        read_source_metadata, resolve_official_workspace_plugin_at, snapshot_integrity,
+        validate_manifest, verify_snapshot_integrity, wait_for_child_with_timeout,
+        ChildWaitOutcome, CommandExecution, GitSource, GitTransportPolicy, PluginManager,
+        PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
+        MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS, MAX_PERMISSION_VALUE_CHARS,
+        MAX_PROJECTED_ARTWORK_DATA_URL_BYTES, OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
+        UTOOLS_MAIN_PUSH_PROVIDER_ID,
     };
+
+    #[test]
+    fn public_utools_regex_literals_are_bounded_safe_and_flag_exact() {
+        assert_eq!(
+            parse_utools_regex_literal("/^#[0-9a-f]{6}$/i").unwrap(),
+            ("^#[0-9a-f]{6}$".to_owned(), "i".to_owned())
+        );
+        assert!(parse_utools_regex_literal("/.*/").is_err());
+        assert!(parse_utools_regex_literal("/(a)\\1/").is_err());
+        assert!(parse_utools_regex_literal("/^ok$/gg").is_err());
+    }
 
     fn temporary_directory(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -5864,7 +6043,7 @@ mod tests {
     "code": "pick-color",
     "explain": "屏幕取色",
     "mainPush": true,
-    "cmds": ["取色", { "type": "regex", "label": "从文本取色" }]
+    "cmds": ["取色", { "type": "regex", "label": "从文本取色", "match": "/^#[0-9a-f]{6}$/i", "minLength": 7, "maxLength": 7 }, { "type": "over", "label": "分析文本", "exclude": "/\\n/", "maxLength": 500 }]
   }]
 }"#,
         )
@@ -5879,6 +6058,19 @@ mod tests {
         assert_eq!(manifest.utools_commands[0].code, "pick-color");
         assert!(manifest.utools_commands[0].main_push);
         assert_eq!(manifest.utools_commands[0].keywords, vec!["取色"]);
+        assert_eq!(manifest.utools_commands[0].text_matchers.len(), 2);
+        assert_eq!(
+            manifest.utools_commands[0].text_matchers[0].matcher_type,
+            "regex"
+        );
+        assert_eq!(
+            manifest.utools_commands[0].text_matchers[1].matcher_type,
+            "over"
+        );
+        assert!(plugin_security_declaration(&manifest)
+            .native_declarations
+            .iter()
+            .any(|entry| entry.starts_with("utools.textMatcher:pick-color:")));
         assert_eq!(manifest.commands[0].keywords, vec!["取色"]);
         assert!(plugin_security_declaration(&manifest)
             .permissions

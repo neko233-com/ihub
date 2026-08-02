@@ -28,6 +28,8 @@ export interface SearchResult {
   pluginSearchRequestId?: string;
   pluginSearchResultId?: string;
   pluginPayload?: unknown;
+  utoolsMatcherType?: "regex" | "over" | string;
+  utoolsMatcherPayload?: string;
 }
 
 /** A host-owned pinned file/folder/application. Its ID is opaque: neither the
@@ -292,10 +294,20 @@ export interface PluginCommandInfo {
   execution: "frontend" | "native";
   /** Static manifest aliases used by launcher search. */
   keywords?: string[];
+  utoolsTextMatchers?: UtoolsTextMatcherInfo[];
   /** Canonical manifest-owned global accelerator. */
   shortcut?: string;
   shortcutRegistration?: "registered" | "blocked" | "unavailable" | "inactive" | string;
   shortcutError?: string;
+}
+
+export interface UtoolsTextMatcherInfo {
+  matcherType: "regex" | "over" | string;
+  label: string;
+  pattern?: string;
+  flags?: string;
+  minLength?: number;
+  maxLength?: number;
 }
 
 export interface PluginGlobalShortcutInfo {

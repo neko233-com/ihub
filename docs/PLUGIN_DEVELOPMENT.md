@@ -195,6 +195,8 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 `redirect(label, payload?)` 支持官方的单一指令名和 `[插件名, 指令名]` 两种定位方式，以及 text、PNG image、files 三种有界交接。Rust 只从当前启用并再次验证为 uTools 导入包的命令中做不区分大小写的精确匹配；未安装目标明确失败，不会伪装成应用市场跳转。唯一目标直接切换，多个同名目标回到可信启动器供用户选择。接收方仅从 host-owned command event 得到规范化的 `{ code, type, payload, from: "redirect" }`；隐藏 surface 不能发起，非候选选择、隐藏窗口或新一轮启动器会立即丢弃暂存内容。
 
+静态 `feature.cmds` 的 `regex` 与 `over` 文本匹配指令会进入主启动器：导入时严格校验 label、1–10,000 字符范围和 `/pattern/imsu` 表达式，并由 Rust 的线性时间正则引擎编译；查询时最多返回 12 个宿主生成的匹配结果，不在浏览器主线程执行第三方正则。选择结果后才把当前原始文本以官方 `type: "regex" | "over"`、`from: "main"` 形状交给对应 `onPluginEnter`。匹配器声明进入更新安全差异，例行更新不能静默改变。当前这一阶段尚未投影 `img`、`files`、`window` 匹配器，动态 `setFeature` 对象指令也仍需后续接入。
+
 `onMainPush(callback, onSelect)` 通过宿主固定的 `utools-main-push` 搜索提供器接入主启动器。只有静态或动态 feature 明确设置 `mainPush: true` 时才投影提供器；隐藏 iframe 在查询时仅接收最多 512 bytes 的当前文本，并只对匹配的直接文本指令同步调用 `callback({ code, type: "text", payload })`。每次最多接受 6 个可 JSON 序列化且小于 6 KiB 的 option，`text/title` 均限制为 320 个字符，包内 `icon` 不会绕过宿主 artwork 边界。选择时 Rust 只从 60 秒内的原生已签发搜索快照取回 action/option，再以一次性交互 ID 调用 `onSelect`；只有严格返回 `true` 才打开插件并触发 `onPluginEnter`，`false/undefined` 保持静默。官方示例中的同步粘贴动作可在这一短暂交互区间使用；令牌绑定精确 iframe 租约，并在完成或最长 5 分钟（为文件确认弹窗保留时间）后失效。正则、任意文本、图片、文件与窗口 matcher 尚未投影到该兼容搜索阶段，不能被伪装为已经支持。
 
 `onDbPull(callback)` 会保存回调并只接受未来宿主云同步通道送达的文档数组。当前 iHub 没有跨设备 uTools 云同步，因此不会伪造 pull 事件；与此一致，`replicateStateFromCloud()` 仍如实返回 `null`。

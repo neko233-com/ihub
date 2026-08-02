@@ -316,6 +316,7 @@ mod tests {
                 icon_src: None,
                 execution: "frontend".to_owned(),
                 keywords: vec!["open".to_owned()],
+                utools_text_matchers: Vec::new(),
                 shortcut: Some(shortcut.to_owned()),
                 shortcut_registration: None,
                 shortcut_error: None,

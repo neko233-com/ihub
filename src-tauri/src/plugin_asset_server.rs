@@ -3138,6 +3138,11 @@ window.addEventListener("message", (event) => {{
     invoke(enterCallbacks, mainPushAction);
     return;
   }}
+  const matchAction = message.payload && message.payload.utoolsMatchAction;
+  if (matchAction && typeof matchAction === "object" && ["regex", "over"].includes(matchAction.type) && typeof matchAction.payload === "string") {{
+    invoke(enterCallbacks, {{ code: command.code, type: matchAction.type, payload: matchAction.payload, from: "main" }});
+    return;
+  }}
   const redirectAction = projectedRedirectAction(message.payload && message.payload.utoolsAction);
   if (redirectAction) {{
     invoke(enterCallbacks, {{ code: command.code, type: redirectAction.type, payload: redirectAction.payload, from: "redirect" }});
@@ -4228,6 +4233,7 @@ mod tests {
                 code: "pick-color".to_owned(),
                 keywords: vec!["取色".to_owned()],
                 main_push: true,
+                text_matchers: Vec::new(),
             }],
             tools: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
@@ -4307,6 +4313,7 @@ mod tests {
         assert!(script.contains("stopDesktopCaptureSlot()"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("onMainPush"));
+        assert!(script.contains("utoolsMatchAction"));
         assert!(script.contains("onDbPull"));
         assert!(script.contains("utools-main-push"));
         assert!(script.contains("compatibility.utools.mainPush.selectComplete"));

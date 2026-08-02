@@ -126,6 +126,10 @@ pub struct PluginCommandInfo {
     /// Runtime command registration cannot add or replace them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+    /// Host-validated public uTools text matcher declarations. Ordinary iHub
+    /// commands project an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub utools_text_matchers: Vec<UtoolsTextMatcherInfo>,
     /// Canonical manifest-declared global accelerator, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shortcut: Option<String>,
@@ -137,6 +141,21 @@ pub struct PluginCommandInfo {
     /// A bounded user-facing reason when the OS binding was not activated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shortcut_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsTextMatcherInfo {
+    pub matcher_type: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flags: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
 }
 
 /// A plugin-level declarative mapping from a global accelerator to either a

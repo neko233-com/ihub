@@ -20,6 +20,7 @@ commands.allow = [
   "open_launcher_shortcut",
   "unpin_launcher_shortcut",
   "list_plugins",
+  "match_utools_text_commands",
   "open_detached_plugin_window",
   "get_detached_plugin_window_bootstrap",
   "close_detached_plugin_window",

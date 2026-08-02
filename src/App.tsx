@@ -70,6 +70,10 @@ import {
   type SettingsPluginShortcutTarget,
 } from "./lib/plugin-shortcut-settings";
 import {
+  utoolsTextMatcherSearchResults,
+  type UtoolsTextCommandMatch,
+} from "./lib/utools-text-matchers";
+import {
   completePluginSearchProviderReadiness,
   createPluginSearchProviderReadinessBootstrap,
   transitionPluginSearchProviderReadiness,
@@ -845,6 +849,7 @@ function createFrontendCommandEvent(
   commandId: string,
   utoolsAction?: UtoolsRedirectAction,
   input?: string,
+  utoolsMatchAction?: { type: string; payload: string },
 ): PluginFrontendEvent {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -862,6 +867,7 @@ function createFrontendCommandEvent(
       input: input ?? null,
       context: null,
       ...(utoolsAction ? { utoolsAction } : {}),
+      ...(utoolsMatchAction ? { utoolsMatchAction } : {}),
     },
   };
 }
@@ -1111,6 +1117,7 @@ export function App() {
   const [searchIconPendingBatch, setSearchIconPendingBatch] =
     useState<SpotlightNativeIconPendingBatch | null>(null);
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
+  const [utoolsMatcherResults, setUtoolsMatcherResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
   const [quickNotes, setQuickNotes] = useState(readLauncherQuickNotes);
@@ -1401,12 +1408,13 @@ export function App() {
       launcherCalculationResults(query),
       launcherSystemCommandResults(query),
       builtinToolResults(query),
+      utoolsMatcherResults,
       pluginCommandResults(plugins, query),
       pluginSearchResults,
       contentResults,
       searchResults,
     );
-  }, [contentResults, launcherUsage, pluginSearchResults, plugins, query, searchResults]);
+  }, [contentResults, launcherUsage, pluginSearchResults, plugins, query, searchResults, utoolsMatcherResults]);
   const spotlightSearchResults = useMemo<SpotlightLauncherItem[]>(
     () => results.map((result) => spotlightItemForSearchResult(
       result,
@@ -2569,12 +2577,13 @@ export function App() {
 
     void requestPluginSearch(nextQuery, requestId);
 
-    const [searchResponse, clipboardResponse] = await Promise.allSettled([
+    const [searchResponse, clipboardResponse, matcherResponse] = await Promise.allSettled([
       command<SearchResult[]>("search_entries", {
         query: nextQuery,
         limit: 12,
       }),
       command<ClipboardHistorySnapshot>("get_clipboard_history", { limit: 60 }),
+      command<UtoolsTextCommandMatch[]>("match_utools_text_commands", { query: nextQuery }),
     ]);
 
     if (requestId !== searchRequestRef.current) {
@@ -2633,6 +2642,9 @@ export function App() {
       // A failed optional history read must not retain stale text in results.
       setClipboardHistory(null);
     }
+    setUtoolsMatcherResults(matcherResponse.status === "fulfilled"
+      ? utoolsTextMatcherSearchResults(matcherResponse.value)
+      : []);
   }, [requestPluginSearch, showToast]);
 
   useEffect(() => {
@@ -2646,6 +2658,7 @@ export function App() {
       setSearchResults([]);
       setSearchIconPendingBatch(null);
       setPluginSearchResults([]);
+      setUtoolsMatcherResults([]);
       setRequestedSearchRuntimePluginIds((current) => (current.length === 0 ? current : []));
       if (!isDesktop()) {
         setClipboardHistory(null);
@@ -2655,6 +2668,7 @@ export function App() {
     // Results from a previous plugin request must never be shown under the
     // next keystroke while its bounded provider call is still in flight.
     setPluginSearchResults([]);
+    setUtoolsMatcherResults([]);
     const timer = window.setTimeout(() => {
       void requestSearch(query, requestId);
     }, 55);
@@ -3798,6 +3812,20 @@ export function App() {
         if (pluginCommand?.execution === "frontend" || (plugin?.frontendEntry && !plugin.hasNativeWorker)) {
           if (!plugin?.frontendEntry) {
             showToast("该插件命令需要前端入口，但当前插件没有可用界面。");
+            return;
+          }
+          if (result.utoolsMatcherType && result.utoolsMatcherPayload !== undefined) {
+            invalidateLauncherContextHandoff();
+            setPendingPluginEvent(createFrontendCommandEvent(
+              plugin.id,
+              result.commandId,
+              undefined,
+              undefined,
+              { type: result.utoolsMatcherType, payload: result.utoolsMatcherPayload },
+            ));
+            setActivePlugin(plugin);
+            setSurface("plugin");
+            recordSuccessfulAction();
             return;
           }
           const deliveredToDetached = await command<boolean>(

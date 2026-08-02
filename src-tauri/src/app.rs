@@ -14,6 +14,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder, ImageFormat, ImageReader, Limits};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
@@ -2026,6 +2027,85 @@ pub fn list_plugins(state: State<'_, AppState>) -> Vec<PluginInfo> {
     project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
     state.project_plugin_shortcut_statuses(&mut plugins);
     plugins
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsTextCommandMatch {
+    plugin_id: String,
+    command_id: String,
+    label: String,
+    matcher_type: String,
+    payload: String,
+}
+
+fn utools_text_matcher_accepts(
+    matcher: &crate::models::UtoolsTextMatcherInfo,
+    query: &str,
+    character_count: usize,
+) -> Result<bool, String> {
+    if matcher
+        .min_length
+        .is_some_and(|minimum| character_count < minimum)
+        || matcher
+            .max_length
+            .is_some_and(|maximum| character_count > maximum)
+    {
+        return Ok(false);
+    }
+    let pattern_matched = match matcher.pattern.as_deref() {
+        Some(pattern) => RegexBuilder::new(pattern)
+            .case_insensitive(matcher.flags.contains('i'))
+            .multi_line(matcher.flags.contains('m'))
+            .dot_matches_new_line(matcher.flags.contains('s'))
+            .unicode(true)
+            .build()
+            .map_err(|error| format!("Stored uTools matcher is invalid: {error}"))?
+            .is_match(query),
+        None => false,
+    };
+    Ok(match matcher.matcher_type.as_str() {
+        "regex" => pattern_matched,
+        "over" => !pattern_matched,
+        _ => false,
+    })
+}
+
+#[tauri::command]
+pub fn match_utools_text_commands(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<UtoolsTextCommandMatch>, String> {
+    let character_count = query.chars().count();
+    if query.is_empty()
+        || character_count > 10_000
+        || query.len() > 48 * 1024
+        || query.contains('\0')
+    {
+        return Ok(Vec::new());
+    }
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
+    let mut matches = Vec::new();
+    for plugin in plugins.into_iter().filter(|plugin| plugin.enabled) {
+        for command in plugin.commands {
+            for matcher in command.utools_text_matchers {
+                if utools_text_matcher_accepts(&matcher, &query, character_count)? {
+                    matches.push(UtoolsTextCommandMatch {
+                        plugin_id: plugin.id.clone(),
+                        command_id: command.id.clone(),
+                        label: matcher.label,
+                        matcher_type: matcher.matcher_type,
+                        payload: query.clone(),
+                    });
+                    if matches.len() >= 12 {
+                        return Ok(matches);
+                    }
+                }
+            }
+        }
+    }
+    Ok(matches)
 }
 
 #[tauri::command]
@@ -11141,6 +11221,7 @@ pub fn run() {
             open_launcher_shortcut,
             unpin_launcher_shortcut,
             list_plugins,
+            match_utools_text_commands,
             set_plugin_command_shortcut,
             reset_plugin_command_shortcut,
             crate::detached_plugin_window::open_detached_plugin_window,
@@ -12656,6 +12737,7 @@ fn project_utools_dynamic_features(
                 icon_src: None,
                 execution: "frontend".to_owned(),
                 keywords: feature.cmds,
+                utools_text_matchers: Vec::new(),
                 shortcut: None,
                 shortcut_registration: None,
                 shortcut_error: None,
@@ -12835,7 +12917,9 @@ mod tests {
     use tauri::{PhysicalPosition, PhysicalSize};
 
     use crate::clipboard_history::ClipboardHistory;
-    use crate::models::{LauncherHotkeyRegistration, LauncherHotkeyStatus, PluginSearchResult};
+    use crate::models::{
+        LauncherHotkeyRegistration, LauncherHotkeyStatus, PluginSearchResult, UtoolsTextMatcherInfo,
+    };
 
     use super::{
         attach_plugin_launcher_context_transfer, authorize_index_root_update,
@@ -12880,6 +12964,31 @@ mod tests {
         MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW,
         PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
+
+    #[test]
+    fn utools_text_matchers_apply_bounds_regex_flags_and_over_exclusions() {
+        let regex = UtoolsTextMatcherInfo {
+            matcher_type: "regex".to_owned(),
+            label: "Color".to_owned(),
+            pattern: Some("^#[0-9a-f]{6}$".to_owned()),
+            flags: "i".to_owned(),
+            min_length: Some(7),
+            max_length: Some(7),
+        };
+        assert!(super::utools_text_matcher_accepts(&regex, "#0A84FF", 7).unwrap());
+        assert!(!super::utools_text_matcher_accepts(&regex, "#fff", 4).unwrap());
+
+        let over = UtoolsTextMatcherInfo {
+            matcher_type: "over".to_owned(),
+            label: "Search".to_owned(),
+            pattern: Some("\\n".to_owned()),
+            flags: String::new(),
+            min_length: Some(1),
+            max_length: Some(500),
+        };
+        assert!(super::utools_text_matcher_accepts(&over, "hello", 5).unwrap());
+        assert!(!super::utools_text_matcher_accepts(&over, "hello\nworld", 11).unwrap());
+    }
 
     #[test]
     fn utools_db_storage_keys_are_bounded_and_reversible() {
