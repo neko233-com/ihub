@@ -1140,11 +1140,34 @@ export function PluginFrontendFrame({
       }
     };
 
+    const subscribeBrowserEvent = async (
+      nativeName: "ihub://utools-browser/parent-message" | "ihub://utools-browser/ready",
+      bridgeKind: "ipc" | "ready",
+    ) => {
+      try {
+        const stop = await listen<unknown>(nativeName, (event) => {
+          if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+            return;
+          }
+          forward(
+            `ihub://plugin/${pluginId}/event/utools.browser.${bridgeKind}`,
+            event.payload,
+          );
+        });
+        if (disposed) stop(); else unlisten.push(stop);
+      } catch {
+        // BrowserWindow IPC remains closed if the narrow native channel is
+        // unavailable; it is never widened to a global broadcast.
+      }
+    };
+
     void Promise.all([
       subscribe("command"),
       subscribe("search"),
       subscribe("event/search.select"),
       subscribe("event/utools.dbPull"),
+      subscribeBrowserEvent("ihub://utools-browser/parent-message", "ipc"),
+      subscribeBrowserEvent("ihub://utools-browser/ready", "ready"),
     ]);
     return () => {
       disposed = true;

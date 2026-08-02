@@ -5946,6 +5946,58 @@ kbd {
   margin-top: 10px;
 }
 
+.utools-browser-host {
+  background: radial-gradient(circle at 12% 8%, rgba(100, 210, 255, 0.14), transparent 34%), #f8fbff;
+  inset: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  position: fixed;
+}
+
+.utools-browser-host > iframe {
+  border: 0;
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.utools-browser-host.is-loading,
+.utools-browser-host.is-error,
+.utools-browser-host__loading {
+  align-items: center;
+  color: #5e5ce6;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  justify-content: center;
+}
+
+.utools-browser-host.is-error {
+  background: radial-gradient(circle at 50% 35%, rgba(255, 55, 95, 0.12), transparent 36%), #f8fbff;
+  padding: 28px;
+  text-align: center;
+}
+
+.utools-browser-host.is-error p {
+  color: #202634;
+  font-size: 15px;
+  font-weight: 750;
+  margin: 0;
+}
+
+.utools-browser-host.is-error small {
+  color: #707786;
+  max-width: 520px;
+}
+
+.utools-browser-host__loading {
+  background: rgba(248, 251, 255, 0.88);
+  inset: 0;
+  position: absolute;
+  z-index: 1;
+}
+
 .plugin-frame-overlay.is-detached {
   border: 0;
   border-radius: 0;

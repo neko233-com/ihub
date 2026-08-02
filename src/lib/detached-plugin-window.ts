@@ -6,7 +6,9 @@ import type {
 
 const DETACHED_PLUGIN_PARAMETER = "ihubDetachedPlugin";
 const DETACHED_PLUGIN_PREVIEW_PARAMETER = "ihubDetachedPreview";
+const UTOOLS_BROWSER_WINDOW_PARAMETER = "ihubUtoolsBrowserWindow";
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{2,96}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface DetachedPluginRoute {
   kind: "detached";
@@ -19,6 +21,11 @@ export interface InvalidDetachedPluginRoute {
   message: string;
 }
 
+export interface UtoolsBrowserWindowRoute {
+  kind: "utools-browser";
+  browserId: string;
+}
+
 export interface MainApplicationRoute {
   kind: "main";
 }
@@ -26,6 +33,7 @@ export interface MainApplicationRoute {
 export type ApplicationRoute =
   | DetachedPluginRoute
   | InvalidDetachedPluginRoute
+  | UtoolsBrowserWindowRoute
   | MainApplicationRoute;
 
 export interface DetachedPluginWindowOpened {
@@ -129,7 +137,8 @@ export function parseApplicationRoute(
 ): ApplicationRoute {
   const params = new URLSearchParams(search);
   const pluginIds = params.getAll(DETACHED_PLUGIN_PARAMETER);
-  if (pluginIds.length === 0) {
+  const browserIds = params.getAll(UTOOLS_BROWSER_WINDOW_PARAMETER);
+  if (pluginIds.length === 0 && browserIds.length === 0) {
     return { kind: "main" };
   }
   if (hash.length > 0) {
@@ -143,12 +152,29 @@ export function parseApplicationRoute(
   const allowedKeys = new Set([
     DETACHED_PLUGIN_PARAMETER,
     DETACHED_PLUGIN_PREVIEW_PARAMETER,
+    UTOOLS_BROWSER_WINDOW_PARAMETER,
   ]);
   if ([...params.keys()].some((key) => !allowedKeys.has(key))) {
     return {
       kind: "invalid-detached",
       message: "分离窗口地址包含宿主未签发的参数。",
     };
+  }
+  if (browserIds.length > 0) {
+    if (
+      !desktop
+      || browserIds.length !== 1
+      || !UUID_PATTERN.test(browserIds[0] ?? "")
+      || pluginIds.length > 0
+      || previewValues.length > 0
+      || params.size !== 1
+    ) {
+      return {
+        kind: "invalid-detached",
+        message: "BrowserWindow 地址不是宿主签发的唯一桌面窗口身份。",
+      };
+    }
+    return { kind: "utools-browser", browserId: browserIds[0]! };
   }
   if (pluginIds.length !== 1 || !isValidPluginId(pluginIds[0] ?? "")) {
     return {

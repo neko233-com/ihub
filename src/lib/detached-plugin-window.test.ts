@@ -41,6 +41,22 @@ describe("detached plugin window routing", () => {
     });
   });
 
+  it("accepts only one native-issued desktop BrowserWindow UUID", () => {
+    const browserId = "550e8400-e29b-41d4-a716-446655440000";
+    expect(
+      parseApplicationRoute(`?ihubUtoolsBrowserWindow=${browserId}`, true),
+    ).toEqual({ kind: "utools-browser", browserId });
+    for (const [search, desktop] of [
+      [`?ihubUtoolsBrowserWindow=${browserId}`, false],
+      ["?ihubUtoolsBrowserWindow=not-a-uuid", true],
+      [`?ihubUtoolsBrowserWindow=${browserId}&ihubUtoolsBrowserWindow=${browserId}`, true],
+      [`?ihubUtoolsBrowserWindow=${browserId}&ihubDetachedPlugin=com.example.notes`, true],
+      [`?ihubUtoolsBrowserWindow=${browserId}&url=https%3A%2F%2Fexample.com`, true],
+    ] as const) {
+      expect(parseApplicationRoute(search, desktop).kind).toBe("invalid-detached");
+    }
+  });
+
   it("fails closed for URL, path, duplicate, unknown, and desktop-preview input", () => {
     for (const search of [
       "?ihubDetachedPlugin=https%3A%2F%2Fexample.com",

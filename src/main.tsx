@@ -20,6 +20,10 @@ async function renderApplication() {
   if (route.kind === "main") {
     return <App />;
   }
+  if (route.kind === "utools-browser") {
+    const { UtoolsBrowserWindowHost } = await import("./components/UtoolsBrowserWindowHost");
+    return <UtoolsBrowserWindowHost route={route} />;
+  }
   const {
     DetachedPluginHost,
     DetachedPluginRouteError,

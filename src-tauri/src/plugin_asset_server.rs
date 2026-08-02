@@ -67,6 +67,7 @@ const LOOPBACK_BIND_ATTEMPTS: usize = 16;
 /// plugin, so this remains comfortably above expected use while keeping
 /// resource failure explicit.
 const MAX_ACTIVE_FRONTEND_LEASES: usize = 96;
+const MAX_ACTIVE_BROWSER_LEASES_PER_PLUGIN: usize = 8;
 /// Native workers and narrow host-native operations (such as one confirmed
 /// cursor-pixel read) can outlive their bridge check. Keep their concurrent
 /// count deliberately small so a malicious or buggy iframe cannot exhaust the
@@ -83,6 +84,20 @@ const LOCKED_PLUGIN_CSP: &str = concat!(
 const NETWORKED_PLUGIN_CSP: &str = concat!(
     "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; ",
     "frame-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data: blob: https:; font-src 'self' data:; ",
+    "media-src 'self' blob: https:; worker-src 'self' blob:; ",
+    "connect-src 'self' https: wss:"
+);
+const LOCKED_BROWSER_PLUGIN_CSP: &str = concat!(
+    "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; ",
+    "frame-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data: blob:; font-src 'self' data:; ",
+    "media-src 'self' data: blob:; worker-src 'self' blob:; ",
+    "connect-src 'self'"
+);
+const NETWORKED_BROWSER_PLUGIN_CSP: &str = concat!(
+    "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; ",
+    "frame-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data: blob: https:; font-src 'self' data:; ",
     "media-src 'self' blob: https:; worker-src 'self' blob:; ",
     "connect-src 'self' https: wss:"
@@ -112,6 +127,21 @@ pub struct PluginFrontendLease {
 pub enum PluginFrontendPurpose {
     Surface,
     Runtime,
+    Browser,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReleasedPluginFrontendLease {
+    pub(crate) plugin_id: String,
+    pub(crate) purpose: PluginFrontendPurpose,
+}
+
+impl std::ops::Deref for ReleasedPluginFrontendLease {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.plugin_id
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +229,7 @@ struct ServedBundle {
     allows_remote_network: bool,
     utools_compat_script: Option<Vec<u8>>,
     utools_documents: Option<UtoolsDocumentStore>,
+    utools_browser_preload_src: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -347,11 +378,9 @@ impl PluginAssetServer {
         ))
     }
 
-    /// Starts a one-origin server for an already-validated bundle. Only one
-    /// lease for a plugin may be active at a time: the renderer intentionally
-    /// hands ownership between its hidden search runtime and visible surface.
-    /// Replacing the old lease prevents a delayed `lifecycle.dispose` from an
-    /// obsolete document from clearing the new runtime's registration.
+    /// Starts a one-origin server for an already-validated bundle. A plugin has
+    /// one primary Surface/Runtime lease, while bounded BrowserWindow children
+    /// receive independent origins and never replace that primary document.
     ///
     /// The random port is intentional: separate plugins must not share an HTTP
     /// origin, otherwise one iframe could impersonate another over postMessage.
@@ -385,6 +414,7 @@ impl PluginAssetServer {
             allows_microphone,
             allows_remote_network,
             utools_compat,
+            utools_browser_preload_src,
         } = bundle;
         if utools_compat.is_some() != utools_documents.is_some() {
             return Err(
@@ -427,6 +457,7 @@ impl PluginAssetServer {
             allows_remote_network,
             utools_compat_script,
             utools_documents,
+            utools_browser_preload_src,
         };
         let worker_inner = self.inner.clone();
         let worker = thread::Builder::new()
@@ -456,9 +487,20 @@ impl PluginAssetServer {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut removed = take_expired_leases(&mut leases);
+            let browser_count = leases
+                .values()
+                .filter(|existing| {
+                    existing.plugin_id == plugin_id
+                        && existing.purpose == PluginFrontendPurpose::Browser
+                })
+                .count();
             let replacement_ids = leases
                 .iter()
-                .filter(|(_, existing)| existing.plugin_id == plugin_id)
+                .filter(|(_, existing)| {
+                    purpose != PluginFrontendPurpose::Browser
+                        && existing.plugin_id == plugin_id
+                        && existing.purpose != PluginFrontendPurpose::Browser
+                })
                 .map(|(existing_lease_id, _)| existing_lease_id.clone())
                 .collect::<Vec<_>>();
             removed.extend(
@@ -467,7 +509,10 @@ impl PluginAssetServer {
                     .filter_map(|existing_lease_id| leases.remove(&existing_lease_id)),
             );
 
-            if leases.len() >= MAX_ACTIVE_FRONTEND_LEASES {
+            if leases.len() >= MAX_ACTIVE_FRONTEND_LEASES
+                || (purpose == PluginFrontendPurpose::Browser
+                    && browser_count >= MAX_ACTIVE_BROWSER_LEASES_PER_PLUGIN)
+            {
                 Err(removed)
             } else {
                 leases.insert(
@@ -509,7 +554,7 @@ impl PluginAssetServer {
     /// the active lease. The caller can then revoke host-owned runtime state
     /// (registered commands, grants, one-shot launcher contexts) for a
     /// surface that a person closed before it consumed its work.
-    pub(crate) fn release(&self, lease_id: &str) -> Option<String> {
+    pub(crate) fn release(&self, lease_id: &str) -> Option<ReleasedPluginFrontendLease> {
         let lease = self
             .inner
             .leases
@@ -517,9 +562,12 @@ impl PluginAssetServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(lease_id);
         if let Some(lease) = lease {
-            let plugin_id = lease.plugin_id.clone();
+            let released = ReleasedPluginFrontendLease {
+                plugin_id: lease.plugin_id.clone(),
+                purpose: lease.purpose,
+            };
             stop_lease(lease);
-            Some(plugin_id)
+            Some(released)
         } else {
             None
         }
@@ -582,6 +630,20 @@ impl PluginAssetServer {
             .is_some_and(|lease| {
                 lease.plugin_id == plugin_id
                     && lease.purpose == PluginFrontendPurpose::Surface
+                    && !lease.shutdown.load(Ordering::Acquire)
+                    && lease_is_fresh(lease)
+            })
+    }
+
+    pub(crate) fn is_active_browser_for(&self, lease_id: &str, plugin_id: &str) -> bool {
+        self.inner
+            .leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(lease_id)
+            .is_some_and(|lease| {
+                lease.plugin_id == plugin_id
+                    && lease.purpose == PluginFrontendPurpose::Browser
                     && !lease.shutdown.load(Ordering::Acquire)
                     && lease_is_fresh(lease)
             })
@@ -877,6 +939,7 @@ fn handle_connection(
             script,
             "text/javascript; charset=utf-8",
             bundle.allows_remote_network,
+            false,
         );
         return;
     }
@@ -887,15 +950,23 @@ fn handle_connection(
     // A file can disappear between canonicalization and opening during a
     // local development rebuild. Close the connection without writing a
     // second HTTP status after a partial 200 response.
+    let policy = AssetServePolicy {
+        allows_remote_network: bundle.allows_remote_network,
+        utools_compat_script: bundle
+            .utools_compat_script
+            .as_deref()
+            .filter(|_| path == bundle.entry),
+        utools_browser_preload_src: bundle
+            .utools_browser_preload_src
+            .as_deref()
+            .filter(|_| path == bundle.entry),
+        allows_script_execution: bundle.purpose == PluginFrontendPurpose::Browser,
+    };
     let _ = serve_asset(
         stream,
         request.method,
         &path,
-        bundle.allows_remote_network,
-        bundle
-            .utools_compat_script
-            .as_deref()
-            .filter(|_| path == bundle.entry),
+        policy,
         shutdown,
         last_heartbeat,
     );
@@ -1587,7 +1658,7 @@ fn write_json_response(
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
         body.len(),
-        plugin_csp(allows_remote_network),
+        plugin_csp(allows_remote_network, false),
     );
     stream.write_all(header.as_bytes())?;
     stream.write_all(body)
@@ -1754,23 +1825,30 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+struct AssetServePolicy<'a> {
+    allows_remote_network: bool,
+    utools_compat_script: Option<&'a [u8]>,
+    utools_browser_preload_src: Option<&'a str>,
+    allows_script_execution: bool,
+}
+
 fn serve_asset(
     stream: &mut TcpStream,
     method: HttpMethod,
     path: &Path,
-    allows_remote_network: bool,
-    utools_compat_script: Option<&[u8]>,
+    policy: AssetServePolicy<'_>,
     shutdown: &AtomicBool,
     last_heartbeat: &Mutex<Instant>,
 ) -> io::Result<()> {
-    if utools_compat_script.is_some() {
-        let document = inject_utools_compat_script(path)?;
+    if policy.utools_compat_script.is_some() {
+        let document = inject_utools_compat_script(path, policy.utools_browser_preload_src)?;
         return serve_memory_asset(
             stream,
             method,
             &document,
             "text/html; charset=utf-8",
-            allows_remote_network,
+            policy.allows_remote_network,
+            policy.allows_script_execution,
         );
     }
     let mut file = File::open(path)?;
@@ -1782,7 +1860,10 @@ fn serve_asset(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
         content_type(path),
         metadata.len(),
-        plugin_csp(allows_remote_network),
+        plugin_csp(
+            policy.allows_remote_network,
+            policy.allows_script_execution
+        ),
     );
     stream.write_all(header.as_bytes())?;
     if matches!(method, HttpMethod::Get) {
@@ -1810,11 +1891,12 @@ fn serve_memory_asset(
     body: &[u8],
     content_type: &str,
     allows_remote_network: bool,
+    allows_script_execution: bool,
 ) -> io::Result<()> {
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n\r\n",
         body.len(),
-        plugin_csp(allows_remote_network),
+        plugin_csp(allows_remote_network, allows_script_execution),
     );
     stream.write_all(header.as_bytes())?;
     if matches!(method, HttpMethod::Get) {
@@ -1823,7 +1905,10 @@ fn serve_memory_asset(
     Ok(())
 }
 
-fn inject_utools_compat_script(entry: &Path) -> io::Result<Vec<u8>> {
+fn inject_utools_compat_script(
+    entry: &Path,
+    utools_browser_preload_src: Option<&str>,
+) -> io::Result<Vec<u8>> {
     let metadata = entry.metadata()?;
     if metadata.len() > MAX_COMPAT_ENTRY_BYTES as u64 {
         return Err(io::Error::new(
@@ -1833,7 +1918,11 @@ fn inject_utools_compat_script(entry: &Path) -> io::Result<Vec<u8>> {
     }
     let mut document = Vec::with_capacity(metadata.len() as usize + 96);
     File::open(entry)?.read_to_end(&mut document)?;
-    let bootstrap = format!("<script src=\"{UTOOLS_COMPAT_SCRIPT_NAME}\"></script>").into_bytes();
+    let preload = utools_browser_preload_src
+        .map(|src| format!("<script src=\"{src}\"></script>"))
+        .unwrap_or_default();
+    let bootstrap =
+        format!("<script src=\"{UTOOLS_COMPAT_SCRIPT_NAME}\"></script>{preload}").into_bytes();
     let insertion = document
         .windows(b"<head".len())
         .position(|window| window.eq_ignore_ascii_case(b"<head"))
@@ -1888,7 +1977,10 @@ let activeMainPushInteractionCalls = null;
 let pluginOutDispatched = false;
 let pluginDetachDispatched = false;
 let subInputChangeCallback = null;
-let currentWindowType = "main";
+let currentWindowType = config.windowType;
+const ipcListeners = new Map();
+const browserWindows = new Map();
+const browserReady = new Set();
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
 function call(method, params, interactionId) {{
@@ -1906,6 +1998,131 @@ function interactionCall(method, params) {{
   const promise = call(method, params, interactionId);
   if (interactionId && activeMainPushInteractionCalls) activeMainPushInteractionCalls.push(promise.catch(() => undefined));
   return promise;
+}}
+function boundedBrowserArgs(args) {{
+  if (!Array.isArray(args) || args.length > 32) throw new TypeError("uTools BrowserWindow IPC accepts at most 32 arguments.");
+  let encoded;
+  try {{ encoded = JSON.stringify(args); }} catch {{ throw new TypeError("uTools BrowserWindow IPC arguments must be JSON-serializable."); }}
+  if (typeof encoded !== "string" || new TextEncoder().encode(encoded).byteLength > 262144) throw new RangeError("uTools BrowserWindow IPC arguments exceed 256 KiB.");
+  return JSON.parse(encoded);
+}}
+function validBrowserChannel(channel) {{
+  return typeof channel === "string" && channel.length > 0 && Array.from(channel).length <= 128 && !/[\u0000-\u001f\u007f]/.test(channel);
+}}
+function dispatchBrowserIpc(channel, args) {{
+  if (!validBrowserChannel(channel) || !Array.isArray(args)) return;
+  const listeners = ipcListeners.get(channel);
+  if (!listeners) return;
+  const event = Object.freeze({{ sender: null }});
+  for (const listener of Array.from(listeners)) {{
+    try {{ listener(event, ...args); }} catch (error) {{ console.error("uTools BrowserWindow IPC listener failed", error); }}
+  }}
+}}
+const ipcRenderer = Object.freeze({{
+  on(channel, listener) {{
+    if (!validBrowserChannel(channel) || typeof listener !== "function") return this;
+    const listeners = ipcListeners.get(channel) || new Set();
+    listeners.add(listener); ipcListeners.set(channel, listeners); return this;
+  }},
+  once(channel, listener) {{
+    if (!validBrowserChannel(channel) || typeof listener !== "function") return this;
+    const wrapped = (event, ...args) => {{ this.removeListener(channel, wrapped); listener(event, ...args); }};
+    return this.on(channel, wrapped);
+  }},
+  removeListener(channel, listener) {{
+    const listeners = ipcListeners.get(channel); if (listeners) {{ listeners.delete(listener); if (listeners.size === 0) ipcListeners.delete(channel); }} return this;
+  }},
+  off(channel, listener) {{ return this.removeListener(channel, listener); }},
+  removeAllListeners(channel) {{
+    if (channel === undefined) ipcListeners.clear();
+    else if (validBrowserChannel(channel)) ipcListeners.delete(channel);
+    return this;
+  }}
+}});
+const contextBridge = Object.freeze({{
+  exposeInMainWorld(key, value) {{
+    if (typeof key !== "string" || !/^[A-Za-z_$][A-Za-z0-9_$]{{0,63}}$/.test(key) || ["utools", "rubick", "require"].includes(key)) throw new TypeError("iHub rejected an unsafe contextBridge key.");
+    if (Object.prototype.hasOwnProperty.call(window, key)) throw new Error("The requested contextBridge key already exists.");
+    Object.defineProperty(window, key, {{ configurable: false, enumerable: true, writable: false, value }});
+  }}
+}});
+if (!("require" in window)) {{
+  Object.defineProperty(window, "require", {{
+    configurable: false,
+    writable: false,
+    value(name) {{
+      if (name === "electron") return Object.freeze({{ contextBridge, ipcRenderer }});
+      throw new Error("iHub's sandboxed BrowserWindow preload exposes only electron.ipcRenderer.");
+    }}
+  }});
+}}
+function browserWindowProxy(identityPromise, callback) {{
+  let browserId = null;
+  const invoke = (action, args, expectsResult) => {{
+    const operation = identityPromise.then((id) => call("compatibility.utools.browser.control", {{ browserId: id, action, args }}));
+    if (expectsResult) return operation;
+    void operation.catch((error) => console.error("iHub BrowserWindow " + action + " failed", error));
+    return undefined;
+  }};
+  const proxy = {{
+    show() {{ return invoke("show", [], false); }},
+    hide() {{ return invoke("hide", [], false); }},
+    close() {{ return invoke("close", [], false); }},
+    destroy() {{ return invoke("destroy", [], false); }},
+    focus() {{ return invoke("focus", [], false); }},
+    center() {{ return invoke("center", [], false); }},
+    maximize() {{ return invoke("maximize", [], false); }},
+    unmaximize() {{ return invoke("unmaximize", [], false); }},
+    minimize() {{ return invoke("minimize", [], false); }},
+    restore() {{ return invoke("restore", [], false); }},
+    setAlwaysOnTop(value) {{ return invoke("setAlwaysOnTop", [value], false); }},
+    setFullScreen(value) {{ return invoke("setFullScreen", [value], false); }},
+    setResizable(value) {{ return invoke("setResizable", [value], false); }},
+    setMaximizable(value) {{ return invoke("setMaximizable", [value], false); }},
+    setMinimizable(value) {{ return invoke("setMinimizable", [value], false); }},
+    setClosable(value) {{ return invoke("setClosable", [value], false); }},
+    setDecorations(value) {{ return invoke("setDecorations", [value], false); }},
+    setFocusable(value) {{ return invoke("setFocusable", [value], false); }},
+    setHasShadow(value) {{ return invoke("setShadow", [value], false); }},
+    setVisibleOnAllWorkspaces(value) {{ return invoke("setVisibleOnAllWorkspaces", [value], false); }},
+    setContentProtection(value) {{ return invoke("setContentProtection", [value], false); }},
+    setIgnoreMouseEvents(value) {{ return invoke("setIgnoreMouseEvents", [value], false); }},
+    setSkipTaskbar(value) {{ return invoke("setSkipTaskbar", [value], false); }},
+    setTitle(value) {{ return invoke("setTitle", [value], false); }},
+    setSize(width, height) {{ return invoke("setSize", [width, height], false); }},
+    setPosition(x, y) {{ return invoke("setPosition", [x, y], false); }},
+    isVisible() {{ return invoke("isVisible", [], true); }},
+    isFocused() {{ return invoke("isFocused", [], true); }},
+    isMaximized() {{ return invoke("isMaximized", [], true); }},
+    isMinimized() {{ return invoke("isMinimized", [], true); }},
+    isFullScreen() {{ return invoke("isFullScreen", [], true); }},
+    isResizable() {{ return invoke("isResizable", [], true); }},
+    isAlwaysOnTop() {{ return invoke("isAlwaysOnTop", [], true); }},
+    getTitle() {{ return invoke("getTitle", [], true); }},
+    getSize() {{ return invoke("getSize", [], true); }},
+    getPosition() {{ return invoke("getPosition", [], true); }},
+    webContents: Object.freeze({{
+      send(channel, ...args) {{
+        if (!validBrowserChannel(channel)) throw new TypeError("uTools BrowserWindow IPC channel is invalid.");
+        const cloned = boundedBrowserArgs(args);
+        void identityPromise.then((id) => call("compatibility.utools.browser.send", {{ browserId: id, channel, args: cloned }}))
+          .catch((error) => console.error("iHub BrowserWindow send failed", error));
+      }},
+      executeJavaScript(script) {{
+        if (typeof script !== "string" || script.length === 0 || Array.from(script).length > 65536) return Promise.reject(new TypeError("uTools BrowserWindow script is invalid."));
+        return identityPromise.then((id) => call("compatibility.utools.browser.executeJavaScript", {{ browserId: id, script }}));
+      }},
+      reload() {{ return invoke("reload", [], false); }}
+    }})
+  }};
+  const frozen = Object.freeze(proxy);
+  void identityPromise.then((id) => {{
+    browserId = id;
+    const record = {{ proxy: frozen, callback: typeof callback === "function" ? callback : null, called: false }};
+    browserWindows.set(id, record);
+    if (browserReady.has(id) && record.callback) {{ record.called = true; record.callback(frozen); }}
+  }}).catch((error) => console.error("iHub BrowserWindow creation failed", error));
+  return frozen;
 }}
 function pngDataUrlForCopyImage(value) {{
   if (typeof value === "string") {{
@@ -2579,6 +2796,42 @@ window.addEventListener("message", (event) => {{
     return;
   }}
   if (message.type !== "event") return;
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.ipc") {{
+    const payload = message.payload;
+    if (payload && validBrowserChannel(payload.channel) && Array.isArray(payload.args)) dispatchBrowserIpc(payload.channel, payload.args);
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.ready") {{
+    const browserId = message.payload && message.payload.browserId;
+    if (typeof browserId !== "string") return;
+    browserReady.add(browserId);
+    const record = browserWindows.get(browserId);
+    if (record && !record.called && record.callback) {{ record.called = true; record.callback(record.proxy); }}
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.execute") {{
+    const payload = message.payload;
+    if (config.windowType !== "browser" || !payload || typeof payload.requestId !== "string" || typeof payload.script !== "string" || payload.script.length === 0 || Array.from(payload.script).length > 65536) return;
+    void Promise.resolve()
+      .then(() => (0, eval)(payload.script))
+      .then((value) => Promise.resolve(value))
+      .then((value) => {{
+        let result = null;
+        if (value !== undefined) {{
+          const encoded = JSON.stringify(value);
+          if (typeof encoded !== "string" || new TextEncoder().encode(encoded).byteLength > 262144) throw new RangeError("BrowserWindow script result exceeds 256 KiB.");
+          result = JSON.parse(encoded);
+        }}
+        return call("compatibility.utools.browser.executeResult", {{ requestId: payload.requestId, ok: true, result, error: null }});
+      }})
+      .catch((error) => call("compatibility.utools.browser.executeResult", {{
+        requestId: payload.requestId,
+        ok: false,
+        result: null,
+        error: String(error instanceof Error ? error.message : error).slice(0, 2000)
+      }}).catch(() => undefined));
+    return;
+  }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/subInput.change") {{
     if (typeof subInputChangeCallback === "function") {{
       const text = message.payload && typeof message.payload.text === "string" ? message.payload.text : "";
@@ -2588,7 +2841,7 @@ window.addEventListener("message", (event) => {{
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.windowType") {{
     const value = message.payload && message.payload.windowType;
-    if (value === "main" || value === "detach") {{
+    if (value === "main" || value === "detach" || value === "browser") {{
       currentWindowType = value;
       if (value === "detach") invokePluginDetach();
     }}
@@ -2646,6 +2899,25 @@ const utools = Object.freeze({{
       return;
     }}
     detachCallbacks.push(callback);
+  }},
+  createBrowserWindow(url, options, callback) {{
+    if (currentWindowType === "browser") throw new Error("Nested uTools BrowserWindows are not supported by this host.");
+    if (typeof url !== "string" || url.length === 0 || Array.from(url).length > 2048 || /[\u0000-\u001f\u007f]/.test(url)) throw new TypeError("uTools createBrowserWindow requires a bounded relative URL.");
+    if (typeof options === "function" && callback === undefined) {{ callback = options; options = {{}}; }}
+    if (options === undefined) options = {{}};
+    if (!options || typeof options !== "object" || Array.isArray(options)) throw new TypeError("uTools BrowserWindow options must be an object.");
+    if (callback !== undefined && typeof callback !== "function") throw new TypeError("uTools BrowserWindow callback must be a function.");
+    const identity = call("compatibility.utools.browser.create", {{ url, options }}).then((result) => {{
+      if (!result || typeof result.browserId !== "string") throw new Error("iHub returned an invalid BrowserWindow identity.");
+      return result.browserId;
+    }});
+    return browserWindowProxy(identity, callback);
+  }},
+  sendToParent(channel, ...args) {{
+    if (currentWindowType !== "browser") return;
+    if (!validBrowserChannel(channel)) throw new TypeError("uTools BrowserWindow IPC channel is invalid.");
+    void call("compatibility.utools.browser.sendToParent", {{ channel, args: boundedBrowserArgs(args) }})
+      .catch((error) => console.error("iHub sendToParent failed", error));
   }},
   getFeatures(codes) {{
     if (codes !== undefined && (!Array.isArray(codes) || codes.some((code) => typeof code !== "string"))) return [];
@@ -3038,13 +3310,22 @@ Object.defineProperties(window, {{
   utools: {{ value: utools, configurable: false, writable: false }},
   rubick: {{ value: utools, configurable: false, writable: false }}
 }});
-Promise.all([
+if (config.windowType === "browser") {{
+  try {{
+    Object.defineProperty(window, "close", {{
+      configurable: false,
+      writable: false,
+      value() {{ void call("compatibility.utools.browser.closeSelf", {{}}).catch((error) => console.error("iHub BrowserWindow self-close failed", error)); }}
+    }});
+  }} catch {{ /* WebView may keep its native close property non-configurable. */ }}
+}}
+const bootstrap = Promise.all([
   call("compatibility.utools.dbStorage.snapshot", {{}}),
   call("compatibility.utools.dbCryptoStorage.snapshot", {{}}).catch((error) => {{
     console.error("iHub compatibility dbCryptoStorage restore failed", error);
     return null;
   }}),
-  call("compatibility.utools.features.snapshot", {{}})
+  config.lifecycleOwner ? call("compatibility.utools.features.snapshot", {{}}) : Promise.resolve([])
 ])
   .then(([snapshot, cryptoSnapshot, features]) => {{
     if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {{
@@ -3063,13 +3344,17 @@ Promise.all([
         if (feature && !dynamicFeatureVersions.has(feature.code)) dynamicFeatures.set(feature.code, feature);
       }}
     }}
-    ensureMainPushProviderRegistration();
+    if (config.lifecycleOwner) ensureMainPushProviderRegistration();
   }})
   .catch((error) => console.error("iHub compatibility storage restore failed", error))
-  .then(() => call("lifecycle.ready", {{}}))
+  .then(() => config.lifecycleOwner ? call("lifecycle.ready", {{}}) : undefined)
   .then(() => invoke(readyCallbacks, undefined))
   .catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
-window.addEventListener("pagehide", () => {{ stopDesktopCaptureSlot(); invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}, {{ once: true }});
+void bootstrap;
+window.addEventListener("pagehide", () => {{
+  stopDesktopCaptureSlot();
+  if (config.lifecycleOwner) {{ invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}
+}}, {{ once: true }});
 }})();
 "#
     )
@@ -3091,11 +3376,12 @@ fn write_status(stream: &mut TcpStream, status: &str) -> io::Result<()> {
     stream.write_all(header.as_bytes())
 }
 
-fn plugin_csp(allows_remote_network: bool) -> &'static str {
-    if allows_remote_network {
-        NETWORKED_PLUGIN_CSP
-    } else {
-        LOCKED_PLUGIN_CSP
+fn plugin_csp(allows_remote_network: bool, allows_script_execution: bool) -> &'static str {
+    match (allows_remote_network, allows_script_execution) {
+        (true, true) => NETWORKED_BROWSER_PLUGIN_CSP,
+        (false, true) => LOCKED_BROWSER_PLUGIN_CSP,
+        (true, false) => NETWORKED_PLUGIN_CSP,
+        (false, false) => LOCKED_PLUGIN_CSP,
     }
 }
 
@@ -3180,6 +3466,7 @@ mod tests {
                 allows_microphone: false,
                 allows_remote_network,
                 utools_compat: None,
+                utools_browser_preload_src: None,
             },
         )
     }
@@ -3192,6 +3479,8 @@ mod tests {
             commands: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
             paths: Default::default(),
+            window_type: "main".to_owned(),
+            lifecycle_owner: true,
         }
     }
 
@@ -3439,6 +3728,8 @@ mod tests {
             paths: [("home".to_owned(), "C:\\Users\\Tester".to_owned())]
                 .into_iter()
                 .collect(),
+            window_type: "main".to_owned(),
+            lifecycle_owner: true,
         };
         let script = String::from_utf8(
             render_utools_compat_script(&config).expect("compatibility bootstrap should render"),
@@ -3610,7 +3901,9 @@ mod tests {
         assert!(feature_snapshot < lifecycle_ready);
         assert!(script.contains("utools-color-picker"));
         assert!(!script.contains("require("));
-        assert!(!script.contains("electron"));
+        assert!(script.contains("if (name === \"electron\")"));
+        assert!(script.contains("Object.freeze({ contextBridge, ipcRenderer })"));
+        assert!(!script.contains("require('fs')"));
 
         let root =
             std::env::temp_dir().join(format!("ihub-utools-bootstrap-{}", uuid::Uuid::new_v4()));
@@ -3622,7 +3915,7 @@ mod tests {
         )
         .expect("entry should be written");
         let document = String::from_utf8(
-            inject_utools_compat_script(&entry).expect("entry should receive bootstrap tag"),
+            inject_utools_compat_script(&entry, None).expect("entry should receive bootstrap tag"),
         )
         .expect("injected entry should stay UTF-8");
         let bootstrap = document
@@ -3635,6 +3928,21 @@ mod tests {
             bootstrap < page_script,
             "the compatibility global must exist before package JavaScript evaluates"
         );
+        let browser_document = String::from_utf8(
+            inject_utools_compat_script(&entry, Some("preload.js"))
+                .expect("BrowserWindow entry should receive its sandboxed preload"),
+        )
+        .expect("BrowserWindow entry should stay UTF-8");
+        let browser_bootstrap = browser_document
+            .find("__ihub_utools_compat.js")
+            .expect("BrowserWindow host bootstrap");
+        let preload = browser_document
+            .find("preload.js")
+            .expect("BrowserWindow preload tag");
+        let browser_page_script = browser_document
+            .find("window.pluginLoaded")
+            .expect("BrowserWindow page script");
+        assert!(browser_bootstrap < preload && preload < browser_page_script);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3811,6 +4119,7 @@ mod tests {
             allows_remote_network: false,
             utools_compat_script: None,
             utools_documents: None,
+            utools_browser_preload_src: None,
         };
         assert!(resolve_asset_path(&bundle, "/v1/route-token/").is_some());
         assert!(
@@ -3955,6 +4264,32 @@ mod tests {
             assert_eq!(server.release(&lease.lease_id).as_deref(), Some(plugin_id));
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn unsafe_eval_is_scoped_only_to_browserwindow_documents() {
+        let server = PluginAssetServer::new();
+        let plugin_id = "ihub-plugin-browser-script-csp";
+        let (root, bundle) = temporary_bundle(plugin_id, false);
+        let surface = server
+            .issue(bundle.clone(), PluginFrontendPurpose::Surface)
+            .expect("surface should issue");
+        let browser = server
+            .issue(bundle, PluginFrontendPurpose::Browser)
+            .expect("BrowserWindow should issue");
+        let surface_response = fetch_lease_response(&surface);
+        let browser_response = fetch_lease_response(&browser);
+        assert!(!surface_response.contains("script-src 'self' 'unsafe-eval'"));
+        assert!(browser_response.contains("script-src 'self' 'unsafe-eval'"));
+        assert_eq!(
+            server.release(&surface.lease_id).as_deref(),
+            Some(plugin_id)
+        );
+        assert_eq!(
+            server.release(&browser.lease_id).as_deref(),
+            Some(plugin_id)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4148,6 +4483,36 @@ mod tests {
         assert!(server.is_active_for(&second.lease_id, plugin_id));
 
         assert_eq!(server.release(&second.lease_id).as_deref(), Some(plugin_id));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn browser_leases_survive_primary_handoff_and_report_their_purpose() {
+        let server = PluginAssetServer::new();
+        let plugin_id = "ihub-plugin-browser-lease-test";
+        let (root, bundle) = temporary_bundle(plugin_id, false);
+        let surface = server
+            .issue(bundle.clone(), PluginFrontendPurpose::Surface)
+            .expect("surface lease should issue");
+        let browser = server
+            .issue(bundle.clone(), PluginFrontendPurpose::Browser)
+            .expect("browser lease should issue");
+        let runtime = server
+            .issue(bundle, PluginFrontendPurpose::Runtime)
+            .expect("runtime handoff should issue");
+
+        assert!(!server.is_active_for(&surface.lease_id, plugin_id));
+        assert!(server.is_active_for(&runtime.lease_id, plugin_id));
+        assert!(server.is_active_browser_for(&browser.lease_id, plugin_id));
+        let released = server
+            .release(&browser.lease_id)
+            .expect("browser lease should release");
+        assert_eq!(released.plugin_id, plugin_id);
+        assert_eq!(released.purpose, PluginFrontendPurpose::Browser);
+        assert_eq!(
+            server.release(&runtime.lease_id).as_deref(),
+            Some(plugin_id)
+        );
         let _ = fs::remove_dir_all(root);
     }
 

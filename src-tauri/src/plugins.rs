@@ -253,6 +253,9 @@ pub(crate) struct PluginFrontendAssetBundle {
     /// preload: the loopback asset server injects only iHub's fixed shim before
     /// the page's own scripts run.
     pub(crate) utools_compat: Option<UtoolsCompatRuntimeConfig>,
+    /// Optional, explicitly requested BrowserWindow preload projected as a
+    /// sandboxed ordinary script after iHub's fixed IPC shim.
+    pub(crate) utools_browser_preload_src: Option<String>,
 }
 
 /// The small, serializable part of a uTools feature declaration that the
@@ -267,6 +270,12 @@ pub(crate) struct UtoolsCompatRuntimeConfig {
     pub(crate) commands: Vec<UtoolsCompatCommand>,
     pub(crate) native_id: String,
     pub(crate) paths: BTreeMap<String, String>,
+    /// Host-owned role for this exact document. BrowserWindow children never
+    /// learn or choose this value from their route or package URL.
+    pub(crate) window_type: String,
+    /// Only the primary surface/runtime document owns plugin registration
+    /// lifecycle. Auxiliary BrowserWindow documents must not clear it.
+    pub(crate) lifecycle_owner: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1915,8 +1924,140 @@ impl PluginManager {
                     commands: manifest.utools_commands,
                     native_id: String::new(),
                     paths: BTreeMap::new(),
+                    window_type: "main".to_owned(),
+                    lifecycle_owner: true,
                 }),
+            utools_browser_preload_src: None,
         })
+    }
+
+    /// Resolves a uTools BrowserWindow entry against the already-validated
+    /// frontend bundle. The requested URL can select only a sibling HTML file;
+    /// it cannot introduce a scheme, absolute path, traversal, encoded path,
+    /// preload file, symlink escape, or directory.
+    pub(crate) fn browser_frontend_asset_bundle(
+        &self,
+        plugin_id: &str,
+        relative_url: &str,
+        preload: Option<&str>,
+    ) -> Result<(PluginFrontendAssetBundle, String), String> {
+        let mut bundle = self.frontend_asset_bundle(plugin_id)?;
+        let Some(config) = bundle.utools_compat.as_mut() else {
+            return Err("BrowserWindow compatibility is available only to validated imported uTools packages.".to_owned());
+        };
+        if relative_url.is_empty()
+            || relative_url.chars().count() > 2048
+            || relative_url.chars().any(char::is_control)
+            || relative_url.starts_with('/')
+            || relative_url.starts_with('\\')
+        {
+            return Err("uTools BrowserWindow requires a bounded relative HTML URL.".to_owned());
+        }
+        let fragment_index = relative_url.find('#').unwrap_or(relative_url.len());
+        let query_index = relative_url[..fragment_index]
+            .find('?')
+            .unwrap_or(fragment_index);
+        let path_text = &relative_url[..query_index];
+        let suffix = &relative_url[query_index..];
+        if path_text.is_empty()
+            || path_text.contains('\\')
+            || path_text.contains('%')
+            || path_text.contains(':')
+        {
+            return Err(
+                "uTools BrowserWindow URL must name a plain relative HTML path.".to_owned(),
+            );
+        }
+        let relative = Path::new(path_text);
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(
+                "uTools BrowserWindow URL cannot traverse outside its frontend bundle.".to_owned(),
+            );
+        }
+        if !relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+            })
+        {
+            return Err("uTools BrowserWindow entry must be an HTML file.".to_owned());
+        }
+        let entry = bundle
+            .asset_root
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| {
+                format!("Could not resolve uTools BrowserWindow entry '{path_text}': {error}")
+            })?;
+        ensure_path_within(&entry, &bundle.asset_root, "uTools BrowserWindow entry")?;
+        if !entry.is_file() {
+            return Err("uTools BrowserWindow entry is not a file.".to_owned());
+        }
+        if bundle
+            .blocked_asset_paths
+            .iter()
+            .any(|blocked| blocked == &entry)
+        {
+            return Err(
+                "A uTools Electron preload cannot be opened as a BrowserWindow page.".to_owned(),
+            );
+        }
+        bundle.entry = entry;
+        config.window_type = "browser".to_owned();
+        config.lifecycle_owner = false;
+        if let Some(preload) = preload {
+            if preload.is_empty()
+                || preload.chars().count() > 1024
+                || !preload.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+                })
+            {
+                return Err(
+                    "uTools BrowserWindow preload must be a plain relative JavaScript path."
+                        .to_owned(),
+                );
+            }
+            let relative_preload = Path::new(preload);
+            if relative_preload
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                || !relative_preload
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("js")
+                            || extension.eq_ignore_ascii_case("cjs")
+                    })
+            {
+                return Err(
+                    "uTools BrowserWindow preload must be a relative JavaScript file.".to_owned(),
+                );
+            }
+            let resolved = bundle
+                .asset_root
+                .join(relative_preload)
+                .canonicalize()
+                .map_err(|error| {
+                    format!("Could not resolve uTools BrowserWindow preload '{preload}': {error}")
+                })?;
+            ensure_path_within(
+                &resolved,
+                &bundle.asset_root,
+                "uTools BrowserWindow preload",
+            )?;
+            if !resolved.is_file() {
+                return Err("uTools BrowserWindow preload is not a file.".to_owned());
+            }
+            bundle
+                .blocked_asset_paths
+                .retain(|blocked| blocked != &resolved);
+            bundle.utools_browser_preload_src = Some(preload.replace('\\', "/"));
+        }
+        Ok((bundle, suffix.to_owned()))
     }
 
     /// Regression-test helper for callers that only need the resolved entry.
@@ -4854,8 +4995,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
 
     if manifest.compatibility.is_utools() {
         // The fixed source-compatibility shim has a distinct trust contract:
-        // no preload/Node/Electron bridge, plus only a user-confirmed one-pixel
-        // `screenColorPick` projection. Preserve that boundary across updates.
+        // no ambient Node bridge; an explicitly requested BrowserWindow
+        // preload receives only the fixed ipcRenderer/contextBridge shim.
+        // Preserve that boundary across updates.
         declaration
             .permissions
             .insert("compatibility.utools.screenColorPick.confirmed".to_owned());
@@ -4886,6 +5028,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.imagePath.pickerGranted".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.browserWindow.sandboxedIpc".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5396,6 +5541,8 @@ mod tests {
             .expect("uTools entry should be written");
         fs::write(source.join("preload.js"), "require('fs')")
             .expect("uTools preload fixture should be written");
+        fs::write(source.join("child.html"), "<main>child</main>")
+            .expect("uTools BrowserWindow entry should be written");
         write_test_png(&source.join("logo.png"), [10, 132, 255, 255]);
         fs::write(
             source.join("plugin.json"),
@@ -5440,6 +5587,9 @@ mod tests {
         assert!(plugin_security_declaration(&manifest)
             .permissions
             .contains("compatibility.utools.imagePath.pickerGranted"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.browserWindow.sandboxedIpc"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);
@@ -5455,6 +5605,39 @@ mod tests {
         assert!(bundle.utools_compat.is_some());
         assert!(bundle.allows_display_capture);
         assert_eq!(bundle.blocked_asset_paths.len(), 1);
+        let (browser_bundle, suffix) = manager
+            .browser_frontend_asset_bundle(
+                &plugin_id,
+                "child.html?mode=preview#result",
+                Some("preload.js"),
+            )
+            .expect("a sibling BrowserWindow page and explicit sandboxed preload should resolve");
+        assert!(browser_bundle.entry.ends_with("child.html"));
+        assert_eq!(
+            browser_bundle.utools_browser_preload_src.as_deref(),
+            Some("preload.js")
+        );
+        assert!(browser_bundle.blocked_asset_paths.is_empty());
+        assert_eq!(suffix, "?mode=preview#result");
+        let browser_config = browser_bundle
+            .utools_compat
+            .expect("BrowserWindow should keep the host compatibility shim");
+        assert_eq!(browser_config.window_type, "browser");
+        assert!(!browser_config.lifecycle_owner);
+        for unsafe_url in [
+            "../index.html",
+            "%2e%2e/index.html",
+            "/index.html",
+            "https://example.com/index.html",
+            "preload.js",
+        ] {
+            assert!(manager
+                .browser_frontend_asset_bundle(&plugin_id, unsafe_url, None)
+                .is_err());
+        }
+        assert!(manager
+            .browser_frontend_asset_bundle(&plugin_id, "child.html", Some("../preload.js"))
+            .is_err());
         assert!(manager
             .uses_utools_compatibility(&plugin_id)
             .expect("compatibility marker should be readable"));

@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
+    State, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -62,6 +63,10 @@ use crate::{
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
     system_open::{LocalOpenKind, LocalPathIdentity, PreparedLocalOpen},
+    utools_browser_window::{
+        create_utools_browser_window, UtoolsBrowserWindowOptions, UtoolsBrowserWindowRegistry,
+        UTOOLS_BROWSER_WINDOW_PREFIX,
+    },
 };
 
 const LAUNCHER_INITIAL_BLUR_GRACE: Duration = Duration::from_millis(700);
@@ -1904,6 +1909,7 @@ pub async fn get_plugin_frontend_url(
     purpose: Option<PluginFrontendPurpose>,
     window: tauri::WebviewWindow,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<PluginFrontendLease, String> {
     if !is_plugin_id(&plugin_id) {
@@ -1911,8 +1917,19 @@ pub async fn get_plugin_frontend_url(
     }
     let caller_label = window.label().to_owned();
     let purpose = purpose.unwrap_or(PluginFrontendPurpose::Surface);
+    if purpose == PluginFrontendPurpose::Browser {
+        return Err(
+            "BrowserWindow leases are issued only to a host-registered auxiliary window."
+                .to_owned(),
+        );
+    }
     let detached_caller = caller_label != "main";
     if detached_caller {
+        if caller_label.starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+            return Err(
+                "A uTools BrowserWindow cannot request a primary plugin frontend lease.".to_owned(),
+            );
+        }
         detached.validate_window_plugin(&caller_label, &plugin_id)?;
         if purpose != PluginFrontendPurpose::Surface {
             return Err(
@@ -1926,6 +1943,12 @@ pub async fn get_plugin_frontend_url(
         return Err(format!(
             "Plugin '{plugin_id}' is already open in its detached window."
         ));
+    }
+
+    for label in browser_windows.labels_owned_by_plugin(&plugin_id) {
+        if let Some(child) = window.app_handle().get_webview_window(&label) {
+            let _ = child.close();
+        }
     }
 
     let plugins = state.plugins.clone();
@@ -1978,6 +2001,146 @@ pub async fn get_plugin_frontend_url(
         }
     }
     Ok(lease)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UtoolsBrowserWindowBootstrap {
+    browser_id: String,
+    plugin: PluginInfo,
+    lease: PluginFrontendLease,
+}
+
+/// Issues the auxiliary loopback document only to the registry-owned native
+/// child window that is asking. Its opaque query ID is never authoritative.
+#[tauri::command]
+pub async fn get_utools_browser_window_bootstrap(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
+    state: State<'_, AppState>,
+) -> Result<UtoolsBrowserWindowBootstrap, String> {
+    if !window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+        return Err(
+            "Only a registered uTools BrowserWindow can request this bootstrap.".to_owned(),
+        );
+    }
+    let record = browser_windows.bootstrap_for_window(window.label())?;
+    let plugins = state.plugins.clone();
+    let plugin_assets = state.plugin_assets.clone();
+    let plugin_settings = state.plugin_settings.clone();
+    let utools_documents = state.utools_documents.clone();
+    let plugin_id = record.plugin_id.clone();
+    let plugin = state
+        .plugins
+        .list()
+        .into_iter()
+        .find(|plugin| plugin.id == record.plugin_id && plugin.enabled)
+        .ok_or_else(|| format!("Plugin '{}' is not available.", record.plugin_id))?;
+    let relative_url = record.relative_url.clone();
+    let preload = record.preload.clone();
+    let parent_lease_id = record.parent_lease_id.clone();
+    let asset_server = plugin_assets.clone();
+    let mut lease = tauri::async_runtime::spawn_blocking(move || {
+        plugin_assets.with_plugin_operation(&plugin_id, || {
+            if !asset_server.is_active_surface_for(&parent_lease_id, &plugin_id) {
+                return Err(
+                    "The parent uTools plugin surface closed before its BrowserWindow loaded."
+                        .to_owned(),
+                );
+            }
+            let (mut bundle, suffix) = plugins.browser_frontend_asset_bundle(
+                &plugin_id,
+                &relative_url,
+                preload.as_deref(),
+            )?;
+            if let Some(config) = bundle.utools_compat.as_mut() {
+                populate_utools_runtime_system_config(&app, &plugin_settings, config)?;
+            }
+            let mut lease = plugin_assets.issue_with_utools_documents(
+                bundle,
+                PluginFrontendPurpose::Browser,
+                Some(utools_documents),
+            )?;
+            lease.url.push_str(&suffix);
+            Ok::<PluginFrontendLease, String>(lease)
+        })
+    })
+    .await
+    .map_err(|error| format!("uTools BrowserWindow bundle task failed: {error}"))??;
+    let previous_lease =
+        match browser_windows.bind_lease(window.label(), &record.browser_id, &lease.lease_id) {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = state.plugin_assets.release(&lease.lease_id);
+                return Err(error);
+            }
+        };
+    if let Some(previous_lease) = previous_lease {
+        let _ = state.plugin_assets.release(&previous_lease);
+    }
+    if !browser_windows
+        .parent_session_for_child(window.label())
+        .is_some_and(|(plugin_id, parent_lease_id)| {
+            state
+                .plugin_assets
+                .is_active_surface_for(&parent_lease_id, &plugin_id)
+        })
+    {
+        browser_windows.unbind_owned_lease(window.label(), &lease.lease_id);
+        let _ = state.plugin_assets.release(&lease.lease_id);
+        let _ = window.close();
+        return Err(
+            "The parent uTools plugin surface closed during BrowserWindow startup.".to_owned(),
+        );
+    }
+    // Keep the mutable binding local above so suffix projection cannot be
+    // mistaken for an additional unverified asset-server path.
+    lease.allows_display_capture = false;
+    lease.allows_microphone = false;
+    Ok(UtoolsBrowserWindowBootstrap {
+        browser_id: record.browser_id,
+        plugin,
+        lease,
+    })
+}
+
+#[tauri::command]
+pub fn mark_utools_browser_window_ready(
+    lease_id: String,
+    window: tauri::WebviewWindow,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !browser_windows.owns_lease(window.label(), &lease_id) {
+        return Err("This uTools BrowserWindow ready signal does not own its lease.".to_owned());
+    }
+    let (browser_id, plugin_id, parent_label) = browser_windows.parent_for_child(window.label())?;
+    if !state
+        .plugin_assets
+        .is_active_browser_for(&lease_id, &plugin_id)
+    {
+        return Err("This uTools BrowserWindow frontend lease has expired.".to_owned());
+    }
+    let parent_is_active = browser_windows
+        .parent_session_for_child(window.label())
+        .is_some_and(|(plugin_id, parent_lease_id)| {
+            state
+                .plugin_assets
+                .is_active_surface_for(&parent_lease_id, &plugin_id)
+        });
+    if !parent_is_active {
+        let _ = window.close();
+        return Err("The parent uTools plugin surface is no longer active.".to_owned());
+    }
+    window
+        .app_handle()
+        .emit_to(
+            &parent_label,
+            "ihub://utools-browser/ready",
+            json!({ "browserId": browser_id }),
+        )
+        .map_err(|error| format!("Could not announce uTools BrowserWindow readiness: {error}"))
 }
 
 /// Stages one launcher-context transfer after the trusted iHub parent has
@@ -2054,6 +2217,7 @@ pub fn revoke_plugin_launcher_context(
 fn validate_plugin_renderer_lease_caller(
     window: &tauri::WebviewWindow,
     detached: &DetachedPluginWindowRegistry,
+    browser_windows: &UtoolsBrowserWindowRegistry,
     plugin_id: &str,
     lease_id: &str,
 ) -> Result<(), String> {
@@ -2064,6 +2228,14 @@ fn validate_plugin_renderer_lease_caller(
             ));
         }
         return Ok(());
+    }
+    if window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+        if browser_windows.owns_lease(window.label(), lease_id) {
+            return Ok(());
+        }
+        return Err(
+            "This uTools BrowserWindow lease does not belong to the calling window.".to_owned(),
+        );
     }
     detached.validate_window_plugin(window.label(), plugin_id)?;
     if !detached.owns_lease(window.label(), lease_id) {
@@ -2082,12 +2254,19 @@ pub fn issue_plugin_cursor_color_approval(
     lease_id: String,
     window: tauri::WebviewWindow,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<PluginCursorColorApproval, String> {
     if !is_plugin_id(&plugin_id) {
         return Err("Invalid plugin ID.".to_owned());
     }
-    validate_plugin_renderer_lease_caller(&window, &detached, &plugin_id, &lease_id)?;
+    validate_plugin_renderer_lease_caller(
+        &window,
+        &detached,
+        &browser_windows,
+        &plugin_id,
+        &lease_id,
+    )?;
     let plugin_assets = state.plugin_assets.clone();
     plugin_assets.with_plugin_bridge_operation(&plugin_id, || {
         if !plugin_assets.is_active_surface_for(&lease_id, &plugin_id) {
@@ -2123,12 +2302,14 @@ fn release_plugin_frontend_lease(lease_id: &str, state: &AppState) -> Option<Str
     let plugin_assets = state.plugin_assets.clone();
     let host = state.host.clone();
     plugin_assets.with_plugin_operation("frontend-release", || {
-        let plugin_id = plugin_assets.release(lease_id)?;
+        let released = plugin_assets.release(lease_id)?;
         // Closing a surface is a cancellation boundary. In particular,
         // a just-dispatched launcher-context token must not remain
         // consumable while no matching iframe is alive.
-        clear_plugin_runtime_state(&host, &plugin_id);
-        Some(plugin_id)
+        if released.purpose != PluginFrontendPurpose::Browser {
+            clear_plugin_runtime_state(&host, &released.plugin_id);
+        }
+        Some(released.plugin_id)
     })
 }
 
@@ -2137,13 +2318,32 @@ pub fn release_plugin_frontend_url(
     lease_id: String,
     window: tauri::WebviewWindow,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) {
-    if window.label() != "main" && !detached.unbind_owned_lease(window.label(), &lease_id) {
+    for label in browser_windows.labels_owned_by_parent_lease(&lease_id) {
+        if let Some(child) = window.app_handle().get_webview_window(&label) {
+            let _ = child.close();
+        }
+    }
+    if window.label() != "main" && window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+        if !browser_windows.unbind_owned_lease(window.label(), &lease_id) {
+            return;
+        }
+    } else if window.label() != "main" && !detached.unbind_owned_lease(window.label(), &lease_id) {
         return;
     }
     if let Some(plugin_id) = release_plugin_frontend_lease(&lease_id, &state) {
         emit_plugin_search_providers_changed(window.app_handle(), &plugin_id, None, false);
+    }
+}
+
+fn close_utools_browser_windows_for_plugin(app: &AppHandle, plugin_id: &str) {
+    let registry = app.state::<UtoolsBrowserWindowRegistry>();
+    for label in registry.labels_owned_by_plugin(plugin_id) {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
     }
 }
 
@@ -2155,10 +2355,29 @@ pub fn touch_plugin_frontend_lease(
     lease_id: String,
     window: tauri::WebviewWindow,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) -> bool {
-    if window.label() != "main" && !detached.owns_lease(window.label(), &lease_id) {
-        return false;
+    if window.label() != "main" {
+        let owns = if window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+            let owns = browser_windows.owns_lease(window.label(), &lease_id);
+            let parent_is_active = browser_windows
+                .parent_session_for_child(window.label())
+                .is_some_and(|(plugin_id, parent_lease_id)| {
+                    state
+                        .plugin_assets
+                        .is_active_surface_for(&parent_lease_id, &plugin_id)
+                });
+            if owns && !parent_is_active {
+                let _ = window.close();
+            }
+            owns && parent_is_active
+        } else {
+            detached.owns_lease(window.label(), &lease_id)
+        };
+        if !owns {
+            return false;
+        }
     }
     state.plugin_assets.touch(&lease_id)
 }
@@ -2192,6 +2411,7 @@ pub async fn install_plugin_from_git(
         );
         error
     })?;
+    close_utools_browser_windows_for_plugin(&app, &plugin.id);
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
     host_log::info(
@@ -2314,6 +2534,9 @@ pub async fn update_plugin_from_git(
     // moving ref. In either case the caller refreshes the catalog and may
     // explicitly reopen a newly issued frontend lease.
     let mut update = update;
+    if update.updated {
+        close_utools_browser_windows_for_plugin(&app, &update.plugin.id);
+    }
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
     host_log::info(
@@ -2362,6 +2585,7 @@ pub async fn link_plugin_from_local(
         host_log::warn("plugins", format!("Local plugin link failed: {error}"));
         error
     })?;
+    close_utools_browser_windows_for_plugin(&app, &plugin.id);
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
     host_log::info(
@@ -2417,6 +2641,7 @@ pub async fn link_official_workspace_plugin(
         );
         error
     })?;
+    close_utools_browser_windows_for_plugin(&app, &plugin.id);
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut plugin));
     host_log::info(
@@ -2458,6 +2683,7 @@ pub async fn unlink_plugin_from_local(
         );
         error
     })?;
+    close_utools_browser_windows_for_plugin(&app, &log_plugin_id);
     refresh_plugin_shortcuts(&app);
     host_log::info(
         "plugins",
@@ -2501,6 +2727,9 @@ pub async fn set_plugin_enabled(
         );
         error
     })?;
+    if !enabled {
+        close_utools_browser_windows_for_plugin(&app, &update.plugin.id);
+    }
     refresh_plugin_shortcuts(&app);
     state.project_plugin_shortcut_statuses(std::slice::from_mut(&mut update.plugin));
     let _ = app.emit(
@@ -2584,6 +2813,7 @@ pub async fn uninstall_managed_plugin(
         );
         error
     })?;
+    close_utools_browser_windows_for_plugin(&app, &removed.plugin_id);
     refresh_plugin_shortcuts(&app);
     let _ = app.emit(
         &format!("ihub://plugin/{}/lifecycle", removed.plugin_id),
@@ -2812,12 +3042,19 @@ pub async fn capture_plugin_screen_screenshot(
     lease_id: String,
     window: tauri::WebviewWindow,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<crate::native_screenshot::NativeScreenshot, String> {
     if !is_plugin_id(&plugin_id) {
         return Err("Invalid plugin ID.".to_owned());
     }
-    validate_plugin_renderer_lease_caller(&window, &detached, &plugin_id, &lease_id)?;
+    validate_plugin_renderer_lease_caller(
+        &window,
+        &detached,
+        &browser_windows,
+        &plugin_id,
+        &lease_id,
+    )?;
     let plugin_assets = state.plugin_assets.clone();
     let reservation_server = plugin_assets.clone();
     let native_command_lease = plugin_assets.with_plugin_bridge_operation(&plugin_id, || {
@@ -4264,6 +4501,7 @@ pub async fn plugin_host_call(
     window: tauri::WebviewWindow,
     request: PluginHostCall,
     detached: State<'_, DetachedPluginWindowRegistry>,
+    browser_windows: State<'_, UtoolsBrowserWindowRegistry>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let request = request.request;
@@ -4273,12 +4511,181 @@ pub async fn plugin_host_call(
     validate_plugin_renderer_lease_caller(
         &window,
         &detached,
+        &browser_windows,
         &request.plugin_id,
         &request.lease_id,
     )?;
+    let browser_child = window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX)
+        && browser_windows.owns_lease(window.label(), &request.lease_id);
+    if browser_child
+        && !browser_windows
+            .parent_session_for_child(window.label())
+            .is_some_and(|(plugin_id, parent_lease_id)| {
+                plugin_id == request.plugin_id
+                    && state
+                        .plugin_assets
+                        .is_active_surface_for(&parent_lease_id, &plugin_id)
+            })
+    {
+        let _ = window.close();
+        return Err("The parent uTools plugin surface is no longer active.".to_owned());
+    }
+    if browser_child
+        && (request.method.starts_with("commands.")
+            || request.method.starts_with("search.")
+            || request.method.starts_with("compatibility.utools.features.")
+            || matches!(
+                request.method.as_str(),
+                "lifecycle.ready" | "lifecycle.dispose"
+            ))
+    {
+        return Err(
+            "A uTools BrowserWindow cannot own or mutate the primary plugin runtime lifecycle."
+                .to_owned(),
+        );
+    }
     let request_plugin_id = request.plugin_id.clone();
     let plugin_assets = state.plugin_assets.clone();
     let server = plugin_assets.clone();
+
+    if request.method == "compatibility.utools.browser.executeJavaScript" {
+        let execution = plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !request.surface
+                || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+            {
+                return Err("uTools BrowserWindow script execution requires its visible active parent surface.".to_owned());
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            validate_exact_plugin_params(&request.params, &["browserId", "script"])?;
+            let browser_id = required_string(&request.params, "browserId")?;
+            let script = required_string(&request.params, "script")?;
+            if script.is_empty()
+                || script.chars().count() > 65_536
+                || script.len() > 262_144
+            {
+                return Err("uTools BrowserWindow script exceeds the execution limit.".to_owned());
+            }
+            let execution = browser_windows.begin_execution(
+                browser_id,
+                &request_plugin_id,
+                &request.lease_id,
+            )?;
+            if let Err(error) = app.emit_to(
+                &execution.window_label,
+                "ihub://utools-browser/execute",
+                json!({ "requestId": execution.request_id, "script": script }),
+            ) {
+                browser_windows.cancel_execution(&execution.request_id);
+                return Err(format!("Could not dispatch uTools BrowserWindow script: {error}"));
+            }
+            Ok(execution)
+        })?;
+        let request_id = execution.request_id.clone();
+        let response = tauri::async_runtime::spawn_blocking(move || {
+            execution.response.recv_timeout(Duration::from_secs(15))
+        })
+        .await
+        .map_err(|error| format!("uTools BrowserWindow script wait failed: {error}"))?;
+        match response {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                browser_windows.cancel_execution(&request_id);
+                return Err("uTools BrowserWindow script timed out after 15 seconds.".to_owned());
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                browser_windows.cancel_execution(&request_id);
+                return Err("uTools BrowserWindow script channel closed unexpectedly.".to_owned());
+            }
+        }
+    }
+
+    if request.method == "compatibility.utools.browser.executeResult" {
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_browser_for(&request.lease_id, &request_plugin_id)
+                || !browser_windows.owns_lease(window.label(), &request.lease_id)
+            {
+                return Err(
+                    "Only the target uTools BrowserWindow can complete its script.".to_owned(),
+                );
+            }
+            validate_exact_plugin_params(&request.params, &["requestId", "ok", "result", "error"])?;
+            let request_id = required_string(&request.params, "requestId")?;
+            let ok = request
+                .params
+                .get("ok")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "uTools BrowserWindow script result requires ok.".to_owned())?;
+            let response = if ok {
+                let value = request.params.get("result").cloned().unwrap_or(Value::Null);
+                if serde_json::to_vec(&value)
+                    .map_err(|error| {
+                        format!("Could not encode BrowserWindow script result: {error}")
+                    })?
+                    .len()
+                    > 256 * 1024
+                {
+                    return Err("uTools BrowserWindow script result exceeds 256 KiB.".to_owned());
+                }
+                Ok(value)
+            } else {
+                let error = request
+                    .params
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .filter(|error| !error.is_empty() && error.chars().count() <= 2_000)
+                    .unwrap_or("uTools BrowserWindow script failed.")
+                    .to_owned();
+                Err(error)
+            };
+            browser_windows.complete_execution(window.label(), request_id, response)?;
+            Ok(json!({ "completed": true }))
+        });
+    }
+
+    if request.method == "compatibility.utools.browser.sendToParent" {
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_browser_for(&request.lease_id, &request_plugin_id) {
+                return Err(
+                    "uTools sendToParent is available only inside its active BrowserWindow."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            validate_exact_plugin_params(&request.params, &["channel", "args"])?;
+            let channel = required_string(&request.params, "channel")?;
+            let args = validate_utools_browser_message(&request.params, channel)?;
+            let (browser_id, plugin_id, parent_label) =
+                browser_windows.parent_for_child(window.label())?;
+            if plugin_id != request_plugin_id {
+                return Err(
+                    "This uTools BrowserWindow parent channel belongs to another plugin."
+                        .to_owned(),
+                );
+            }
+            app.emit_to(
+                &parent_label,
+                "ihub://utools-browser/parent-message",
+                json!({ "browserId": browser_id, "channel": channel, "args": args }),
+            )
+            .map_err(|error| format!("Could not deliver the uTools parent message: {error}"))?;
+            Ok(json!({ "sent": true }))
+        });
+    }
+
+    if request.method == "compatibility.utools.browser.closeSelf" {
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_browser_for(&request.lease_id, &request_plugin_id)
+                || !browser_windows.owns_lease(window.label(), &request.lease_id)
+            {
+                return Err("Only an active uTools BrowserWindow can close itself.".to_owned());
+            }
+            validate_exact_plugin_params(&request.params, &[])?;
+            window
+                .close()
+                .map_err(|error| format!("Could not close the uTools BrowserWindow: {error}"))?;
+            Ok(json!({ "closed": true }))
+        });
+    }
 
     // Cursor sampling is deliberately not a normal synchronous Bridge call.
     // The trusted parent only reaches this branch after rendering its own
@@ -4510,6 +4917,366 @@ fn emit_plugin_search_providers_changed(
     let _ = app.emit_to("main", "ihub://plugin-search-providers-changed", payload);
 }
 
+fn validate_utools_browser_message<'a>(
+    params: &'a Value,
+    channel: &str,
+) -> Result<&'a Vec<Value>, String> {
+    if channel.is_empty() || channel.chars().count() > 128 || channel.chars().any(char::is_control)
+    {
+        return Err("uTools BrowserWindow IPC channel is invalid.".to_owned());
+    }
+    let args = params
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "uTools BrowserWindow IPC args must be an array.".to_owned())?;
+    if args.len() > 32 {
+        return Err("uTools BrowserWindow IPC accepts at most 32 arguments.".to_owned());
+    }
+    let encoded = serde_json::to_vec(args)
+        .map_err(|error| format!("Could not encode uTools BrowserWindow IPC arguments: {error}"))?;
+    if encoded.len() > 256 * 1024 {
+        return Err("uTools BrowserWindow IPC arguments exceed 256 KiB.".to_owned());
+    }
+    Ok(args)
+}
+
+fn handle_utools_browser_window_control(
+    app: &AppHandle,
+    request: &PluginHostRequest,
+) -> Result<Value, String> {
+    if !request.surface {
+        return Err("uTools BrowserWindow controls require the visible parent surface.".to_owned());
+    }
+    validate_exact_plugin_params(&request.params, &["browserId", "action", "args"])?;
+    let browser_id = required_string(&request.params, "browserId")?;
+    let action = required_string(&request.params, "action")?;
+    let args = request
+        .params
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "uTools BrowserWindow control args must be an array.".to_owned())?;
+    if args.len() > 4 {
+        return Err("uTools BrowserWindow control accepts at most four arguments.".to_owned());
+    }
+    let registry = app.state::<UtoolsBrowserWindowRegistry>();
+    let (label, _) = registry.validate_parent(browser_id, &request.plugin_id, &request.lease_id)?;
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "This uTools BrowserWindow is no longer available.".to_owned())?;
+    let no_args = || {
+        if args.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "uTools BrowserWindow {action} does not accept arguments."
+            ))
+        }
+    };
+    let boolean_arg = || {
+        if args.len() != 1 {
+            return Err(format!(
+                "uTools BrowserWindow {action} requires one boolean argument."
+            ));
+        }
+        args[0]
+            .as_bool()
+            .ok_or_else(|| format!("uTools BrowserWindow {action} requires one boolean argument."))
+    };
+    match action {
+        "show" => {
+            no_args()?;
+            window
+                .show()
+                .map_err(|error| format!("Could not show BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "hide" => {
+            no_args()?;
+            window
+                .hide()
+                .map_err(|error| format!("Could not hide BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "close" | "destroy" => {
+            no_args()?;
+            window
+                .close()
+                .map_err(|error| format!("Could not close BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "focus" => {
+            no_args()?;
+            window
+                .set_focus()
+                .map_err(|error| format!("Could not focus BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "center" => {
+            no_args()?;
+            window
+                .center()
+                .map_err(|error| format!("Could not center BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "maximize" => {
+            no_args()?;
+            window
+                .maximize()
+                .map_err(|error| format!("Could not maximize BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "unmaximize" => {
+            no_args()?;
+            window
+                .unmaximize()
+                .map_err(|error| format!("Could not restore BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "minimize" => {
+            no_args()?;
+            window
+                .minimize()
+                .map_err(|error| format!("Could not minimize BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "restore" => {
+            no_args()?;
+            window
+                .unminimize()
+                .map_err(|error| format!("Could not restore BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "setAlwaysOnTop" => {
+            window.set_always_on_top(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow always-on-top state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setFullScreen" => {
+            window.set_fullscreen(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow fullscreen state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setResizable" => {
+            window.set_resizable(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow resizable state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setMaximizable" => {
+            window.set_maximizable(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow maximizable state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setMinimizable" => {
+            window.set_minimizable(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow minimizable state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setClosable" => {
+            window.set_closable(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow closable state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setDecorations" => {
+            window
+                .set_decorations(boolean_arg()?)
+                .map_err(|error| format!("Could not change BrowserWindow frame state: {error}"))?;
+            Ok(Value::Null)
+        }
+        "setFocusable" => {
+            window.set_focusable(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow focusable state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setShadow" => {
+            window
+                .set_shadow(boolean_arg()?)
+                .map_err(|error| format!("Could not change BrowserWindow shadow state: {error}"))?;
+            Ok(Value::Null)
+        }
+        "setVisibleOnAllWorkspaces" => {
+            window
+                .set_visible_on_all_workspaces(boolean_arg()?)
+                .map_err(|error| {
+                    format!("Could not change BrowserWindow workspace visibility: {error}")
+                })?;
+            Ok(Value::Null)
+        }
+        "setContentProtection" => {
+            window
+                .set_content_protected(boolean_arg()?)
+                .map_err(|error| {
+                    format!("Could not change BrowserWindow content protection: {error}")
+                })?;
+            Ok(Value::Null)
+        }
+        "setIgnoreMouseEvents" => {
+            window
+                .set_ignore_cursor_events(boolean_arg()?)
+                .map_err(|error| {
+                    format!("Could not change BrowserWindow mouse handling: {error}")
+                })?;
+            Ok(Value::Null)
+        }
+        "setSkipTaskbar" => {
+            window.set_skip_taskbar(boolean_arg()?).map_err(|error| {
+                format!("Could not change BrowserWindow taskbar state: {error}")
+            })?;
+            Ok(Value::Null)
+        }
+        "setTitle" => {
+            let title = args
+                .first()
+                .and_then(Value::as_str)
+                .filter(|title| {
+                    title.chars().count() <= 160 && !title.chars().any(char::is_control)
+                })
+                .ok_or_else(|| {
+                    "uTools BrowserWindow setTitle requires one bounded string.".to_owned()
+                })?;
+            if args.len() != 1 {
+                return Err("uTools BrowserWindow setTitle requires one bounded string.".to_owned());
+            }
+            window
+                .set_title(title)
+                .map_err(|error| format!("Could not change BrowserWindow title: {error}"))?;
+            Ok(Value::Null)
+        }
+        "setSize" => {
+            let (width, height) = browser_window_pair(args, action, 64.0, 16_384.0)?;
+            window
+                .set_size(LogicalSize::new(width, height))
+                .map_err(|error| format!("Could not resize BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "setPosition" => {
+            let (x, y) = browser_window_pair(args, action, -100_000.0, 100_000.0)?;
+            window
+                .set_position(LogicalPosition::new(x, y))
+                .map_err(|error| format!("Could not move BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "isVisible" => {
+            no_args()?;
+            window
+                .is_visible()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow visibility: {error}"))
+        }
+        "isFocused" => {
+            no_args()?;
+            window
+                .is_focused()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow focus: {error}"))
+        }
+        "isMaximized" => {
+            no_args()?;
+            window
+                .is_maximized()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow maximized state: {error}"))
+        }
+        "isMinimized" => {
+            no_args()?;
+            window
+                .is_minimized()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow minimized state: {error}"))
+        }
+        "isFullScreen" => {
+            no_args()?;
+            window
+                .is_fullscreen()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow fullscreen state: {error}"))
+        }
+        "isResizable" => {
+            no_args()?;
+            window
+                .is_resizable()
+                .map(Value::Bool)
+                .map_err(|error| format!("Could not read BrowserWindow resizable state: {error}"))
+        }
+        "isAlwaysOnTop" => {
+            no_args()?;
+            window.is_always_on_top().map(Value::Bool).map_err(|error| {
+                format!("Could not read BrowserWindow always-on-top state: {error}")
+            })
+        }
+        "getTitle" => {
+            no_args()?;
+            window
+                .title()
+                .map(Value::String)
+                .map_err(|error| format!("Could not read BrowserWindow title: {error}"))
+        }
+        "reload" => {
+            no_args()?;
+            window
+                .reload()
+                .map_err(|error| format!("Could not reload BrowserWindow: {error}"))?;
+            Ok(Value::Null)
+        }
+        "getSize" => {
+            no_args()?;
+            let size = window
+                .inner_size()
+                .map_err(|error| format!("Could not read BrowserWindow size: {error}"))?;
+            let scale = window
+                .scale_factor()
+                .map_err(|error| format!("Could not read BrowserWindow scale factor: {error}"))?;
+            let logical = size.to_logical::<f64>(scale);
+            Ok(json!([
+                logical.width.round() as i64,
+                logical.height.round() as i64
+            ]))
+        }
+        "getPosition" => {
+            no_args()?;
+            let position = window
+                .outer_position()
+                .map_err(|error| format!("Could not read BrowserWindow position: {error}"))?;
+            let scale = window
+                .scale_factor()
+                .map_err(|error| format!("Could not read BrowserWindow scale factor: {error}"))?;
+            let logical = position.to_logical::<f64>(scale);
+            Ok(json!([logical.x.round() as i64, logical.y.round() as i64]))
+        }
+        _ => Err(format!(
+            "Unsupported uTools BrowserWindow method '{action}'."
+        )),
+    }
+}
+
+fn browser_window_pair(
+    args: &[Value],
+    action: &str,
+    minimum: f64,
+    maximum: f64,
+) -> Result<(f64, f64), String> {
+    if args.len() != 2 {
+        return Err(format!(
+            "uTools BrowserWindow {action} requires two numbers."
+        ));
+    }
+    let first = args[0]
+        .as_f64()
+        .filter(|value| value.is_finite() && (minimum..=maximum).contains(value));
+    let second = args[1]
+        .as_f64()
+        .filter(|value| value.is_finite() && (minimum..=maximum).contains(value));
+    first.zip(second).ok_or_else(|| {
+        format!("uTools BrowserWindow {action} arguments are outside the supported range.")
+    })
+}
+
 fn plugin_search_providers_changed_payload(
     plugin_id: &str,
     provider_id: Option<&str>,
@@ -4534,6 +5301,70 @@ fn plugin_host_call_for_active_lease(
 ) -> Result<Value, String> {
     ensure_plugin_host_request_is_allowed(&request, state)?;
     match request.method.as_str() {
+        "compatibility.utools.browser.create" => {
+            if !request.surface
+                || !state
+                    .plugin_assets
+                    .is_active_surface_for(&request.lease_id, &request.plugin_id)
+            {
+                return Err("uTools BrowserWindow creation requires the plugin's visible active surface.".to_owned());
+            }
+            validate_exact_plugin_params(&request.params, &["url", "options"])?;
+            let url = required_string(&request.params, "url")?;
+            // Resolve before native window reservation so an invalid or escaped
+            // path cannot leave behind even a blank host window.
+            let options = match request.params.get("options") {
+                None | Some(Value::Null) => UtoolsBrowserWindowOptions::default(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                    format!("Invalid or unsupported uTools BrowserWindow options: {error}")
+                })?,
+            };
+            state.plugins.browser_frontend_asset_bundle(
+                &request.plugin_id,
+                url,
+                options.preload(),
+            )?;
+            let registry = app.state::<UtoolsBrowserWindowRegistry>();
+            let parent_window_label = detached_plugin_event_target(
+                app,
+                state,
+                &request.plugin_id,
+            )?
+            .unwrap_or_else(|| "main".to_owned());
+            let opened = create_utools_browser_window(
+                app,
+                &registry,
+                &request.plugin_id,
+                &request.lease_id,
+                &parent_window_label,
+                url,
+                options,
+            )?;
+            serde_json::to_value(opened)
+                .map_err(|error| format!("Could not encode uTools BrowserWindow identity: {error}"))
+        }
+        "compatibility.utools.browser.control" => {
+            handle_utools_browser_window_control(app, &request)
+        }
+        "compatibility.utools.browser.send" => {
+            validate_exact_plugin_params(&request.params, &["browserId", "channel", "args"])?;
+            let browser_id = required_string(&request.params, "browserId")?;
+            let channel = required_string(&request.params, "channel")?;
+            let args = validate_utools_browser_message(&request.params, channel)?;
+            let registry = app.state::<UtoolsBrowserWindowRegistry>();
+            let (label, _) = registry.validate_parent(
+                browser_id,
+                &request.plugin_id,
+                &request.lease_id,
+            )?;
+            app.emit_to(
+                &label,
+                "ihub://utools-browser/child-message",
+                json!({ "browserId": browser_id, "channel": channel, "args": args }),
+            )
+            .map_err(|error| format!("Could not deliver the uTools BrowserWindow message: {error}"))?;
+            Ok(json!({ "sent": true }))
+        }
         "commands.register" => {
             let definition = required_value(&request.params, "definition")?;
             let command_id = definition
@@ -8089,14 +8920,20 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     }
 }
 
-fn release_detached_plugin_window_lease(window: &tauri::Window) {
+fn release_hosted_plugin_window_lease(window: &tauri::Window) {
     if window.label() == "main" {
         return;
     }
-    let Some(detached) = window.try_state::<DetachedPluginWindowRegistry>() else {
-        return;
+    let lease_id = if window.label().starts_with(UTOOLS_BROWSER_WINDOW_PREFIX) {
+        window
+            .try_state::<UtoolsBrowserWindowRegistry>()
+            .and_then(|registry| registry.take_window_lease(window.label()))
+    } else {
+        window
+            .try_state::<DetachedPluginWindowRegistry>()
+            .and_then(|registry| registry.take_window_lease(window.label()))
     };
-    let Some(lease_id) = detached.take_window_lease(window.label()) else {
+    let Some(lease_id) = lease_id else {
         return;
     };
     if let Some(state) = window.try_state::<AppState>() {
@@ -8141,14 +8978,14 @@ pub fn run() {
                     // its iframe lease before the webview disappears so React
                     // cleanup is an optimization rather than a security
                     // boundary.
-                    release_detached_plugin_window_lease(window);
+                    release_hosted_plugin_window_lease(window);
                 }
             }
             WindowEvent::Destroyed => {
                 host_log::debug("lifecycle", "A host window was destroyed.");
                 // Platform shutdown paths can skip CloseRequested. This is
                 // idempotent after the normal close branch.
-                release_detached_plugin_window_lease(window);
+                release_hosted_plugin_window_lease(window);
             }
             WindowEvent::Focused(true) => {
                 if window.label() != "main" {
@@ -8201,6 +9038,7 @@ pub fn run() {
             let clipboard_history = state.clipboard_history.clone();
             app.manage(state);
             app.manage(DetachedPluginWindowRegistry::default());
+            app.manage(UtoolsBrowserWindowRegistry::default());
             let dialog_app = app.handle().clone();
             app.state::<AppState>()
                 .plugin_assets
@@ -8273,6 +9111,8 @@ pub fn run() {
             crate::detached_plugin_window::get_detached_plugin_window_bootstrap,
             crate::detached_plugin_window::close_detached_plugin_window,
             get_plugin_frontend_url,
+            get_utools_browser_window_bootstrap,
+            mark_utools_browser_window_ready,
             issue_plugin_launcher_context,
             revoke_plugin_launcher_context,
             issue_plugin_cursor_color_approval,

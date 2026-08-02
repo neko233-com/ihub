@@ -24,6 +24,8 @@ commands.allow = [
   "get_detached_plugin_window_bootstrap",
   "close_detached_plugin_window",
   "get_plugin_frontend_url",
+  "get_utools_browser_window_bootstrap",
+  "mark_utools_browser_window_ready",
   "issue_plugin_launcher_context",
   "revoke_plugin_launcher_context",
   "issue_plugin_cursor_color_approval",
@@ -116,6 +118,17 @@ commands.allow = [
   "close_detached_plugin_window",
   "get_plugin_frontend_url",
   "issue_plugin_cursor_color_approval",
+  "release_plugin_frontend_url",
+  "touch_plugin_frontend_lease",
+  "plugin_host_call",
+]
+
+[[permission]]
+identifier = "utools-browser-window-host-commands"
+description = "Minimal custom-command surface for a registry-owned uTools BrowserWindow host."
+commands.allow = [
+  "get_utools_browser_window_bootstrap",
+  "mark_utools_browser_window_ready",
   "release_plugin_frontend_url",
   "touch_plugin_frontend_lease",
   "plugin_host_call",

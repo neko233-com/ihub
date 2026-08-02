@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-browser",
+  "description": "Minimal local capability for host-owned uTools BrowserWindow containers. The loopback plugin iframe receives no Tauri permission.",
+  "local": true,
+  "windows": ["plugin-browser-*"],
+  "permissions": [
+    "utools-browser-window-host-commands",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

@@ -35,6 +35,36 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeFiles", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
+    const browserId = "550e8400-e29b-41d4-a716-446655440000";
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.create", {
+      url: "child.html?mode=test",
+      options: { show: false, webPreferences: { preload: "preload.js" } },
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.control", {
+      browserId,
+      action: "show",
+      args: [],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.send", {
+      browserId,
+      channel: "ping",
+      args: [{ value: 1 }],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.sendToParent", {
+      channel: "pong",
+      args: [123],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.executeJavaScript", {
+      browserId,
+      script: "Promise.resolve({ ok: true })",
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.executeResult", {
+      requestId: browserId,
+      ok: true,
+      result: { ok: true },
+      error: null,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.browser.closeSelf", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -216,6 +246,10 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.dbCryptoStorage.set")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.input.pasteImage")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.window.redirect")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.browser.executeJavaScript")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.browser.executeResult")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.browser.send")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.browser.sendToParent")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",
       dataBase64: "c2FmZQ==",
