@@ -226,6 +226,7 @@ const pluginCenterStyles = `
     background: var(--apple-center-glass);
     backdrop-filter: blur(24px) saturate(170%);
     border-bottom: 1px solid var(--apple-center-separator);
+    cursor: grab;
     display: grid;
     gap: 12px;
     grid-template-columns: 220px minmax(127px, 1fr) auto;
@@ -237,20 +238,8 @@ const pluginCenterStyles = `
     z-index: 20;
   }
 
-  .plugin-center__drag-zone {
-    cursor: grab;
-    height: 10px;
-    left: 50%;
-    position: absolute;
-    top: 0;
-    touch-action: none;
-    transform: translateX(-50%);
-    user-select: none;
-    width: min(160px, 24vw);
-    z-index: 2;
-  }
-
-  .plugin-center__drag-zone.is-armed { cursor: grabbing; }
+  .plugin-center__topbar.is-drag-pending,
+  .plugin-center__topbar.is-drag-pending input { cursor: grabbing; }
 
   .plugin-center__crumbs,
   .plugin-center__top-actions,
@@ -1433,11 +1422,13 @@ export function PluginCenter({
     return windowDragControllerRef.current;
   };
 
-  const handleWindowDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleWindowDragPointerDown = (event: React.PointerEvent<HTMLElement>) => {
     if (!onStartWindowDrag || !supportsLongPressWindowDrag(event)) {
       return;
     }
-    event.preventDefault();
+    if (event.target instanceof Element && event.target.closest("button, a, [role='button']")) {
+      return;
+    }
     const windowDragController = getWindowDragController();
     if (!windowDragController.begin({
       pointerId: event.pointerId,
@@ -1453,7 +1444,7 @@ export function PluginCenter({
     }
   };
 
-  const handleWindowDragPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleWindowDragPointerMove = (event: React.PointerEvent<HTMLElement>) => {
     windowDragControllerRef.current?.move({
       pointerId: event.pointerId,
       x: event.clientX,
@@ -2243,19 +2234,17 @@ export function PluginCenter({
             transition={{ type: "spring", stiffness: 380, damping: 34 }}
             >
               <style>{pluginCenterStyles}</style>
-              <header className="plugin-center__topbar">
-                <div
-                  aria-label={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
-                  className={`plugin-center__drag-zone${dragPending ? " is-armed" : ""}`}
-                  data-drag-long-press-ms={WINDOW_DRAG_LONG_PRESS_MS}
-                  data-window-drag-handle=""
-                  onLostPointerCapture={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
-                  onPointerCancel={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
-                  onPointerDown={handleWindowDragPointerDown}
-                  onPointerMove={handleWindowDragPointerMove}
-                  onPointerUp={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
-                  title={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
-                />
+              <header
+                className={`plugin-center__topbar${dragPending ? " is-drag-pending" : ""}`}
+                data-drag-long-press-ms={WINDOW_DRAG_LONG_PRESS_MS}
+                data-window-drag-handle=""
+                onLostPointerCapture={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
+                onPointerCancel={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
+                onPointerDown={handleWindowDragPointerDown}
+                onPointerMove={handleWindowDragPointerMove}
+                onPointerUp={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
+                title={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
+              >
                 <div className="plugin-center__crumbs">
                 <span className="plugin-center__crumb-mark"><Puzzle size={11} /></span>
                 <span className="plugin-center__crumb-title">管理中心</span>

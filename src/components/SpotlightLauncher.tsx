@@ -557,34 +557,21 @@ const spotlightLauncherStyles = `
     background: rgba(191, 90, 242, .38);
   }
 
-  .ihub-spotlight__drag-zone {
-    align-items: center;
-    cursor: grab;
-    display: flex;
-    height: 10px;
-    justify-content: center;
-    left: 50%;
-    position: absolute;
-    top: 0;
-    transform: translateX(-50%);
-    touch-action: none;
-    user-select: none;
-    width: min(160px, 24vw);
-    z-index: 3;
-  }
-
-  .ihub-spotlight__drag-zone.is-armed {
-    cursor: grabbing;
-  }
-
   .ihub-spotlight__search-row {
     background: rgba(255, 255, 255, .36);
     backdrop-filter: blur(22px) saturate(170%);
+    cursor: grab;
     display: block;
     height: 56px;
     min-height: 56px;
     padding: 0;
     position: relative;
+    user-select: none;
+  }
+
+  .ihub-spotlight__search-row.is-drag-pending,
+  .ihub-spotlight__search-row.is-drag-pending input {
+    cursor: grabbing;
   }
 
   .ihub-spotlight__brand,
@@ -612,6 +599,7 @@ const spotlightLauncherStyles = `
     min-width: 0;
     outline: 0;
     padding: 0 56px 0 12px;
+    user-select: text;
     width: 100%;
   }
 
@@ -1523,11 +1511,13 @@ export function SpotlightLauncher({
     }
   };
 
-  const handleWindowDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleWindowDragPointerDown = (event: React.PointerEvent<HTMLElement>) => {
     if (!onStartWindowDrag || !supportsLongPressWindowDrag(event)) {
       return;
     }
-    event.preventDefault();
+    if (event.target instanceof Element && event.target.closest("button, a, [role='button']")) {
+      return;
+    }
     const windowDragController = getWindowDragController();
     if (!windowDragController.begin({
       pointerId: event.pointerId,
@@ -1543,7 +1533,7 @@ export function SpotlightLauncher({
     }
   };
 
-  const handleWindowDragPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleWindowDragPointerMove = (event: React.PointerEvent<HTMLElement>) => {
     windowDragControllerRef.current?.move({
       pointerId: event.pointerId,
       x: event.clientX,
@@ -1848,9 +1838,8 @@ export function SpotlightLauncher({
               role="dialog"
               transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
             >
-              <div
-                aria-label={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
-                className={`ihub-spotlight__drag-zone${dragPending ? " is-armed" : ""}`}
+              <header
+                className={`ihub-spotlight__search-row${dragPending ? " is-drag-pending" : ""}`}
                 data-drag-long-press-ms={WINDOW_DRAG_LONG_PRESS_MS}
                 data-window-drag-handle=""
                 onLostPointerCapture={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
@@ -1859,8 +1848,7 @@ export function SpotlightLauncher({
                 onPointerMove={handleWindowDragPointerMove}
                 onPointerUp={(event) => windowDragControllerRef.current?.cancel(event.pointerId)}
                 title={`长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口`}
-              />
-              <header className="ihub-spotlight__search-row">
+              >
                 <span aria-hidden="true" className="ihub-spotlight__brand"><Command size={18} strokeWidth={2.35} /></span>
                 <label className="ihub-spotlight__search-field">
                   <Search aria-hidden="true" size={20} strokeWidth={2} />

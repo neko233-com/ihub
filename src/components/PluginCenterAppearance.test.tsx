@@ -85,22 +85,23 @@ describe("PluginCenter Apple high-saturation visual contract", () => {
     );
   });
 
-  it("reserves the shared invisible 280ms top-edge drag handle above the input", () => {
+  it("turns the full top bar into the shared 280ms long-press drag surface", () => {
     const markup = renderCenter();
     const handleIndex = markup.indexOf('data-window-drag-handle=""');
     const searchIndex = markup.lastIndexOf('class="plugin-center__search"');
 
     expect(handleIndex).toBeGreaterThan(-1);
+    expect(handleIndex).toBeGreaterThan(markup.indexOf('class="plugin-center__topbar"'));
     expect(searchIndex).toBeGreaterThan(handleIndex);
     expect(markup).toContain(`data-drag-long-press-ms="${WINDOW_DRAG_LONG_PRESS_MS}"`);
     expect(markup).toContain(`title="长按 ${WINDOW_DRAG_LONG_PRESS_MS} 毫秒后拖动窗口"`);
     expect(markup).toMatch(
-      /\.plugin-center__drag-zone \{[^}]*height: 10px;[^}]*top: 0;[^}]*width: min\(160px, 24vw\);[^}]*\}/s,
+      /\.plugin-center__topbar \{[^}]*cursor: grab;[^}]*grid-template-columns: 220px minmax\(127px, 1fr\) auto;/s,
     );
     expect(markup).toMatch(
       /\.plugin-center__topbar \{[^}]*grid-template-columns: 220px minmax\(127px, 1fr\) auto;[^}]*min-height: 48px;/s,
     );
-    expect(markup).not.toContain(".plugin-center__drag-zone::before");
+    expect(markup).not.toContain("plugin-center__drag-zone");
   });
 
   it("keeps marketplace promotional surfaces and banner assets removed", () => {
