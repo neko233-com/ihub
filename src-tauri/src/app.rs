@@ -789,6 +789,10 @@ struct PluginHostState {
     /// Applying a rename requires the exact, still-valid preview that the
     /// host generated for the same plugin and directory grant.
     batch_rename_previews: Mutex<HashMap<String, PluginBatchRenamePreview>>,
+    /// `startDrag` may expose only filesystem objects returned by a native
+    /// picker to this exact uTools iframe lease. Bind each visible raw path to
+    /// the selected object identity and revalidate it before native dragging.
+    utools_drag_grants: Mutex<HashMap<(String, String), Vec<UtoolsDragGrant>>>,
     /// Native dialogs briefly move focus away from the frameless launcher.
     /// Keep its resident auto-hide behavior suspended until every modal
     /// picker has returned to avoid dismissing the plugin UI underneath it.
@@ -832,6 +836,7 @@ impl Default for PluginHostState {
             file_grants: Mutex::new(HashMap::new()),
             launcher_contexts: Mutex::new(HashMap::new()),
             batch_rename_previews: Mutex::new(HashMap::new()),
+            utools_drag_grants: Mutex::new(HashMap::new()),
             native_dialog_depth: AtomicUsize::new(0),
             capture_focus_leases: Mutex::new(HashMap::new()),
             cursor_color_sampled_at: Mutex::new(HashMap::new()),
@@ -855,6 +860,13 @@ struct PluginFileGrant {
     plugin_id: String,
     files: Vec<SelectedPluginFile>,
     issued_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct UtoolsDragGrant {
+    path: PathBuf,
+    kind: LocalOpenKind,
+    identity: LocalPathIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -1377,6 +1389,7 @@ const UTOOLS_COPY_IMAGE_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 const MAX_UTOOLS_COPY_FILE_ITEMS: usize = 16;
 const MAX_UTOOLS_COPY_FILE_PATH_CHARS: usize = 1_024;
 const MAX_UTOOLS_COPY_FILE_PATH_BYTES: usize = 8 * 1024;
+const MAX_UTOOLS_DRAG_GRANTS_PER_LEASE: usize = 64;
 /// Launcher context is intentionally shorter than a filesystem picker grant:
 /// it exists only to bridge one already-chosen action while a frontend loads.
 const LAUNCHER_CONTEXT_TTL: Duration = Duration::from_secs(60);
@@ -3588,11 +3601,15 @@ fn clipboard_image_from_rgba(image: arboard::ImageData<'static>) -> Result<Clipb
 }
 
 fn validate_utools_copy_file_paths(params: &Value) -> Result<Vec<PathBuf>, String> {
+    validate_utools_file_paths(params, "copyFile")
+}
+
+fn validate_utools_file_paths(params: &Value, api: &str) -> Result<Vec<PathBuf>, String> {
     let Some(object) = params.as_object() else {
-        return Err("uTools copyFile parameters must be an object.".to_owned());
+        return Err(format!("uTools {api} parameters must be an object."));
     };
     if object.len() != 1 || !object.contains_key("paths") {
-        return Err("uTools copyFile accepts only one paths parameter.".to_owned());
+        return Err(format!("uTools {api} accepts only one paths parameter."));
     }
     let paths = object
         .get("paths")
@@ -3600,7 +3617,7 @@ fn validate_utools_copy_file_paths(params: &Value) -> Result<Vec<PathBuf>, Strin
         .ok_or_else(|| "uTools copyFile paths must be an array.".to_owned())?;
     if paths.is_empty() || paths.len() > MAX_UTOOLS_COPY_FILE_ITEMS {
         return Err(format!(
-            "uTools copyFile accepts between 1 and {MAX_UTOOLS_COPY_FILE_ITEMS} paths."
+            "uTools {api} accepts between 1 and {MAX_UTOOLS_COPY_FILE_ITEMS} paths."
         ));
     }
 
@@ -3609,7 +3626,7 @@ fn validate_utools_copy_file_paths(params: &Value) -> Result<Vec<PathBuf>, Strin
     let mut validated = Vec::with_capacity(paths.len());
     for value in paths {
         let Some(path) = value.as_str() else {
-            return Err("Every uTools copyFile path must be a string.".to_owned());
+            return Err(format!("Every uTools {api} path must be a string."));
         };
         total_bytes = total_bytes
             .checked_add(path.len())
@@ -3619,20 +3636,140 @@ fn validate_utools_copy_file_paths(params: &Value) -> Result<Vec<PathBuf>, Strin
             || total_bytes > MAX_UTOOLS_COPY_FILE_PATH_BYTES
             || path.chars().any(char::is_control)
         {
-            return Err(
-                "A uTools copyFile path is empty, too long, or contains controls.".to_owned(),
-            );
+            return Err(format!(
+                "A uTools {api} path is empty, too long, or contains controls."
+            ));
         }
         let path = PathBuf::from(path);
         if !path.is_absolute() {
-            return Err("Every uTools copyFile path must be absolute.".to_owned());
+            return Err(format!("Every uTools {api} path must be absolute."));
         }
         if !seen.insert(path.clone()) {
-            return Err("uTools copyFile does not accept duplicate paths.".to_owned());
+            return Err(format!("uTools {api} does not accept duplicate paths."));
         }
         validated.push(path);
     }
     Ok(validated)
+}
+
+fn remember_utools_drag_grants(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    paths: &[String],
+    kind: LocalOpenKind,
+) -> Result<(), String> {
+    let mut selected = Vec::with_capacity(paths.len());
+    for path in paths {
+        let prepared = crate::system_open::prepare_local_open(Path::new(path), Some(kind))?;
+        if prepared.path().to_string_lossy().as_ref() != path.as_str() {
+            return Err(
+                "A native picker result changed while its drag grant was being recorded."
+                    .to_owned(),
+            );
+        }
+        if selected
+            .iter()
+            .any(|grant: &UtoolsDragGrant| grant.identity == prepared.identity())
+        {
+            return Err(
+                "The native picker returned the same local object more than once.".to_owned(),
+            );
+        }
+        selected.push(UtoolsDragGrant {
+            path: prepared.path().to_owned(),
+            kind,
+            identity: prepared.identity(),
+        });
+    }
+
+    let mut grants = host
+        .utools_drag_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lease_grants = grants
+        .entry((plugin_id.to_owned(), lease_id.to_owned()))
+        .or_default();
+    for grant in selected {
+        lease_grants.retain(|existing| existing.path != grant.path);
+        lease_grants.push(grant);
+    }
+    if lease_grants.len() > MAX_UTOOLS_DRAG_GRANTS_PER_LEASE {
+        lease_grants.drain(..lease_grants.len() - MAX_UTOOLS_DRAG_GRANTS_PER_LEASE);
+    }
+    Ok(())
+}
+
+fn prepare_authorized_utools_drag_paths(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<Vec<PreparedLocalOpen>, String> {
+    let requested = validate_utools_file_paths(params, "startDrag")?;
+    let expected = {
+        let grants = host
+            .utools_drag_grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(lease_grants) = grants.get(&(plugin_id.to_owned(), lease_id.to_owned())) else {
+            return Err(
+                "uTools startDrag accepts only paths returned by showOpenDialog to this current plugin surface."
+                    .to_owned(),
+            );
+        };
+        requested
+            .iter()
+            .map(|path| {
+                lease_grants
+                    .iter()
+                    .find(|grant| grant.path == *path)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "uTools startDrag accepts only exact paths returned by showOpenDialog to this current plugin surface."
+                            .to_owned()
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut prepared = Vec::with_capacity(expected.len());
+    for grant in expected {
+        let item = crate::system_open::prepare_local_open(&grant.path, Some(grant.kind))?;
+        if item.path() != grant.path || item.identity() != grant.identity {
+            return Err(
+                "A file selected for uTools startDrag changed before the drag began.".to_owned(),
+            );
+        }
+        if prepared
+            .iter()
+            .any(|existing: &PreparedLocalOpen| existing.identity() == item.identity())
+        {
+            return Err("uTools startDrag targets resolve to the same local object.".to_owned());
+        }
+        prepared.push(item);
+    }
+    Ok(prepared)
+}
+
+fn dispatch_utools_file_drag(
+    app: &AppHandle,
+    window_label: String,
+    prepared: Vec<PreparedLocalOpen>,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = callback_app
+            .get_webview_window(&window_label)
+            .ok_or_else(|| "The plugin window closed before its file drag began.".to_owned())
+            .and_then(|window| crate::utools_drag::start_file_drag(&window, &prepared));
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Could not schedule the native uTools file drag: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "The native uTools file drag closed without a result.".to_owned())?
 }
 
 fn confirm_utools_copy_files(
@@ -4156,6 +4293,34 @@ pub async fn plugin_host_call(
         .map_err(|error| format!("The current-window read task failed: {error}"))??;
         drop(native_lease);
         return Ok(Value::String(value));
+    }
+
+    if request.method == "compatibility.utools.window.startDrag" {
+        let window_label = window.label().to_owned();
+        let (prepared, native_lease) = plugin_assets.with_plugin_bridge_operation(
+            &request_plugin_id,
+            || {
+                if !request.surface
+                    || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                {
+                    return Err(
+                        "uTools startDrag is available only from the plugin's visible active surface."
+                            .to_owned(),
+                    );
+                }
+                ensure_plugin_host_request_is_allowed(&request, &state)?;
+                let prepared = prepare_authorized_utools_drag_paths(
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                )?;
+                Ok((prepared, server.begin_native_command(&request_plugin_id)?))
+            },
+        )?;
+        dispatch_utools_file_drag(&app, window_label, prepared)?;
+        drop(native_lease);
+        return Ok(json!({ "completed": true }));
     }
 
     // A native worker can take up to the host command deadline. Reserve it
@@ -6683,6 +6848,10 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     remove_expired_plugin_batch_rename_previews(&mut previews);
     previews.retain(|_, preview| preview.plugin_id != plugin_id);
+    host.utools_drag_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(owner, _), _| owner != plugin_id);
     host.clear_plugin_capture_focus_leases(plugin_id);
     host.clear_plugin_cursor_color_approvals(plugin_id);
     host.clear_plugin_cursor_color_sample(plugin_id);
@@ -7319,11 +7488,24 @@ fn show_utools_dialog_on_main_thread(
             "uTools dialogs accept at most {MAX_UTOOLS_DIALOG_SELECTIONS} selections."
         ));
     }
-    paths
+    let selected = paths
         .into_iter()
-        .map(|path| canonical_utools_dialog_selection(path, folder).map(Value::String))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
+        .map(|path| canonical_utools_dialog_selection(path, folder))
+        .collect::<Result<Vec<_>, _>>()?;
+    remember_utools_drag_grants(
+        &state.host,
+        &request.plugin_id,
+        &request.lease_id,
+        &selected,
+        if folder {
+            LocalOpenKind::Folder
+        } else {
+            LocalOpenKind::File
+        },
+    )?;
+    Ok(Value::Array(
+        selected.into_iter().map(Value::String).collect(),
+    ))
 }
 
 fn dispatch_utools_dialog(app: &AppHandle, request: UtoolsDialogRequest) -> Result<Value, String> {
@@ -9667,13 +9849,13 @@ mod tests {
         native_plugin_command_input, normalize_plugin_search_results,
         normalize_utools_main_push_selection, normalized_host_target, optional_u32, optional_u8,
         physical_point_in_monitor, plugin_clipboard_history_snapshot, plugin_notification_body,
-        plugin_search_providers_changed_payload, prepare_directory_for_grant,
-        renderer_display_path, resolve_issued_plugin_search_selection,
-        revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
-        startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
-        take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
-        utools_dynamic_feature_command_id, utools_dynamic_feature_key,
-        utools_notification_click_feature_code, validate_external_url,
+        plugin_search_providers_changed_payload, prepare_authorized_utools_drag_paths,
+        prepare_directory_for_grant, remember_utools_drag_grants, renderer_display_path,
+        resolve_issued_plugin_search_selection, revoke_plugin_launcher_context_transfer,
+        set_plugin_session_secret, startup_launcher_hotkey_candidates, take_file_grant,
+        take_plugin_batch_rename_preview, take_plugin_launcher_context_transfer,
+        truncate_utf8_bytes, utools_db_storage_key, utools_dynamic_feature_command_id,
+        utools_dynamic_feature_key, utools_notification_click_feature_code, validate_external_url,
         validate_local_search_selection, validate_plugin_clipboard_text,
         validate_system_icon_request, validate_utools_copy_file_paths,
         validate_utools_dialog_options, validate_utools_dynamic_feature,
@@ -11941,6 +12123,60 @@ mod tests {
                 .expect_err("control characters must be rejected")
                 .contains("controls")
         );
+    }
+
+    #[test]
+    fn utools_file_drag_is_bound_to_the_picker_lease_and_object_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-utools-drag-grant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).expect("create file drag fixture directory");
+        let path = directory.join("selected.txt");
+        fs::write(&path, "original").expect("create selected drag fixture");
+        let canonical = canonical_selected_file(path.clone())
+            .expect("canonicalize selected drag fixture")
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let host = PluginHostState::default();
+        remember_utools_drag_grants(
+            &host,
+            "plugin-one",
+            "lease-one",
+            std::slice::from_ref(&canonical),
+            crate::system_open::LocalOpenKind::File,
+        )
+        .expect("native picker result should create a drag grant");
+
+        let params = json!({ "paths": [canonical] });
+        let prepared =
+            prepare_authorized_utools_drag_paths(&host, "plugin-one", "lease-one", &params)
+                .expect("the exact lease should prepare the selected object");
+        assert_eq!(prepared.len(), 1);
+        drop(prepared);
+        assert!(
+            prepare_authorized_utools_drag_paths(&host, "plugin-two", "lease-one", &params,)
+                .is_err()
+        );
+        assert!(
+            prepare_authorized_utools_drag_paths(&host, "plugin-one", "lease-two", &params,)
+                .is_err()
+        );
+
+        let replacement = directory.join("replacement.txt");
+        fs::write(&replacement, "replacement").expect("create replacement drag fixture");
+        fs::remove_file(&path).expect("remove selected drag fixture");
+        fs::rename(&replacement, &path).expect("replace selected path with another object");
+        assert!(
+            prepare_authorized_utools_drag_paths(&host, "plugin-one", "lease-one", &params,)
+                .expect_err("a same-kind replacement must invalidate the drag grant")
+                .contains("changed")
+        );
+
+        clear_plugin_runtime_state(&host, "plugin-one");
+        assert!(host.utools_drag_grants.lock().unwrap().is_empty());
+        fs::remove_dir_all(directory).expect("cleanup file drag fixture directory");
     }
 
     #[test]

@@ -80,6 +80,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.window.redirect",
   "compatibility.utools.window.setHeight",
   "compatibility.utools.window.showMain",
+  "compatibility.utools.window.startDrag",
   "cursorColor.sampleOnce",
   "developer.createProject",
   "filesystem.batchRename.apply",
@@ -303,6 +304,8 @@ export function validatePluginBridgeCall(
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
   const isCryptoStorageWrite = method === "compatibility.utools.dbCryptoStorage.set";
+  const isUtoolsFileList = method === "compatibility.utools.clipboard.writeFiles"
+    || method === "compatibility.utools.window.startDrag";
   const isUtoolsRedirect = method === "compatibility.utools.window.redirect";
   const isUtoolsSimulation = method.startsWith("compatibility.utools.simulate.");
   if (method === "compatibility.utools.screen.capture") {
@@ -393,6 +396,31 @@ export function validatePluginBridgeCall(
       return {
         ok: false,
         error: "uTools dbCryptoStorage.set accepts one bounded string key and JSON value.",
+        responseId,
+      };
+    }
+  }
+  if (isUtoolsFileList) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const paths = params?.paths;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["paths"]))
+      || !Array.isArray(paths)
+      || paths.length < 1
+      || paths.length > 16
+      || paths.some((path) => (
+        typeof path !== "string"
+        || path.length === 0
+        || [...path].length > 1_024
+        || [...path].some((character) => character < " " || character === "\u007f")
+      ))
+      || new TextEncoder().encode(paths.join("")).byteLength > 8 * 1_024
+      || new Set(paths).size !== paths.length
+    ) {
+      return {
+        ok: false,
+        error: "uTools file transfer requires 1-16 unique bounded path strings.",
         responseId,
       };
     }

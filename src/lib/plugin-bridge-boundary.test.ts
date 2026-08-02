@@ -32,6 +32,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeFiles", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
+      paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
@@ -162,6 +165,20 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseMove", { x: 10 })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseClick", { x: 10, y: 1.5 })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseDoubleClick", { extra: true })).ok).toBe(false);
+  });
+
+  it("rejects malformed uTools file drag path lists before host dispatch", () => {
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", { paths: [] })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
+      paths: ["C:\\same.txt", "C:\\same.txt"],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
+      paths: ["C:\\bad\nname.txt"],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
+      paths: ["C:\\ok.txt"],
+      extra: true,
+    })).ok).toBe(false);
   });
 
   it("reserves the large JSON envelope for shape-checked document writes", () => {

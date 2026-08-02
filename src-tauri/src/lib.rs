@@ -29,6 +29,7 @@ mod project_template;
 mod super_panel;
 pub mod system_open;
 mod utools_db;
+mod utools_drag;
 mod utools_foreground;
 mod utools_screen;
 mod wifi_profiles;

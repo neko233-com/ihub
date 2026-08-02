@@ -297,6 +297,10 @@ if (preview.canApply && preview.previewId) {
 
 `dbCryptoStorage.setItem/getItem/removeItem` 保持官方同步签名，并与 `dbStorage` 一样在 `onPluginReady` 前完成页面缓存水合。每个插件的随机 256 位密钥只保存在 Windows Credential Manager 或 macOS Keychain；app-data 文件除版本和插件命名空间外只保存 AES-256-GCM 密文与随机 nonce，AEAD 附加数据与加密信封同时绑定插件 ID，交换、篡改或丢失凭据时会拒绝读取和覆盖。键和值都不会明文落盘；每插件最多 128 键，键最多 48 UTF-8 字节，单值最多 64 KiB，总明文最多 512 KiB。普通更新和本地开发重载会保留密文，受管插件卸载会先删除密文再清理系统凭据。
 
+### uTools 原生文件拖拽
+
+`startDrag(path | paths)` 保留官方的 `void` 签名，并在 Windows 上进入 Shell/OLE 原生文件拖放循环。它只接受当前可见 uTools surface 在本轮 `showOpenDialog` 中明确选中的文件或文件夹，最多 16 项；宿主把返回路径与插件 ID、随机 lease ID、对象类型和文件系统身份绑定，拖动前重新打开并核对同一对象，未授权路径不会触发文件系统探测。文件被替换、surface 重载/关闭、插件停用/更新/卸载都会撤销授权；拖放进行时保留对象句柄和 native-operation reservation，因此路径不能在 Shell 接管前被同名对象替换，也不能与插件源变更并发。macOS 尚未完成真机拖放验收时会明确拒绝，不伪造成功。
+
 ### 用户选择文件与原生 worker
 
 图片、OCR 等插件不应要求用户把本地绝对路径粘贴进网页。声明 `filesystem.read: ["user-selected"]` 与 `nativeApi: true` 后，前端可以在用户点击时选择文件，再将短期 `grantId` 交给自身已声明的 worker：

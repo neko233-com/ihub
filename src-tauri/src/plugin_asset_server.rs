@@ -117,6 +117,7 @@ pub enum PluginFrontendPurpose {
 #[derive(Clone, Debug)]
 pub(crate) struct UtoolsDialogRequest {
     pub(crate) plugin_id: String,
+    pub(crate) lease_id: String,
     pub(crate) kind: String,
     pub(crate) options: Value,
 }
@@ -1146,6 +1147,7 @@ fn execute_utools_sync_dialog_request(
         .ok_or_else(|| "The synchronous dialog options must be an object.".to_owned())?;
     let result = handler(UtoolsDialogRequest {
         plugin_id: bundle.plugin_id.clone(),
+        lease_id: bundle.lease_id.clone(),
         kind: kind.to_owned(),
         options,
     })?;
@@ -2304,6 +2306,20 @@ function nextDbStorageVersion(key) {{
   dbStorageVersions.set(key, version);
   return version;
 }}
+function normalizedUtoolsFilePaths(value) {{
+  const paths = typeof value === "string" ? [value] : value;
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 16) return null;
+  const encoder = new TextEncoder();
+  let totalBytes = 0;
+  const normalized = [];
+  for (const path of paths) {{
+    if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return null;
+    totalBytes += encoder.encode(path).byteLength;
+    if (totalBytes > 8192 || normalized.includes(path)) return null;
+    normalized.push(path);
+  }}
+  return normalized;
+}}
 const dbStorage = Object.freeze({{
   setItem(rawKey, value) {{
     const key = dbStorageKey(rawKey);
@@ -2801,20 +2817,17 @@ const utools = Object.freeze({{
     return true;
   }},
   copyFile(value) {{
-    const paths = typeof value === "string" ? [value] : value;
-    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 16) return false;
-    const encoder = new TextEncoder();
-    let totalBytes = 0;
-    const normalized = [];
-    for (const path of paths) {{
-      if (typeof path !== "string" || path.length === 0 || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return false;
-      totalBytes += encoder.encode(path).byteLength;
-      if (totalBytes > 8192 || normalized.includes(path)) return false;
-      normalized.push(path);
-    }}
+    const normalized = normalizedUtoolsFilePaths(value);
+    if (!normalized) return false;
     void call("compatibility.utools.clipboard.writeFiles", {{ paths: normalized }})
       .catch((error) => console.error("iHub compatibility file copy failed", error));
     return true;
+  }},
+  startDrag(value) {{
+    const paths = normalizedUtoolsFilePaths(value);
+    if (!paths) {{ console.error("iHub rejected invalid uTools startDrag paths."); return; }}
+    void call("compatibility.utools.window.startDrag", {{ paths }})
+      .catch((error) => console.error("iHub compatibility native file drag failed", error));
   }},
   getCopyedFiles() {{
     try {{ return syncCopiedFiles(); }}
@@ -3472,6 +3485,8 @@ mod tests {
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        assert!(script.contains("startDrag(value)"));
+        assert!(script.contains("compatibility.utools.window.startDrag"));
         assert!(script.contains("dbCryptoStorage"));
         assert!(script.contains("compatibility.utools.dbCryptoStorage.snapshot"));
         assert!(script.contains("compatibility.utools.dbCryptoStorage.set"));
@@ -3697,6 +3712,7 @@ mod tests {
         let observed = seen.lock().expect("dialog requests lock");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].plugin_id, plugin_id);
+        assert_eq!(observed[0].lease_id, lease.lease_id);
         assert_eq!(observed[0].kind, "open");
         assert_eq!(observed[0].options["title"], "Choose one");
         drop(observed);
