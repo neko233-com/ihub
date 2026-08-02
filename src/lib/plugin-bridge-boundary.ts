@@ -75,6 +75,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.features.remove",
   "compatibility.utools.features.set",
   "compatibility.utools.features.snapshot",
+  "compatibility.utools.settings.open",
   "compatibility.utools.input.pasteText",
   "compatibility.utools.input.pasteImage",
   "compatibility.utools.input.pasteFiles",
@@ -343,6 +344,7 @@ export function validatePluginBridgeCall(
   const isUtoolsTool = method.startsWith("compatibility.utools.tools.");
   const isUtoolsAi = method.startsWith("compatibility.utools.ai.");
   const isUtoolsFfmpeg = method.startsWith("compatibility.utools.ffmpeg.");
+  const isUtoolsSettings = method === "compatibility.utools.settings.open";
   const isUtoolsSharp = method === "compatibility.utools.sharp.execute";
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
@@ -868,6 +870,30 @@ export function validatePluginBridgeCall(
       return {
         ok: false,
         error: "uTools FFmpeg Bridge parameters are invalid.",
+        responseId,
+      };
+    }
+  }
+  if (isUtoolsSettings) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const valid = !!params
+      && hasOnlyKeys(params, new Set(["section", "commandLabel", "autoCopy"]))
+      && ["shortcuts", "ai"].includes(String(params.section))
+      && (params.section !== "shortcuts" || (
+        typeof params.commandLabel === "string"
+        && params.commandLabel.trim().length > 0
+        && params.commandLabel === params.commandLabel.trim()
+        && [...params.commandLabel].length <= 160
+        && ![...params.commandLabel].some((character) => character < " " || character === "\u007f")
+      ))
+      && (params.section !== "shortcuts" || typeof params.autoCopy === "boolean")
+      && (params.section === "shortcuts" || (
+        params.commandLabel === undefined && params.autoCopy === undefined
+      ));
+    if (!valid) {
+      return {
+        ok: false,
+        error: "uTools settings navigation parameters are invalid.",
         responseId,
       };
     }

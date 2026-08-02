@@ -3430,6 +3430,19 @@ const utools = Object.freeze({{
     }});
     return true;
   }},
+  redirectHotKeySetting(commandLabel, autoCopy) {{
+    if (typeof commandLabel !== "string" || commandLabel.trim().length === 0 || Array.from(commandLabel).length > 160 || commandLabel.includes("\0")) return;
+    if (autoCopy !== undefined && typeof autoCopy !== "boolean") return;
+    void call("compatibility.utools.settings.open", {{
+      section: "shortcuts",
+      commandLabel: commandLabel.trim(),
+      autoCopy: autoCopy === true
+    }}).catch((error) => console.error("iHub compatibility shortcut settings navigation failed", error));
+  }},
+  redirectAiModelsSetting() {{
+    void call("compatibility.utools.settings.open", {{ section: "ai" }})
+      .catch((error) => console.error("iHub compatibility AI settings navigation failed", error));
+  }},
   hideMainWindowPasteText(value) {{
     if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > 49152) return false;
     void interactionCall("compatibility.utools.input.pasteText", {{ value }})
@@ -4385,6 +4398,9 @@ mod tests {
         assert!(script.contains("control(\"quit\")"));
         assert!(script.contains("event/utools.ffmpeg.progress"));
         assert!(script.contains("event/utools.ffmpeg.complete"));
+        assert!(script.contains("redirectHotKeySetting(commandLabel, autoCopy)"));
+        assert!(script.contains("redirectAiModelsSetting()"));
+        assert!(script.contains("compatibility.utools.settings.open"));
         assert!(script.contains("sharp: createSharp"));
         assert!(script.contains("const sandboxModule"));
         assert!(script.contains("getAppVersion"));

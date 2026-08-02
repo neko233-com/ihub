@@ -56,7 +56,7 @@ export async function onHideSearch(callback: () => void): Promise<UnlistenFn> {
 
 export interface TrayNavigationEventPayload {
   surface: "settings";
-  section: "preferences" | "about";
+  section: "preferences" | "about" | "shortcuts" | "ai";
 }
 
 export async function onTrayNavigation(
@@ -70,7 +70,9 @@ export async function onTrayNavigation(
     if (payload?.surface === "settings") {
       callback({
         surface: "settings",
-        section: payload.section === "about" ? "about" : "preferences",
+        section: ["about", "shortcuts", "ai"].includes(String(payload.section))
+          ? payload.section as TrayNavigationEventPayload["section"]
+          : "preferences",
       });
     }
   });

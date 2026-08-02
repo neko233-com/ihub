@@ -1189,6 +1189,9 @@ export function App() {
   const [launcherHotkeyDraft, setLauncherHotkeyDraft] = useState<string | null>(null);
   const [isUpdatingLauncherHotkey, setIsUpdatingLauncherHotkey] = useState(false);
   const [launcherHotkeyError, setLauncherHotkeyError] = useState<string | null>(null);
+  const [settingsNavigationSection, setSettingsNavigationSection] = useState<
+    "preferences" | "about" | "shortcuts" | "ai"
+  >("preferences");
 
   // Keep an imperative snapshot for lifecycle callbacks and async handoff
   // continuations. React state remains the UI source of truth; this ref only
@@ -2007,6 +2010,7 @@ export function App() {
           return;
         }
         setSurface("settings");
+        setSettingsNavigationSection(section);
         if (section === "about") {
           showToast("关于 iHub：版本与平台信息显示在偏好设置底部。");
         }
@@ -2026,6 +2030,21 @@ export function App() {
       unlisten.forEach((dispose) => dispose());
     };
   }, [refreshPlugins, showToast]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsNavigationSection === "preferences") {
+      return;
+    }
+    const targetId = settingsNavigationSection === "ai"
+      ? "ai-provider-title"
+      : settingsNavigationSection === "shortcuts"
+        ? "launcher-hotkey-title"
+        : "settings-title";
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [settingsNavigationSection, settingsOpen]);
 
   /**
    * Update handles are short-lived native resources. A check owns at most one
@@ -2808,6 +2827,7 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
         invalidateLauncherContextHandoff();
+        setSettingsNavigationSection("preferences");
         setSurface("settings");
         return;
       }
@@ -3265,6 +3285,7 @@ export function App() {
 
   const openSettings = () => {
     invalidateLauncherContextHandoff();
+    setSettingsNavigationSection("preferences");
     setSurface("settings");
   };
 

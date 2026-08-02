@@ -5087,6 +5087,7 @@ pub async fn plugin_host_call(
             || request.method.starts_with("compatibility.utools.tools.")
             || request.method.starts_with("compatibility.utools.ai.")
             || request.method.starts_with("compatibility.utools.ffmpeg.")
+            || request.method.starts_with("compatibility.utools.settings.")
             || matches!(
                 request.method.as_str(),
                 "lifecycle.ready" | "lifecycle.dispose"
@@ -5413,6 +5414,70 @@ pub async fn plugin_host_call(
         dispatch_utools_file_drag(&app, window_label, prepared)?;
         drop(native_lease);
         return Ok(json!({ "completed": true }));
+    }
+
+    if request.method == "compatibility.utools.settings.open" {
+        let section = plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !request.surface
+                || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+            {
+                return Err(
+                    "uTools settings navigation requires the plugin's visible active surface."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            let object = request
+                .params
+                .as_object()
+                .ok_or_else(|| "uTools settings navigation requires an object.".to_owned())?;
+            let section = required_string(&request.params, "section")?;
+            match section {
+                "ai" => {
+                    if object.len() != 1 {
+                        return Err("uTools AI settings navigation accepts no options.".to_owned());
+                    }
+                }
+                "shortcuts" => {
+                    if object
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "section" | "commandLabel" | "autoCopy"))
+                    {
+                        return Err(
+                            "uTools shortcut settings navigation contains an unknown option."
+                                .to_owned(),
+                        );
+                    }
+                    let label = required_string(&request.params, "commandLabel")?;
+                    if label.trim().is_empty()
+                        || label != label.trim()
+                        || label.chars().count() > 160
+                        || label.chars().any(char::is_control)
+                    {
+                        return Err("uTools shortcut settings command label is invalid.".to_owned());
+                    }
+                    if request
+                        .params
+                        .get("autoCopy")
+                        .and_then(Value::as_bool)
+                        .is_none()
+                    {
+                        return Err(
+                            "uTools shortcut settings autoCopy must be a boolean.".to_owned()
+                        );
+                    }
+                }
+                _ => return Err("Unknown uTools settings destination.".to_owned()),
+            }
+            Ok(section.to_owned())
+        })?;
+        show_launcher(&app);
+        app.emit(
+            "ihub://tray-navigation",
+            json!({ "surface": "settings", "section": section }),
+        )
+        .map_err(|error| format!("Could not open iHub settings: {error}"))?;
+        return Ok(json!({ "opened": true }));
     }
 
     if request.method == "compatibility.utools.sharp.execute" {

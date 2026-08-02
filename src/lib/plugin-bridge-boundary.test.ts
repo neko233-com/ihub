@@ -133,6 +133,14 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.kill", {
       requestId: browserId,
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.settings.open", {
+      section: "shortcuts",
+      commandLabel: "翻译",
+      autoCopy: true,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.settings.open", {
+      section: "ai",
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.sharp.execute", {
       input: { kind: "bytes", dataBase64: "iVBORw0KGgo=" },
       operations: [
@@ -245,6 +253,13 @@ describe("plugin iframe Bridge boundary", () => {
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.kill", {
       requestId: "not-a-request",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.settings.open", {
+      section: "ai",
+      commandLabel: "must-not-be-accepted",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.settings.open", {
+      section: "shortcuts",
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "C:\\untrusted\\image.png",
