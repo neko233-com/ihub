@@ -273,7 +273,13 @@ pub(crate) struct UtoolsCompatRuntimeConfig {
 pub(crate) struct UtoolsCompatCommand {
     pub(crate) command_id: String,
     pub(crate) code: String,
+    pub(crate) keywords: Vec<String>,
+    pub(crate) main_push: bool,
 }
+
+/// Fixed provider identity owned by the compatibility host. Imported package
+/// code cannot choose a different launcher registration for `onMainPush`.
+pub(crate) const UTOOLS_MAIN_PUSH_PROVIDER_ID: &str = "utools-main-push";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum PluginCompatibility {
@@ -357,6 +363,8 @@ struct UtoolsFeature {
     explain: Option<String>,
     #[serde(default)]
     icon: Option<String>,
+    #[serde(default)]
+    main_push: bool,
     #[serde(default)]
     cmds: Vec<UtoolsFeatureCommand>,
 }
@@ -2185,7 +2193,13 @@ impl PluginManager {
 
         Ok(declared_search_providers(&manifest)
             .iter()
-            .any(|provider| provider.id == provider_id))
+            .any(|provider| provider.id == provider_id)
+            || (provider_id == UTOOLS_MAIN_PUSH_PROVIDER_ID
+                && manifest.compatibility.is_utools()
+                && manifest
+                    .utools_commands
+                    .iter()
+                    .any(|command| command.main_push)))
     }
 
     fn secret_setting_keys_for_plugin(&self, plugin_id: &str) -> Result<Vec<String>, String> {
@@ -2684,7 +2698,7 @@ impl PluginManager {
             .collect::<Vec<_>>();
         let has_native_worker = manifest_has_native_worker(&manifest);
         let frontend_entry = manifest_frontend_entry(&manifest);
-        let search_providers = declared_search_providers(&manifest)
+        let mut search_providers = declared_search_providers(&manifest)
             .iter()
             .map(|provider| PluginSearchProviderInfo {
                 id: provider.id.clone(),
@@ -2693,6 +2707,19 @@ impl PluginManager {
                 priority: provider.priority,
             })
             .collect::<Vec<_>>();
+        if manifest.compatibility.is_utools()
+            && manifest
+                .utools_commands
+                .iter()
+                .any(|command| command.main_push)
+        {
+            search_providers.push(PluginSearchProviderInfo {
+                id: UTOOLS_MAIN_PUSH_PROVIDER_ID.to_owned(),
+                title: "uTools 主搜索推送".to_owned(),
+                trigger: None,
+                priority: Some(20),
+            });
+        }
         let launcher_context = manifest
             .permissions
             .launcher_context
@@ -3726,7 +3753,7 @@ impl UtoolsManifest {
                 description: feature.explain.clone(),
                 subtitle: None,
                 icon: feature.icon,
-                keywords,
+                keywords: keywords.clone(),
                 shortcut: None,
                 execution: Some("frontend".to_owned()),
                 binary: None,
@@ -3736,6 +3763,8 @@ impl UtoolsManifest {
             runtime_commands.push(UtoolsCompatCommand {
                 command_id,
                 code: feature.code,
+                keywords,
+                main_push: feature.main_push,
             });
         }
 
@@ -4826,6 +4855,12 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.desktopCaptureSources.systemPicker".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.mainPush.boundedText".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.mainPush.oneShotInput".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5283,6 +5318,7 @@ mod tests {
         PluginManifest, LEGACY_SOURCE_RECORD, LIFECYCLE_RECORD, LOCAL_LINKS_RECORD,
         MAX_COMMANDS_PER_PLUGIN, MAX_PERMISSION_LIST_ITEMS, MAX_PERMISSION_VALUE_CHARS,
         MAX_PROJECTED_ARTWORK_DATA_URL_BYTES, OFFICIAL_WORKSPACE_PLUGIN_SPECS, SOURCE_LOCK,
+        UTOOLS_MAIN_PUSH_PROVIDER_ID,
     };
 
     fn temporary_directory(label: &str) -> PathBuf {
@@ -5327,7 +5363,7 @@ mod tests {
     }
 
     #[test]
-    fn public_utools_manifest_projects_features_without_a_preload_or_search_grant() {
+    fn public_utools_manifest_projects_main_push_without_executing_preload() {
         let storage = temporary_directory("utools-manifest-projection");
         let source = storage.join("source");
         fs::create_dir_all(&source).expect("uTools source should be created");
@@ -5347,6 +5383,7 @@ mod tests {
   "features": [{
     "code": "pick-color",
     "explain": "屏幕取色",
+    "mainPush": true,
     "cmds": ["取色", { "type": "regex", "label": "从文本取色" }]
   }]
 }"#,
@@ -5360,6 +5397,8 @@ mod tests {
         assert_eq!(manifest.commands.len(), 1);
         assert_eq!(manifest.commands[0].id, "utools-feature-1");
         assert_eq!(manifest.utools_commands[0].code, "pick-color");
+        assert!(manifest.utools_commands[0].main_push);
+        assert_eq!(manifest.utools_commands[0].keywords, vec!["取色"]);
         assert_eq!(manifest.commands[0].keywords, vec!["取色"]);
 
         let plugin_id = manifest.id.clone();
@@ -5379,6 +5418,18 @@ mod tests {
         assert!(manager
             .uses_utools_compatibility(&plugin_id)
             .expect("compatibility marker should be readable"));
+        assert!(manager
+            .has_declared_search_provider(&plugin_id, UTOOLS_MAIN_PUSH_PROVIDER_ID)
+            .expect("main-push provider should be host-declared"));
+        let projected = manager
+            .list()
+            .into_iter()
+            .find(|plugin| plugin.id == plugin_id)
+            .expect("compatible plugin should be listed");
+        assert!(projected
+            .search_providers
+            .iter()
+            .any(|provider| provider.id == UTOOLS_MAIN_PUSH_PROVIDER_ID));
         assert!(manager
             .allows_host_method(&plugin_id, "cursorColor.sampleOnce")
             .expect("screenColorPick should be confirmation-gated rather than ambient"));

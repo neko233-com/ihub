@@ -105,6 +105,7 @@ commands.allow = [
   "invoke_plugin_frontend_command",
   "list_registered_plugin_search_providers",
   "query_plugin_search",
+  "select_utools_main_push_result",
 ]
 
 [[permission]]

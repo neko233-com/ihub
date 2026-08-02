@@ -198,6 +198,7 @@ type LauncherSurface =
   | "plugin";
 
 const isDevelopmentBuild = import.meta.env.DEV;
+const UTOOLS_MAIN_PUSH_PROVIDER_ID = "utools-main-push";
 const UPDATE_DISCOVERY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const launcherRecentStorageKey = "ihub.launcher.recent-command-ids.v1";
 const launcherUsageStorageKey = "ihub.launcher.local-usage.v1";
@@ -880,6 +881,27 @@ function createFrontendSearchSelectionEvent(
       providerId,
       resultId,
       payload: payload ?? null,
+    },
+  };
+}
+
+interface UtoolsMainPushSelectionResult {
+  show: boolean;
+  openedDetached: boolean;
+  commandId: string;
+  action: Record<string, unknown>;
+}
+
+function createUtoolsMainPushEnterEvent(
+  pluginId: string,
+  selection: UtoolsMainPushSelectionResult,
+): PluginFrontendEvent {
+  const event = createFrontendCommandEvent(pluginId, selection.commandId);
+  return {
+    ...event,
+    payload: {
+      ...(event.payload as Record<string, unknown>),
+      utoolsMainPushAction: selection.action,
     },
   };
 }
@@ -3563,6 +3585,33 @@ export function App() {
         const plugin = plugins.find((item) => item.id === result.pluginId);
         if (!plugin?.frontendEntry) {
           showToast("该插件搜索结果没有可用的前端入口。");
+          return;
+        }
+        if (
+          result.pluginProviderId === UTOOLS_MAIN_PUSH_PROVIDER_ID
+          && result.pluginSearchRequestId
+        ) {
+          const selection = await command<UtoolsMainPushSelectionResult>(
+            "select_utools_main_push_result",
+            {
+              pluginId: plugin.id,
+              providerId: result.pluginProviderId,
+              requestId: result.pluginSearchRequestId,
+              resultId: result.pluginSearchResultId,
+            },
+          );
+          recordSuccessfulAction();
+          if (!selection.show) {
+            return;
+          }
+          if (selection.openedDetached) {
+            await dismissLauncher();
+            return;
+          }
+          invalidateLauncherContextHandoff();
+          setPendingPluginEvent(createUtoolsMainPushEnterEvent(plugin.id, selection));
+          setActivePlugin(plugin);
+          setSurface("plugin");
           return;
         }
         if (result.pluginSearchRequestId) {

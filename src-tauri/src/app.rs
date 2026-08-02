@@ -57,7 +57,7 @@ use crate::{
         plan_plugin_shortcuts, PluginShortcutBinding, PluginShortcutEvent, PluginShortcutRegistry,
         PluginShortcutStatus,
     },
-    plugins::{PluginManager, UtoolsCompatRuntimeConfig},
+    plugins::{PluginManager, UtoolsCompatRuntimeConfig, UTOOLS_MAIN_PUSH_PROVIDER_ID},
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
     system_open::{LocalOpenKind, LocalPathIdentity, PreparedLocalOpen},
@@ -765,6 +765,11 @@ struct PluginHostState {
     /// an exact result without resubmitting plugin-controlled payload data
     /// when the owning frontend lives in a detached host.
     issued_search_results: Mutex<HashMap<String, IssuedPluginSearchResults>>,
+    /// A main-push result is selected in the trusted launcher, but its
+    /// synchronous uTools `onSelect` callback executes in the owning iframe.
+    /// This one-shot rendezvous binds that callback (and any immediate paste
+    /// it schedules) to the exact plugin lease that received the event.
+    pending_utools_main_push_selections: Mutex<HashMap<String, PendingUtoolsMainPushSelection>>,
     /// A frontend can access only a directory selected through the native
     /// picker during its own session. The opaque id is scoped to the plugin
     /// and expires quickly; it is never a reusable filesystem path grant.
@@ -818,6 +823,7 @@ impl Default for PluginHostState {
             secret_settings: RwLock::new(HashMap::new()),
             pending_searches: Mutex::new(HashMap::new()),
             issued_search_results: Mutex::new(HashMap::new()),
+            pending_utools_main_push_selections: Mutex::new(HashMap::new()),
             filesystem_grants: Mutex::new(HashMap::new()),
             file_grants: Mutex::new(HashMap::new()),
             launcher_contexts: Mutex::new(HashMap::new()),
@@ -1330,6 +1336,13 @@ struct IssuedPluginSearchResults {
     issued_at: Instant,
 }
 
+struct PendingUtoolsMainPushSelection {
+    plugin_id: String,
+    lease_id: Option<String>,
+    completed: bool,
+    response: SyncSender<Result<bool, String>>,
+}
+
 const PLUGIN_SEARCH_TIMEOUT: Duration = Duration::from_millis(280);
 const MAX_PENDING_PLUGIN_SEARCHES: usize = 24;
 const MAX_PLUGIN_SEARCH_RESULTS: usize = 6;
@@ -1338,6 +1351,8 @@ const MAX_PLUGIN_SEARCH_TEXT_CHARS: usize = 320;
 const MAX_PLUGIN_SEARCH_PAYLOAD_BYTES: usize = 8 * 1024;
 const PLUGIN_SEARCH_SELECTION_TTL: Duration = Duration::from_secs(60);
 const MAX_ISSUED_PLUGIN_SEARCHES: usize = 64;
+const UTOOLS_MAIN_PUSH_SELECTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_PENDING_UTOOLS_MAIN_PUSH_SELECTIONS: usize = 16;
 const FILESYSTEM_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const BATCH_RENAME_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_FILESYSTEM_GRANTS: usize = 48;
@@ -1439,6 +1454,11 @@ pub struct PluginHostRequest {
     /// the plugin is not open to the user.
     #[serde(default)]
     surface: bool,
+    /// Optional one-shot interaction issued by the trusted launcher. The
+    /// iframe can echo it only after receiving the corresponding main-push
+    /// selection event; native code binds it to that exact active lease.
+    #[serde(default)]
+    interaction_id: Option<String>,
     method: String,
     #[serde(default)]
     params: Value,
@@ -1475,6 +1495,15 @@ pub enum DetachedPluginFrontendEventRequest {
 pub struct RegisteredPluginSearchProvider {
     plugin_id: String,
     provider_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsMainPushSelectionResult {
+    show: bool,
+    opened_detached: bool,
+    command_id: String,
+    action: Value,
 }
 
 #[tauri::command]
@@ -4096,9 +4125,7 @@ fn plugin_host_call_for_active_lease(
             if !is_plugin_id(provider_id) {
                 return Err("Invalid search provider ID.".to_owned());
             }
-            if !state
-                .plugins
-                .has_declared_search_provider(&request.plugin_id, provider_id)?
+            if !has_declared_plugin_search_provider(state, &request.plugin_id, provider_id)?
             {
                 return Err(format!(
                     "Plugin search provider '{}/{}' must be declared in contributes.searchProviders before it can register.",
@@ -4479,6 +4506,43 @@ fn plugin_host_call_for_active_lease(
                 ));
             }
             dispatch_utools_redirect(app, state, &request.plugin_id, &request.params)
+        }
+        "compatibility.utools.mainPush.selectComplete" => {
+            validate_exact_plugin_params(&request.params, &["interactionId", "show"])?;
+            let interaction_id = required_string(&request.params, "interactionId")?;
+            if request.interaction_id.as_deref() != Some(interaction_id) {
+                return Err("The uTools main-push completion interaction does not match its bridge envelope."
+                    .to_owned());
+            }
+            claim_utools_main_push_interaction(
+                &state.host,
+                &request.plugin_id,
+                &request.lease_id,
+                interaction_id,
+            )?;
+            let show = request
+                .params
+                .get("show")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "uTools main-push completion requires a boolean show value."
+                    .to_owned())?;
+            let response = {
+                let mut pending = state
+                    .host
+                    .pending_utools_main_push_selections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let selection = pending.get_mut(interaction_id).ok_or_else(|| {
+                    "This uTools main-push interaction has expired.".to_owned()
+                })?;
+                if selection.completed {
+                    return Err("This uTools main-push selection was already completed.".to_owned());
+                }
+                selection.completed = true;
+                selection.response.clone()
+            };
+            let _ = response.send(Ok(show));
+            Ok(json!({ "accepted": true }))
         }
         "lifecycle.ready" => Ok(json!({ "ok": true })),
         "lifecycle.dispose" => {
@@ -5321,8 +5385,23 @@ fn ensure_plugin_host_request_is_allowed(
                 .to_owned(),
         );
     }
+    let is_utools_input = request.method.starts_with("compatibility.utools.input.");
+    let has_main_push_interaction = !request.surface
+        && is_utools_input
+        && request
+            .interaction_id
+            .as_deref()
+            .is_some_and(|interaction_id| {
+                claim_utools_main_push_interaction(
+                    &state.host,
+                    &request.plugin_id,
+                    &request.lease_id,
+                    interaction_id,
+                )
+                .is_ok()
+            });
     if (request.method.starts_with("compatibility.utools.window.")
-        || request.method.starts_with("compatibility.utools.input.")
+        || is_utools_input
         || request
             .method
             .starts_with("compatibility.utools.shell.openPath")
@@ -5337,6 +5416,7 @@ fn ensure_plugin_host_request_is_allowed(
         || request.method == "compatibility.utools.window.redirect"
         || request.method == "compatibility.utools.clipboard.writeFiles")
         && !request.surface
+        && !has_main_push_interaction
     {
         return Err(
             "uTools window, input, and confirmed file-copy methods require the plugin's visible active surface."
@@ -5359,6 +5439,40 @@ fn ensure_plugin_host_request_is_allowed(
                 request.plugin_id, request.method, permission
             ));
         }
+    }
+    Ok(())
+}
+
+fn claim_utools_main_push_interaction(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    interaction_id: &str,
+) -> Result<(), String> {
+    if interaction_id.is_empty()
+        || interaction_id.len() > 128
+        || interaction_id.chars().any(char::is_control)
+    {
+        return Err("The uTools main-push interaction ID is invalid.".to_owned());
+    }
+    let mut pending = host
+        .pending_utools_main_push_selections
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let selection = pending
+        .get_mut(interaction_id)
+        .ok_or_else(|| "This uTools main-push interaction has expired.".to_owned())?;
+    if selection.plugin_id != plugin_id || selection.completed {
+        return Err("This uTools main-push interaction is unavailable.".to_owned());
+    }
+    match selection.lease_id.as_deref() {
+        Some(owner) if owner != lease_id => {
+            return Err(
+                "This uTools main-push interaction belongs to another plugin session.".to_owned(),
+            );
+        }
+        None => selection.lease_id = Some(lease_id.to_owned()),
+        Some(_) => {}
     }
     Ok(())
 }
@@ -5530,9 +5644,7 @@ pub fn dispatch_detached_plugin_frontend_event(
             {
                 return Err("Invalid plugin search selection.".to_owned());
             }
-            if !state
-                .plugins
-                .has_declared_search_provider(&plugin_id, &provider_id)?
+            if !has_declared_plugin_search_provider(&state, &plugin_id, &provider_id)?
                 || !state
                     .host
                     .search_providers
@@ -5685,7 +5797,8 @@ pub fn list_registered_plugin_search_providers(
             "Only the trusted main iHub surface can inspect provider readiness.".to_owned(),
         );
     }
-    let plugins = state.plugins.list();
+    let mut plugins = state.plugins.list();
+    project_utools_dynamic_features(&state.plugins, &state.plugin_settings, &mut plugins);
     let declared = plugins
         .iter()
         .filter(|plugin| plugin.enabled)
@@ -5863,6 +5976,259 @@ pub async fn query_plugin_search(
     })
 }
 
+fn normalize_utools_main_push_selection(value: &Value) -> Result<(String, Value, Value), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "uTools main-push selection payload must be an object.".to_owned())?;
+    if object.len() != 3
+        || object.get("kind").and_then(Value::as_str) != Some("utoolsMainPush")
+        || !object.contains_key("action")
+        || !object.contains_key("option")
+    {
+        return Err("The selected search result is not a uTools main-push option.".to_owned());
+    }
+    let action = object
+        .get("action")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "uTools main-push action must be an object.".to_owned())?;
+    if action.len() != 3 || action.get("type").and_then(Value::as_str) != Some("text") {
+        return Err(
+            "This iHub compatibility stage accepts only bounded text main-push actions.".to_owned(),
+        );
+    }
+    let code = action
+        .get("code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|code| {
+            !code.is_empty() && code.chars().count() <= 160 && !code.chars().any(char::is_control)
+        })
+        .ok_or_else(|| "uTools main-push action code is invalid.".to_owned())?
+        .to_owned();
+    let payload = action
+        .get("payload")
+        .and_then(Value::as_str)
+        .filter(|payload| {
+            !payload.is_empty()
+                && payload.len() <= MAX_PLUGIN_SEARCH_QUERY_BYTES
+                && !payload.contains('\0')
+        })
+        .ok_or_else(|| "uTools main-push text payload is invalid.".to_owned())?;
+    let option = object
+        .get("option")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "uTools main-push option must be an object.".to_owned())?;
+    let text = option
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty() && text.chars().count() <= 320)
+        .ok_or_else(|| "uTools main-push option.text is invalid.".to_owned())?;
+    if text.chars().any(char::is_control) {
+        return Err("uTools main-push option.text contains control characters.".to_owned());
+    }
+    for (field, limit) in [("title", 320_usize), ("icon", 2_048_usize)] {
+        if let Some(value) = option.get(field) {
+            let value = value.as_str().ok_or_else(|| {
+                format!("uTools main-push option.{field} must be a string when provided.")
+            })?;
+            if value.chars().count() > limit || value.chars().any(char::is_control) {
+                return Err(format!("uTools main-push option.{field} is invalid."));
+            }
+        }
+    }
+    let mut enter_action = serde_json::Map::new();
+    enter_action.insert("code".to_owned(), Value::String(code.clone()));
+    enter_action.insert("type".to_owned(), Value::String("text".to_owned()));
+    enter_action.insert("payload".to_owned(), Value::String(payload.to_owned()));
+    enter_action.insert("from".to_owned(), Value::String("main".to_owned()));
+    enter_action.insert("option".to_owned(), Value::Object(option.clone()));
+    Ok((
+        code,
+        Value::Object(enter_action),
+        Value::Object(option.clone()),
+    ))
+}
+
+fn resolve_utools_main_push_command(
+    state: &AppState,
+    plugin_id: &str,
+    code: &str,
+) -> Result<String, String> {
+    state.plugins.ensure_plugin_enabled(plugin_id)?;
+    let bundle = state.plugins.frontend_asset_bundle(plugin_id)?;
+    let config = bundle
+        .utools_compat
+        .ok_or_else(|| "Main-push selection requires a verified uTools package.".to_owned())?;
+    if let Some(command) = config
+        .commands
+        .into_iter()
+        .find(|command| command.main_push && command.code == code)
+    {
+        return Ok(command.command_id);
+    }
+    if let Some(feature) = utools_dynamic_features(&state.plugin_settings, plugin_id)
+        .into_iter()
+        .find(|feature| {
+            feature.code == code
+                && feature.main_push == Some(true)
+                && utools_dynamic_feature_matches_platform(feature)
+        })
+    {
+        return Ok(utools_dynamic_feature_command_id(&feature.code));
+    }
+    Err(format!(
+        "uTools main-push feature '{code}' is not currently declared by this plugin."
+    ))
+}
+
+#[tauri::command]
+pub async fn select_utools_main_push_result(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    provider_id: String,
+    request_id: String,
+    result_id: String,
+    state: State<'_, AppState>,
+) -> Result<UtoolsMainPushSelectionResult, String> {
+    if window.label() != "main" {
+        return Err("Only the trusted main iHub surface can select main-push results.".to_owned());
+    }
+    if provider_id != UTOOLS_MAIN_PUSH_PROVIDER_ID
+        || !is_plugin_id(&plugin_id)
+        || request_id.is_empty()
+        || request_id.len() > 128
+        || request_id.chars().any(char::is_control)
+        || result_id.trim().is_empty()
+        || result_id.chars().count() > 160
+    {
+        return Err("Invalid uTools main-push selection.".to_owned());
+    }
+    if !has_declared_plugin_search_provider(&state, &plugin_id, &provider_id)?
+        || !state
+            .host
+            .search_providers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&host_key(&plugin_id, &provider_id))
+    {
+        return Err(format!(
+            "Plugin search provider '{plugin_id}/{provider_id}' is not registered."
+        ));
+    }
+    let selected_payload = resolve_issued_plugin_search_selection(
+        &state.host,
+        &plugin_id,
+        &provider_id,
+        &request_id,
+        &result_id,
+        Instant::now(),
+    )?;
+    let (feature_code, enter_action, option) =
+        normalize_utools_main_push_selection(&selected_payload)?;
+    let command_id = resolve_utools_main_push_command(&state, &plugin_id, &feature_code)?;
+    let interaction_id = next_request_id();
+    let (response_sender, response_receiver) = mpsc::sync_channel(1);
+    {
+        let mut pending = state
+            .host
+            .pending_utools_main_push_selections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_UTOOLS_MAIN_PUSH_SELECTIONS {
+            return Err("uTools main-push selection is busy; try again shortly.".to_owned());
+        }
+        pending.insert(
+            interaction_id.clone(),
+            PendingUtoolsMainPushSelection {
+                plugin_id: plugin_id.clone(),
+                lease_id: None,
+                completed: false,
+                response: response_sender,
+            },
+        );
+    }
+    let selection_event = format!("ihub://plugin/{plugin_id}/event/search.select");
+    if let Err(error) = emit_plugin_event_to_owner(
+        &app,
+        &state,
+        &plugin_id,
+        &selection_event,
+        json!({
+            "requestId": next_request_id(),
+            "providerId": provider_id,
+            "resultId": result_id,
+            "payload": selected_payload,
+            "interactionId": interaction_id,
+        }),
+    ) {
+        state
+            .host
+            .pending_utools_main_push_selections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&interaction_id);
+        return Err(format!(
+            "Could not deliver uTools main-push selection: {error}"
+        ));
+    }
+    let wait = tauri::async_runtime::spawn_blocking(move || {
+        response_receiver.recv_timeout(UTOOLS_MAIN_PUSH_SELECTION_TIMEOUT)
+    })
+    .await
+    .map_err(|error| format!("uTools main-push selection wait task failed: {error}"))?;
+    state
+        .host
+        .pending_utools_main_push_selections
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&interaction_id);
+    let show = match wait {
+        Ok(Ok(show)) => show,
+        Ok(Err(error)) => return Err(error),
+        Err(RecvTimeoutError::Timeout) => {
+            return Err("The uTools onMainPush selection callback timed out.".to_owned());
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err("The uTools onMainPush runtime stopped before responding.".to_owned());
+        }
+    };
+
+    let mut opened_detached = false;
+    if show {
+        if let Some(target) = detached_plugin_event_target(&app, &state, &plugin_id)? {
+            app.emit_to(
+                &target,
+                &format!("ihub://plugin/{plugin_id}/command"),
+                json!({
+                    "requestId": next_request_id(),
+                    "commandId": command_id,
+                    "input": Value::Null,
+                    "context": Value::Null,
+                    "utoolsMainPushAction": enter_action,
+                }),
+            )
+            .map_err(|error| format!("Could not enter detached uTools plugin: {error}"))?;
+            if let Some(detached_window) = app.get_webview_window(&target) {
+                let _ = detached_window.unminimize();
+                let _ = detached_window.show();
+                let _ = detached_window.set_focus();
+            }
+            opened_detached = true;
+        }
+    }
+    // Keep the exact selected option in the action returned to the trusted
+    // renderer; the renderer cannot replace it because it came from the
+    // native-issued search snapshot above.
+    debug_assert_eq!(enter_action.get("option"), Some(&option));
+    Ok(UtoolsMainPushSelectionResult {
+        show,
+        opened_detached,
+        command_id,
+        action: enter_action,
+    })
+}
+
 /// Resolves exactly one native search waiter. A stale iframe response after a
 /// timeout is intentionally harmless, but a different plugin may never claim
 /// another plugin's opaque request id.
@@ -5975,6 +6341,27 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
         let _ = request.response.send(Err(format!(
             "Plugin search provider '{}/{}' stopped before responding.",
             request.plugin_id, request.provider_id
+        )));
+    }
+    let pending_main_push = {
+        let mut selections = host
+            .pending_utools_main_push_selections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let selection_ids = selections
+            .iter()
+            .filter_map(|(selection_id, selection)| {
+                (selection.plugin_id == plugin_id).then_some(selection_id.clone())
+            })
+            .collect::<Vec<_>>();
+        selection_ids
+            .into_iter()
+            .filter_map(|selection_id| selections.remove(&selection_id))
+            .collect::<Vec<_>>()
+    };
+    for selection in pending_main_push {
+        let _ = selection.response.send(Err(format!(
+            "uTools main-push owner '{plugin_id}' stopped before responding."
         )));
     }
     host.issued_search_results
@@ -7423,7 +7810,8 @@ pub fn run() {
             dispatch_detached_plugin_frontend_event,
             invoke_plugin_frontend_command,
             list_registered_plugin_search_providers,
-            query_plugin_search
+            query_plugin_search,
+            select_utools_main_push_result
         ])
         .run(tauri::generate_context!())
         .expect("error while running iHub");
@@ -8453,6 +8841,29 @@ fn utools_dynamic_feature_matches_platform(feature: &UtoolsDynamicFeature) -> bo
     }
 }
 
+fn has_declared_plugin_search_provider(
+    state: &AppState,
+    plugin_id: &str,
+    provider_id: &str,
+) -> Result<bool, String> {
+    if state
+        .plugins
+        .has_declared_search_provider(plugin_id, provider_id)?
+    {
+        return Ok(true);
+    }
+    if provider_id != UTOOLS_MAIN_PUSH_PROVIDER_ID
+        || !state.plugins.uses_utools_compatibility(plugin_id)?
+    {
+        return Ok(false);
+    }
+    Ok(utools_dynamic_features(&state.plugin_settings, plugin_id)
+        .iter()
+        .any(|feature| {
+            feature.main_push == Some(true) && utools_dynamic_feature_matches_platform(feature)
+        }))
+}
+
 fn project_utools_dynamic_features(
     plugins: &PluginManager,
     settings: &PluginSettingsStore,
@@ -8465,7 +8876,24 @@ fn project_utools_dynamic_features(
         {
             continue;
         }
-        for feature in utools_dynamic_features(settings, &plugin.id) {
+        let features = utools_dynamic_features(settings, &plugin.id);
+        if features.iter().any(|feature| {
+            feature.main_push == Some(true) && utools_dynamic_feature_matches_platform(feature)
+        }) && !plugin
+            .search_providers
+            .iter()
+            .any(|provider| provider.id == UTOOLS_MAIN_PUSH_PROVIDER_ID)
+        {
+            plugin
+                .search_providers
+                .push(crate::models::PluginSearchProviderInfo {
+                    id: UTOOLS_MAIN_PUSH_PROVIDER_ID.to_owned(),
+                    title: "uTools 主搜索推送".to_owned(),
+                    trigger: None,
+                    priority: Some(20),
+                });
+        }
+        for feature in features {
             if !utools_dynamic_feature_matches_platform(&feature) {
                 continue;
             }
@@ -8670,17 +9098,19 @@ mod tests {
 
     use super::{
         attach_plugin_launcher_context_transfer, authorize_index_root_update,
-        build_plugin_launcher_context_payload, canonical_selected_file, clear_plugin_runtime_state,
+        build_plugin_launcher_context_payload, canonical_selected_file,
+        claim_utools_main_push_interaction, clear_plugin_runtime_state,
         clear_plugin_session_secrets, clipboard_files_from_paths, clipboard_image_from_rgba,
         complete_plugin_search, create_plugin_project_for_grant,
         create_plugin_project_with_open_grant, cursor_color_approval_id,
         decode_utools_clipboard_png_data_url, decode_utools_db_storage_key, directory_for_grant,
         get_plugin_session_secret, issue_file_grant, issue_filesystem_grant,
         issue_plugin_launcher_context_transfer, launcher_visibility_action,
-        native_plugin_command_input, normalize_plugin_search_results, normalized_host_target,
-        optional_u32, optional_u8, physical_point_in_monitor, plugin_clipboard_history_snapshot,
-        plugin_notification_body, plugin_search_providers_changed_payload,
-        prepare_directory_for_grant, renderer_display_path, resolve_issued_plugin_search_selection,
+        native_plugin_command_input, normalize_plugin_search_results,
+        normalize_utools_main_push_selection, normalized_host_target, optional_u32, optional_u8,
+        physical_point_in_monitor, plugin_clipboard_history_snapshot, plugin_notification_body,
+        plugin_search_providers_changed_payload, prepare_directory_for_grant,
+        renderer_display_path, resolve_issued_plugin_search_selection,
         revoke_plugin_launcher_context_transfer, set_plugin_session_secret,
         startup_launcher_hotkey_candidates, take_file_grant, take_plugin_batch_rename_preview,
         take_plugin_launcher_context_transfer, truncate_utf8_bytes, utools_db_storage_key,
@@ -8695,12 +9125,12 @@ mod tests {
         DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
         LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
         LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
-        PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
-        TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY,
-        LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY,
-        MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
+        PendingUtoolsMainPushSelection, PluginBatchRenamePreview, PluginCursorColor,
+        PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
+        PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
+        TemporaryPathOpenKind, TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL,
+        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
+        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
         MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
         MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
         MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_PNG_BYTES, PLUGIN_LOG_WINDOW,
@@ -9439,6 +9869,89 @@ mod tests {
         )
         .expect_err("oversized payloads must not reach the launcher");
         assert!(error.contains("payload exceeds"));
+    }
+
+    #[test]
+    fn utools_main_push_selection_accepts_only_bounded_text_options() {
+        let (code, action, option) = normalize_utools_main_push_selection(&json!({
+            "kind": "utoolsMainPush",
+            "action": { "code": "translate", "type": "text", "payload": "hello" },
+            "option": { "text": "翻译 hello", "title": "离线翻译", "language": "zh" }
+        }))
+        .expect("a host-issued text option should remain selectable");
+        assert_eq!(code, "translate");
+        assert_eq!(action["from"], "main");
+        assert_eq!(action["option"]["language"], "zh");
+        assert_eq!(option["text"], "翻译 hello");
+
+        for invalid in [
+            json!({
+                "kind": "utoolsMainPush",
+                "action": { "code": "translate", "type": "img", "payload": "data:image/png;base64,AA==" },
+                "option": { "text": "OCR" }
+            }),
+            json!({
+                "kind": "utoolsMainPush",
+                "action": { "code": "translate", "type": "text", "payload": "hello" },
+                "option": { "title": "missing text" }
+            }),
+            json!({
+                "kind": "forged",
+                "action": { "code": "translate", "type": "text", "payload": "hello" },
+                "option": { "text": "forged" }
+            }),
+        ] {
+            assert!(normalize_utools_main_push_selection(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn utools_main_push_interactions_bind_one_plugin_lease_and_clear_on_dispose() {
+        let host = PluginHostState::default();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        host.pending_utools_main_push_selections
+            .lock()
+            .expect("main-push lock")
+            .insert(
+                "main-push-selection-1".to_owned(),
+                PendingUtoolsMainPushSelection {
+                    plugin_id: "utools-owner".to_owned(),
+                    lease_id: None,
+                    completed: false,
+                    response: sender,
+                },
+            );
+        claim_utools_main_push_interaction(
+            &host,
+            "utools-owner",
+            "runtime-lease-owner",
+            "main-push-selection-1",
+        )
+        .expect("the receiving runtime should claim its interaction");
+        assert!(claim_utools_main_push_interaction(
+            &host,
+            "utools-owner",
+            "runtime-lease-other",
+            "main-push-selection-1",
+        )
+        .is_err());
+        assert!(claim_utools_main_push_interaction(
+            &host,
+            "utools-other",
+            "runtime-lease-owner",
+            "main-push-selection-1",
+        )
+        .is_err());
+
+        clear_plugin_runtime_state(&host, "utools-owner");
+        assert!(receiver.recv().expect("dispose response").is_err());
+        assert!(claim_utools_main_push_interaction(
+            &host,
+            "utools-owner",
+            "runtime-lease-owner",
+            "main-push-selection-1",
+        )
+        .is_err());
     }
 
     #[test]

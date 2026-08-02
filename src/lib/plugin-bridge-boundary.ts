@@ -56,6 +56,7 @@ const pluginHostMethods = new Set([
   "compatibility.utools.input.pasteImage",
   "compatibility.utools.input.pasteFiles",
   "compatibility.utools.input.typeString",
+  "compatibility.utools.mainPush.selectComplete",
   "compatibility.utools.notification.show",
   "compatibility.utools.screen.capture",
   "compatibility.utools.shell.beep",
@@ -109,6 +110,7 @@ export interface ValidatedPluginBridgeCall {
     pluginId: string;
     method: string;
     params?: unknown;
+    interactionId?: string;
   };
 }
 
@@ -247,7 +249,7 @@ export function validatePluginBridgeCall(
   const requestPluginId = request?.pluginId;
   if (
     !request
-    || !hasOnlyKeys(request, new Set(["pluginId", "method", "params"]))
+    || !hasOnlyKeys(request, new Set(["pluginId", "method", "params", "interactionId"]))
     || typeof requestPluginId !== "string"
     || !/^[A-Za-z0-9._-]{2,96}$/.test(requestPluginId)
     || (expectedPluginId !== undefined && requestPluginId !== expectedPluginId)
@@ -263,9 +265,22 @@ export function validatePluginBridgeCall(
     };
   }
 
-  const normalizedRequest = request.params === undefined
-    ? { pluginId: requestPluginId, method }
-    : { pluginId: requestPluginId, method, params: request.params };
+  if (request.interactionId !== undefined && !safeResponseId(request.interactionId)) {
+    return {
+      ok: false,
+      error: "The plugin Bridge interaction ID is invalid.",
+      responseId,
+    };
+  }
+
+  const normalizedRequest = {
+    pluginId: requestPluginId,
+    method,
+    ...(request.params === undefined ? {} : { params: request.params }),
+    ...(request.interactionId === undefined
+      ? {}
+      : { interactionId: request.interactionId as string }),
+  };
   const normalizedCall = {
     channel: PLUGIN_BRIDGE_REQUEST_CHANNEL as typeof PLUGIN_BRIDGE_REQUEST_CHANNEL,
     type: "call" as const,

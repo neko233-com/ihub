@@ -56,6 +56,28 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.input.pasteFiles", { paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"] })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.input.pasteImage", { dataUrl: "data:image/png;base64,iVBORw0KGgo=" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.input.typeString", { value: "type" })).ok).toBe(true);
+    expect(validatePluginBridgeCall({
+      ...call("compatibility.utools.input.pasteText", { value: "selected" }),
+      request: {
+        ...call("compatibility.utools.input.pasteText", { value: "selected" }).request,
+        interactionId: "plugin-search-selection-1",
+      },
+    }).ok).toBe(true);
+    expect(validatePluginBridgeCall({
+      ...call("compatibility.utools.mainPush.selectComplete", {
+        interactionId: "plugin-search-selection-1",
+        show: false,
+      }),
+      request: {
+        ...call("compatibility.utools.mainPush.selectComplete", {}).request,
+        params: { interactionId: "plugin-search-selection-1", show: false },
+        interactionId: "plugin-search-selection-1",
+      },
+    }).ok).toBe(true);
+    expect(validatePluginBridgeCall({
+      ...call(),
+      request: { ...call().request, interactionId: " bad\n" },
+    }).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.beep", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.notification.show", { body: "done" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.screen.capture", {})).ok).toBe(true);

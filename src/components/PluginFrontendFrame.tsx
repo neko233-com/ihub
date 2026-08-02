@@ -946,8 +946,12 @@ export function PluginFrontendFrame({
       if (
         (utoolsWindowMethod || utoolsInputMethod)
         && (
-          runtimeOnly
-          || (utoolsInputMethod !== null && !onHideMainWindow)
+          (runtimeOnly && !(utoolsInputMethod && bridgeCall.request.interactionId))
+          || (
+            utoolsInputMethod !== null
+            && !onHideMainWindow
+            && !(runtimeOnly && bridgeCall.request.interactionId)
+          )
           || (utoolsWindowMethod === "compatibility.utools.window.hideMain" && !onHideMainWindow)
           || (utoolsWindowMethod === "compatibility.utools.window.setHeight" && !onSetExpendHeight)
           || (utoolsWindowMethod === "compatibility.utools.window.showMain" && !onShowMainWindow)
@@ -993,6 +997,7 @@ export function PluginFrontendFrame({
         // Native code separately verifies the lease's purpose for the only
         // user-presence-sensitive bridge method.
         surface: !runtimeOnly,
+        interactionId: bridgeCall.request.interactionId,
         method: bridgeCall.request.method,
         params: bridgeCall.request.params,
       };
@@ -1112,7 +1117,7 @@ export function PluginFrontendFrame({
       enqueueBoundedPluginHostEvent(queuedHostEvents.current, { name, payload });
     };
     const subscribe = async (
-      kind: "command" | "search" | "event/search.select",
+      kind: "command" | "search" | "event/search.select" | "event/utools.dbPull",
     ) => {
       try {
         const stop = await listen<unknown>(`ihub://plugin/${pluginId}/${kind}`, (event) => {
@@ -1139,6 +1144,7 @@ export function PluginFrontendFrame({
       subscribe("command"),
       subscribe("search"),
       subscribe("event/search.select"),
+      subscribe("event/utools.dbPull"),
     ]);
     return () => {
       disposed = true;

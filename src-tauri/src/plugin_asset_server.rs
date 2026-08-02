@@ -1733,25 +1733,40 @@ const syncDbRoute = "__ihub_utools_db_sync";
 const syncScreenRoute = "__ihub_utools_screen_sync";
 const syncIconRoute = "__ihub_utools_icon_sync";
 const syncDialogRoute = "__ihub_utools_dialog_sync";
+const mainPushProviderId = "utools-main-push";
 let sequence = 0;
 const pending = new Map();
 const readyCallbacks = [];
 const enterCallbacks = [];
 const outCallbacks = [];
 const detachCallbacks = [];
+const dbPullCallbacks = [];
+let mainPushCallback = null;
+let mainPushSelectCallback = null;
+let mainPushProviderState = "idle";
+let activeMainPushInteractionId = null;
+let activeMainPushInteractionCalls = null;
 let pluginOutDispatched = false;
 let pluginDetachDispatched = false;
 let subInputChangeCallback = null;
 let currentWindowType = "main";
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
-function call(method, params) {{
+function call(method, params, interactionId) {{
   const id = "utools-compat-" + (++sequence).toString(36);
   return new Promise((resolve, reject) => {{
     const timeout = window.setTimeout(() => {{ pending.delete(id); reject(new Error("iHub host bridge timed out.")); }}, 15000);
     pending.set(id, {{ resolve, reject, timeout }});
-    window.parent.postMessage({{ channel: requestChannel, type: "call", id, request: {{ pluginId: config.pluginId, method, params: params || {{}} }} }}, "*");
+    const request = {{ pluginId: config.pluginId, method, params: params || {{}} }};
+    if (interactionId) request.interactionId = interactionId;
+    window.parent.postMessage({{ channel: requestChannel, type: "call", id, request }}, "*");
   }});
+}}
+function interactionCall(method, params) {{
+  const interactionId = activeMainPushInteractionId;
+  const promise = call(method, params, interactionId);
+  if (interactionId && activeMainPushInteractionCalls) activeMainPushInteractionCalls.push(promise.catch(() => undefined));
+  return promise;
 }}
 function pngDataUrlForCopyImage(value) {{
   if (typeof value === "string") {{
@@ -2227,6 +2242,95 @@ function projectedRedirectAction(value) {{
   if (value.type === "files" && Array.isArray(value.payload) && value.payload.length > 0 && value.payload.length <= 16 && value.payload.every((path) => typeof path === "string" && path.length > 0 && Array.from(path).length <= 1024 && !/[\u0000-\u001f\u007f]/.test(path))) return {{ type: "files", payload: value.payload.slice() }};
   return null;
 }}
+function mainPushFeaturesForQuery(query) {{
+  const normalized = typeof query === "string" ? query.trim().toLocaleLowerCase() : "";
+  if (!normalized) return [];
+  const matches = (keywords) => Array.isArray(keywords) && keywords.some((keyword) => {{
+    const candidate = typeof keyword === "string" ? keyword.trim().toLocaleLowerCase() : "";
+    return candidate && (candidate.includes(normalized) || normalized.includes(candidate));
+  }});
+  const actions = [];
+  for (const command of config.commands) {{
+    if (command && command.mainPush === true && matches(command.keywords)) actions.push({{ code: command.code, type: "text", payload: query }});
+  }}
+  for (const feature of dynamicFeatures.values()) {{
+    if (feature && feature.mainPush === true && matches(feature.cmds)) actions.push({{ code: feature.code, type: "text", payload: query }});
+  }}
+  return actions.slice(0, 16);
+}}
+function clonedMainPushOption(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  let serialized;
+  try {{ serialized = JSON.stringify(value); }} catch {{ return null; }}
+  if (typeof serialized !== "string" || new TextEncoder().encode(serialized).byteLength > 6144) return null;
+  let option;
+  try {{ option = JSON.parse(serialized); }} catch {{ return null; }}
+  if (typeof option.text !== "string" || !option.text.trim() || Array.from(option.text).length > 320 || /[\u0000-\u001f\u007f]/.test(option.text)) return null;
+  if (option.title !== undefined && (typeof option.title !== "string" || Array.from(option.title).length > 320 || /[\u0000-\u001f\u007f]/.test(option.title))) return null;
+  if (option.icon !== undefined && (typeof option.icon !== "string" || Array.from(option.icon).length > 2048 || /[\u0000-\u001f\u007f]/.test(option.icon))) return null;
+  return option;
+}}
+function ensureMainPushProviderRegistration() {{
+  if (typeof mainPushCallback !== "function" || typeof mainPushSelectCallback !== "function" || mainPushProviderState !== "idle") return;
+  const available = config.commands.some((command) => command && command.mainPush === true)
+    || Array.from(dynamicFeatures.values()).some((feature) => feature && feature.mainPush === true);
+  if (!available) return;
+  mainPushProviderState = "pending";
+  void call("search.register", {{ definition: {{ id: mainPushProviderId, title: "uTools 主搜索推送", priority: 20 }} }})
+    .then(() => {{ mainPushProviderState = "registered"; }})
+    .catch((error) => {{ mainPushProviderState = "idle"; console.error("iHub compatibility main-push registration failed", error); }});
+}}
+function completeMainPushSearch(message) {{
+  const requestId = message.payload && message.payload.requestId;
+  const query = message.payload && message.payload.query;
+  const limit = message.payload && Number.isInteger(message.payload.limit) ? Math.max(1, Math.min(6, message.payload.limit)) : 3;
+  if (typeof requestId !== "string" || typeof query !== "string" || typeof mainPushCallback !== "function") return;
+  try {{
+    const results = [];
+    for (const [actionIndex, action] of mainPushFeaturesForQuery(query).entries()) {{
+      const options = mainPushCallback(Object.freeze({{ ...action }}));
+      if (!Array.isArray(options)) continue;
+      for (const [optionIndex, candidate] of options.entries()) {{
+        const option = clonedMainPushOption(candidate);
+        if (!option) continue;
+        results.push({{
+          id: "main-push-" + actionIndex.toString(36) + "-" + optionIndex.toString(36),
+          title: option.text,
+          ...(option.title ? {{ subtitle: option.title }} : {{}}),
+          score: 100 - actionIndex - optionIndex / 100,
+          payload: {{ kind: "utoolsMainPush", action, option }}
+        }});
+        if (results.length >= limit) break;
+      }}
+      if (results.length >= limit) break;
+    }}
+    void call("search.complete", {{ requestId, ok: true, result: results, error: null }})
+      .catch((error) => console.error("iHub compatibility main-push response failed", error));
+  }} catch (error) {{
+    void call("search.complete", {{ requestId, ok: false, result: [], error: error instanceof Error ? error.message : "uTools onMainPush callback failed." }})
+      .catch(() => undefined);
+  }}
+}}
+function selectMainPushOption(message) {{
+  const payload = message.payload && message.payload.payload;
+  const interactionId = message.payload && message.payload.interactionId;
+  if (!payload || payload.kind !== "utoolsMainPush" || typeof interactionId !== "string" || typeof mainPushSelectCallback !== "function") return;
+  const action = payload.action;
+  const option = clonedMainPushOption(payload.option);
+  if (!action || typeof action !== "object" || action.type !== "text" || typeof action.code !== "string" || typeof action.payload !== "string" || !option) return;
+  const trackedCalls = [];
+  activeMainPushInteractionId = interactionId;
+  activeMainPushInteractionCalls = trackedCalls;
+  let show = false;
+  try {{ show = mainPushSelectCallback({{ code: action.code, type: "text", payload: action.payload, from: "main", option }}) === true; }}
+  catch (error) {{ console.error("uTools compatibility main-push selection callback failed", error); }}
+  finally {{ activeMainPushInteractionId = null; activeMainPushInteractionCalls = null; }}
+  void Promise.allSettled(trackedCalls).then(() => call(
+    "compatibility.utools.mainPush.selectComplete",
+    {{ interactionId, show }},
+    interactionId,
+  )).catch((error) => console.error("iHub compatibility main-push completion failed", error));
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -2253,11 +2357,29 @@ window.addEventListener("message", (event) => {{
     }}
     return;
   }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/search") {{
+    if (message.payload && message.payload.providerId === mainPushProviderId) completeMainPushSearch(message);
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/search.select") {{
+    if (message.payload && message.payload.providerId === mainPushProviderId) selectMainPushOption(message);
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.dbPull") {{
+    const docs = message.payload && Array.isArray(message.payload.docs) ? message.payload.docs : [];
+    invoke(dbPullCallbacks, docs);
+    return;
+  }}
   if (message.name !== "ihub://plugin/" + config.pluginId + "/command") return;
   const commandId = message.payload && message.payload.commandId;
   const command = config.commands.find((candidate) => candidate.commandId === commandId)
     || Array.from(dynamicFeatures.values()).find((candidate) => candidate.commandId === commandId);
   if (!command) return;
+  const mainPushAction = message.payload && message.payload.utoolsMainPushAction;
+  if (mainPushAction && typeof mainPushAction === "object" && mainPushAction.code === command.code && mainPushAction.type === "text" && typeof mainPushAction.payload === "string") {{
+    invoke(enterCallbacks, mainPushAction);
+    return;
+  }}
   const redirectAction = projectedRedirectAction(message.payload && message.payload.utoolsAction);
   if (redirectAction) {{
     invoke(enterCallbacks, {{ code: command.code, type: redirectAction.type, payload: redirectAction.payload, from: "redirect" }});
@@ -2272,6 +2394,13 @@ const utools = Object.freeze({{
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
+  onMainPush(callback, onSelect) {{
+    if (typeof callback !== "function" || typeof onSelect !== "function") return;
+    mainPushCallback = callback;
+    mainPushSelectCallback = onSelect;
+    ensureMainPushProviderRegistration();
+  }},
+  onDbPull(callback) {{ if (typeof callback === "function") dbPullCallbacks.push(callback); }},
   onPluginDetach(callback) {{
     if (typeof callback !== "function") return;
     if (pluginDetachDispatched) {{
@@ -2292,13 +2421,15 @@ const utools = Object.freeze({{
     const previous = dynamicFeatures.get(feature.code);
     const version = nextDynamicFeatureVersion(feature.code);
     dynamicFeatures.set(feature.code, feature);
-    void call("compatibility.utools.features.set", {{ feature: publicDynamicFeature(feature) }}).catch((error) => {{
-      if (dynamicFeatureVersions.get(feature.code) === version) {{
-        if (previous) dynamicFeatures.set(feature.code, previous);
-        else dynamicFeatures.delete(feature.code);
-      }}
-      console.error("iHub compatibility dynamic feature setup failed", error);
-    }});
+    void call("compatibility.utools.features.set", {{ feature: publicDynamicFeature(feature) }})
+      .then(() => ensureMainPushProviderRegistration())
+      .catch((error) => {{
+        if (dynamicFeatureVersions.get(feature.code) === version) {{
+          if (previous) dynamicFeatures.set(feature.code, previous);
+          else dynamicFeatures.delete(feature.code);
+        }}
+        console.error("iHub compatibility dynamic feature setup failed", error);
+      }});
   }},
   removeFeature(code) {{
     if (typeof code !== "string" || !dynamicFeatures.has(code)) return false;
@@ -2313,14 +2444,14 @@ const utools = Object.freeze({{
   }},
   hideMainWindowPasteText(value) {{
     if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > 49152) return false;
-    void call("compatibility.utools.input.pasteText", {{ value }})
+    void interactionCall("compatibility.utools.input.pasteText", {{ value }})
       .catch((error) => console.error("iHub compatibility text paste failed", error));
     return true;
   }},
   hideMainWindowPasteImage(value) {{
     const dataUrl = pngDataUrlForCopyImage(value);
     if (!dataUrl) return false;
-    void call("compatibility.utools.input.pasteImage", {{ dataUrl }})
+    void interactionCall("compatibility.utools.input.pasteImage", {{ dataUrl }})
       .catch((error) => console.error("iHub compatibility image paste failed", error));
     return true;
   }},
@@ -2336,13 +2467,13 @@ const utools = Object.freeze({{
       if (totalBytes > 8192 || normalized.includes(path)) return false;
       normalized.push(path);
     }}
-    void call("compatibility.utools.input.pasteFiles", {{ paths: normalized }})
+    void interactionCall("compatibility.utools.input.pasteFiles", {{ paths: normalized }})
       .catch((error) => console.error("iHub compatibility file paste failed", error));
     return true;
   }},
   hideMainWindowTypeString(value) {{
     if (typeof value !== "string" || Array.from(value).length > 4096 || value.includes("\u0000")) return false;
-    void call("compatibility.utools.input.typeString", {{ value }})
+    void interactionCall("compatibility.utools.input.typeString", {{ value }})
       .catch((error) => console.error("iHub compatibility text input failed", error));
     return true;
   }},
@@ -2640,6 +2771,7 @@ Promise.all([
         if (feature && !dynamicFeatureVersions.has(feature.code)) dynamicFeatures.set(feature.code, feature);
       }}
     }}
+    ensureMainPushProviderRegistration();
   }})
   .catch((error) => console.error("iHub compatibility dbStorage restore failed", error))
   .then(() => call("lifecycle.ready", {{}}))
@@ -2957,6 +3089,8 @@ mod tests {
             commands: vec![UtoolsCompatCommand {
                 command_id: "utools-feature-1".to_owned(),
                 code: "pick-color".to_owned(),
+                keywords: vec!["取色".to_owned()],
+                main_push: true,
             }],
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
             paths: [("home".to_owned(), "C:\\Users\\Tester".to_owned())]
@@ -3025,6 +3159,12 @@ mod tests {
         assert!(script.contains("chromeMediaSourceId"));
         assert!(script.contains("stopDesktopCaptureSlot()"));
         assert!(script.contains("onPluginDetach"));
+        assert!(script.contains("onMainPush"));
+        assert!(script.contains("onDbPull"));
+        assert!(script.contains("utools-main-push"));
+        assert!(script.contains("compatibility.utools.mainPush.selectComplete"));
+        assert!(script.contains("\"keywords\":[\"取色\"]"));
+        assert!(script.contains("\"mainPush\":true"));
         assert!(script.contains("invokePluginDetach"));
         assert!(script.contains("cursorColor.sampleOnce"));
         assert!(script.contains("dbStorage"));
@@ -3183,9 +3323,9 @@ mod tests {
             }
             let (status, icon) = response;
             assert_eq!(status, "HTTP/1.1 200 OK");
-            assert!(icon
-                .as_str()
-                .is_some_and(|value| value.starts_with("data:image/png;base64,")),
+            assert!(
+                icon.as_str()
+                    .is_some_and(|value| value.starts_with("data:image/png;base64,")),
                 "the synchronous native icon was empty for {request:?}"
             );
         }
