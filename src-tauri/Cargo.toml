@@ -20,6 +20,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 fuzzy-matcher = "0.3"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jsonschema = { version = "0.26.2", default-features = false }
 notify = "6.1"
 ib-pinyin = { version = "=0.3.1", default-features = false }
 rayon = "1.10"

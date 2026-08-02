@@ -1117,7 +1117,12 @@ export function PluginFrontendFrame({
       enqueueBoundedPluginHostEvent(queuedHostEvents.current, { name, payload });
     };
     const subscribe = async (
-      kind: "command" | "search" | "event/search.select" | "event/utools.dbPull",
+      kind: "command"
+        | "search"
+        | "event/search.select"
+        | "event/utools.dbPull"
+        | "event/utools.tool.invoke"
+        | "event/utools.tool.cancel",
     ) => {
       try {
         const stop = await listen<unknown>(`ihub://plugin/${pluginId}/${kind}`, (event) => {
@@ -1166,6 +1171,8 @@ export function PluginFrontendFrame({
       subscribe("search"),
       subscribe("event/search.select"),
       subscribe("event/utools.dbPull"),
+      subscribe("event/utools.tool.invoke"),
+      subscribe("event/utools.tool.cancel"),
       subscribeBrowserEvent("ihub://utools-browser/parent-message", "ipc"),
       subscribeBrowserEvent("ihub://utools-browser/ready", "ready"),
     ]);

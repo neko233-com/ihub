@@ -91,6 +91,17 @@ const MAX_DEVELOPMENT_LAUNCHER_MARKER_BYTES: u64 = 64 * 1024;
 /// prevents a manifest from multiplying even one reused artwork data URL into
 /// an unbounded renderer payload.
 const MAX_COMMANDS_PER_PLUGIN: usize = 64;
+/// uTools MCP declarations are projected into both the compatibility bootstrap
+/// and the trusted host's Agent catalog. Bound the declaration and schema
+/// shape before compiling JSON Schema so an imported manifest cannot turn a
+/// catalog refresh into unbounded CPU or renderer IPC work.
+const MAX_UTOOLS_TOOLS_PER_PLUGIN: usize = 64;
+const MAX_UTOOLS_TOOL_NAME_CHARS: usize = 64;
+const MAX_UTOOLS_TOOL_DESCRIPTION_CHARS: usize = 2_000;
+const MAX_UTOOLS_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
+const MAX_UTOOLS_TOOL_SCHEMA_NODES: usize = 2_048;
+const MAX_UTOOLS_TOOL_SCHEMA_DEPTH: usize = 32;
+const MAX_UTOOLS_PRELOAD_BYTES: u64 = 2 * 1024 * 1024;
 /// A plugin may reuse one image for every command, but distinct decoded
 /// artwork remains bounded so listing plugins cannot create an oversized IPC
 /// response or unbounded decode workload.
@@ -232,6 +243,10 @@ pub(crate) struct PluginFrontendAssetBundle {
     pub(crate) plugin_id: String,
     pub(crate) asset_root: PathBuf,
     pub(crate) entry: PathBuf,
+    /// A tools-only uTools package has no HTML entry. The asset host serves a
+    /// fixed empty document at `/` and uses `entry` only as a canonical
+    /// package anchor; no other package file becomes addressable.
+    pub(crate) synthetic_entry: bool,
     /// Package files explicitly declared as a uTools Electron preload are not
     /// assets in iHub. Retain their canonical paths only so the loopback server
     /// can reject a page attempting to load them as an ordinary script.
@@ -253,6 +268,11 @@ pub(crate) struct PluginFrontendAssetBundle {
     /// preload: the loopback asset server injects only iHub's fixed shim before
     /// the page's own scripts run.
     pub(crate) utools_compat: Option<UtoolsCompatRuntimeConfig>,
+    /// The explicitly declared preload is executed as a sandboxed ordinary
+    /// script after the fixed compatibility bootstrap. It receives no Node or
+    /// Electron ambient authority, and is served from a reserved memory route
+    /// rather than exposing its package path.
+    pub(crate) utools_preload_script: Option<Vec<u8>>,
     /// Optional, explicitly requested BrowserWindow preload projected as a
     /// sandboxed ordinary script after iHub's fixed IPC shim.
     pub(crate) utools_browser_preload_src: Option<String>,
@@ -268,6 +288,11 @@ pub(crate) struct UtoolsCompatRuntimeConfig {
     pub(crate) is_development: bool,
     pub(crate) plugin_id: String,
     pub(crate) commands: Vec<UtoolsCompatCommand>,
+    /// Manifest-locked MCP declarations. The sandbox receives the schemas so
+    /// `registerTool` can reject undeclared names locally; the native host
+    /// independently re-reads and validates the same declaration on every
+    /// registration and invocation.
+    pub(crate) tools: Vec<UtoolsToolDefinition>,
     pub(crate) native_id: String,
     pub(crate) paths: BTreeMap<String, String>,
     /// Same-plugin idle remote browser windows available for a subsequent
@@ -346,16 +371,19 @@ struct PluginManifest {
     #[serde(skip)]
     utools_commands: Vec<UtoolsCompatCommand>,
     #[serde(skip)]
+    utools_tools: BTreeMap<String, UtoolsToolDefinition>,
+    #[serde(skip)]
     utools_preload: Option<String>,
 }
 
-/// Public, deliberately limited uTools manifest projection. `preload` is
-/// decoded only as an ignored field so packages remain importable without ever
-/// evaluating Node/Electron code in iHub.
+/// Public, deliberately limited uTools manifest projection. A declared
+/// `preload` is integrity-locked and evaluated only as an ordinary sandboxed
+/// WebView script; it never receives Node/Electron ambient authority.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UtoolsManifest {
-    main: String,
+    #[serde(default)]
+    main: Option<String>,
     logo: Option<String>,
     #[serde(default)]
     name: Option<String>,
@@ -367,6 +395,27 @@ struct UtoolsManifest {
     preload: Option<String>,
     #[serde(default)]
     features: Vec<UtoolsFeature>,
+    #[serde(default)]
+    tools: BTreeMap<String, UtoolsToolManifestDefinition>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UtoolsToolManifestDefinition {
+    description: String,
+    input_schema: Value,
+    #[serde(default)]
+    output_schema: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UtoolsToolDefinition {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output_schema: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1863,38 +1912,75 @@ impl PluginManager {
         if manifest.id != plugin_id {
             return Err(format!("Plugin manifest ID does not match '{plugin_id}'."));
         }
-        let frontend_entry = manifest_frontend_entry(&manifest)
-            .ok_or_else(|| format!("Plugin '{plugin_id}' does not declare entry.frontend."))?;
         let package_root = manifest_path
             .parent()
             .ok_or_else(|| format!("Plugin '{plugin_id}' has an invalid manifest path."))?;
         ensure_path_within(package_root, &plugin_root, "Plugin package")?;
 
-        let frontend_path = package_root
-            .join(&frontend_entry)
-            .canonicalize()
-            .map_err(|error| {
-                format!("Could not resolve plugin frontend '{frontend_entry}': {error}")
-            })?;
-        ensure_path_within(&frontend_path, package_root, "Plugin frontend")?;
-        if !frontend_path.is_file() {
-            return Err(format!(
-                "Plugin frontend is not a file: {}",
-                frontend_path.display()
-            ));
-        }
-
-        let asset_root = frontend_path
-            .parent()
-            .ok_or_else(|| format!("Plugin '{plugin_id}' frontend has no parent directory."))?
-            .canonicalize()
-            .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
-        ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
-        if asset_root == package_root && !manifest.compatibility.is_utools() {
-            return Err(format!(
-                "Plugin '{plugin_id}' frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
-            ));
-        }
+        let (frontend_path, asset_root, synthetic_entry) = if let Some(frontend_entry) =
+            manifest_frontend_entry(&manifest)
+        {
+            let frontend_path =
+                package_root
+                    .join(&frontend_entry)
+                    .canonicalize()
+                    .map_err(|error| {
+                        format!("Could not resolve plugin frontend '{frontend_entry}': {error}")
+                    })?;
+            ensure_path_within(&frontend_path, package_root, "Plugin frontend")?;
+            if !frontend_path.is_file() {
+                return Err(format!(
+                    "Plugin frontend is not a file: {}",
+                    frontend_path.display()
+                ));
+            }
+            let asset_root = frontend_path
+                .parent()
+                .ok_or_else(|| format!("Plugin '{plugin_id}' frontend has no parent directory."))?
+                .canonicalize()
+                .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
+            ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
+            if asset_root == package_root && !manifest.compatibility.is_utools() {
+                return Err(format!(
+                        "Plugin '{plugin_id}' frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
+                    ));
+            }
+            (frontend_path, asset_root, false)
+        } else {
+            if !manifest.compatibility.is_utools() || manifest.utools_tools.is_empty() {
+                return Err(format!(
+                    "Plugin '{plugin_id}' does not declare entry.frontend."
+                ));
+            }
+            let preload = manifest
+                .utools_preload
+                .as_deref()
+                .ok_or_else(|| format!("Tools-only uTools plugin '{plugin_id}' has no preload."))?;
+            let preload_path = canonical_package_file(package_root, preload, "uTools preload")?;
+            (
+                preload_path,
+                package_root
+                    .canonicalize()
+                    .map_err(|error| format!("Could not resolve plugin package: {error}"))?,
+                true,
+            )
+        };
+        let utools_preload_script = manifest
+            .utools_preload
+            .as_deref()
+            .map(|preload| {
+                let source = canonical_package_file(package_root, preload, "uTools preload")?;
+                let metadata = source
+                    .metadata()
+                    .map_err(|error| format!("Could not inspect uTools preload: {error}"))?;
+                if metadata.len() == 0 || metadata.len() > MAX_UTOOLS_PRELOAD_BYTES {
+                    return Err(format!(
+                        "uTools preload must contain 1-{MAX_UTOOLS_PRELOAD_BYTES} bytes."
+                    ));
+                }
+                fs::read(&source).map_err(|error| format!("Could not read uTools preload: {error}"))
+            })
+            .transpose()?;
         let blocked_asset_paths = manifest
             .utools_preload
             .as_deref()
@@ -1909,6 +1995,7 @@ impl PluginManager {
             plugin_id: plugin_id.to_owned(),
             asset_root,
             entry: frontend_path,
+            synthetic_entry,
             blocked_asset_paths,
             allows_display_capture: manifest.permissions.screen_capture
                 || manifest.compatibility.is_utools(),
@@ -1926,12 +2013,14 @@ impl PluginManager {
                     is_development,
                     plugin_id: plugin_id.to_owned(),
                     commands: manifest.utools_commands,
+                    tools: manifest.utools_tools.into_values().collect(),
                     native_id: String::new(),
                     paths: BTreeMap::new(),
                     idle_ubrowsers: Vec::new(),
                     window_type: "main".to_owned(),
                     lifecycle_owner: true,
                 }),
+            utools_preload_script,
             utools_browser_preload_src: None,
         })
     }
@@ -2012,6 +2101,7 @@ impl PluginManager {
             );
         }
         bundle.entry = entry;
+        bundle.synthetic_entry = false;
         config.window_type = "browser".to_owned();
         config.lifecycle_owner = false;
         if let Some(preload) = preload {
@@ -2062,6 +2152,9 @@ impl PluginManager {
                 .retain(|blocked| blocked != &resolved);
             bundle.utools_browser_preload_src = Some(preload.replace('\\', "/"));
         }
+        // The package's primary preload owns the main/runtime lifecycle only.
+        // A BrowserWindow executes solely the explicit options.preload above.
+        bundle.utools_preload_script = None;
         Ok((bundle, suffix.to_owned()))
     }
 
@@ -2280,6 +2373,40 @@ impl PluginManager {
             return Err(format!("Plugin manifest ID does not match '{plugin_id}'."));
         }
         Ok(manifest.compatibility.is_utools())
+    }
+
+    /// Returns the manifest-locked MCP catalog for one enabled uTools package.
+    /// Callers receive owned JSON values so no package path or mutable manifest
+    /// handle crosses the native/runtime boundary.
+    pub(crate) fn utools_tool_definitions(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Vec<UtoolsToolDefinition>, String> {
+        if !is_valid_identifier(plugin_id) {
+            return Err("Invalid plugin ID.".to_owned());
+        }
+        self.ensure_plugin_enabled(plugin_id)?;
+        let plugin_root = self.resolve_plugin_root(plugin_id)?;
+        let manifest_path = canonical_manifest_path(&plugin_root)?;
+        let manifest = read_manifest(&manifest_path)?;
+        validate_manifest(&manifest)?;
+        if manifest.id != plugin_id || !manifest.compatibility.is_utools() {
+            return Err(format!(
+                "Plugin '{plugin_id}' is not an enabled verified uTools package."
+            ));
+        }
+        Ok(manifest.utools_tools.into_values().collect())
+    }
+
+    pub(crate) fn utools_tool_definition(
+        &self,
+        plugin_id: &str,
+        name: &str,
+    ) -> Result<UtoolsToolDefinition, String> {
+        self.utools_tool_definitions(plugin_id)?
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .ok_or_else(|| format!("Plugin '{plugin_id}' does not declare MCP tool '{name}'."))
     }
 
     /// Returns whether a manifest-declared setting is secret. Secret settings
@@ -2762,6 +2889,7 @@ impl PluginManager {
                 update_channel: None,
                 auto_update: false,
                 command_count: 0,
+                tool_count: 0,
                 commands: Vec::new(),
                 global_shortcuts: Vec::new(),
                 search_providers: Vec::new(),
@@ -2899,6 +3027,7 @@ impl PluginManager {
             })
             .collect::<Vec<_>>();
         let plugin_id = manifest.id.clone();
+        let tool_count = manifest.utools_tools.len();
         Ok(PluginInfo {
             id: plugin_id.clone(),
             name: manifest.name,
@@ -2922,6 +3051,7 @@ impl PluginManager {
             update_channel: manifest.update.channel.clone(),
             auto_update: manifest.update.auto_update,
             command_count: commands.len(),
+            tool_count,
             commands,
             global_shortcuts,
             search_providers,
@@ -3836,25 +3966,46 @@ impl UtoolsManifest {
     /// Projects the public manifest/feature subset into iHub's existing,
     /// manifest-locked command model. One feature becomes one command so a
     /// plugin sees its original `code` when the host dispatches it. Matchers,
-    /// files, images and Electron preloads remain unsupported on purpose: iHub
-    /// local search is native and never delegates its index/context to a
-    /// third-party source-compatibility layer.
+    /// files, images and Node/Electron preload authority remain unsupported on
+    /// purpose: iHub local search is native and never delegates its
+    /// index/context to a third-party source-compatibility layer.
     fn into_plugin_manifest(self, manifest_path: &Path) -> Result<PluginManifest, String> {
-        if self.main.trim().is_empty() {
-            return Err("uTools plugin.json requires a non-empty 'main' HTML entry.".to_owned());
-        }
+        let main = self
+            .main
+            .as_deref()
+            .map(str::trim)
+            .filter(|main| !main.is_empty())
+            .map(str::to_owned);
         if let Some(preload) = self.preload.as_deref() {
-            // It is never executed or served by iHub, but validate now so a
-            // malformed declaration cannot later become a path-handling edge.
+            // The validated bytes are later loaded from a host-owned in-memory
+            // route, so reject malformed package paths before snapshotting.
             validate_relative_path(preload)?;
         }
-        if self.features.is_empty() {
-            return Err("uTools plugin.json requires at least one feature.".to_owned());
+        if main.is_none() && (self.tools.is_empty() || self.preload.is_none()) {
+            return Err(
+                "uTools plugin.json requires 'main', or a tools-only 'preload' plus non-empty 'tools'."
+                    .to_owned(),
+            );
+        }
+        if self.features.is_empty() && self.tools.is_empty() {
+            return Err("uTools plugin.json requires at least one feature or MCP tool.".to_owned());
         }
         if self.features.len() > MAX_COMMANDS_PER_PLUGIN {
             return Err(format!(
                 "uTools plugin declares more than {MAX_COMMANDS_PER_PLUGIN} features."
             ));
+        }
+
+        let mut runtime_tools = BTreeMap::new();
+        for (name, declaration) in self.tools {
+            let tool = UtoolsToolDefinition {
+                name: name.clone(),
+                description: declaration.description,
+                input_schema: declaration.input_schema,
+                output_schema: declaration.output_schema,
+            };
+            validate_utools_tool_definition(&tool)?;
+            runtime_tools.insert(name, tool);
         }
 
         let mut command_ids = BTreeSet::new();
@@ -3934,7 +4085,7 @@ impl UtoolsManifest {
         let generated_id = utools_plugin_id(manifest_path, identity);
         let description = self.description.or_else(|| {
             Some(
-                "通过 iHub 的受限 uTools 兼容层运行：不执行 preload，且不接入本地搜索索引。"
+                "通过 iHub 的受限 uTools 兼容层运行：声明的 preload 仅在无 Node 权限的沙箱中执行，且不接入本地搜索索引。"
                     .to_owned(),
             )
         });
@@ -3950,9 +4101,7 @@ impl UtoolsManifest {
             icon: self.logo,
             logo: None,
             frontend: None,
-            entry: Some(EntryDeclaration {
-                frontend: self.main,
-            }),
+            entry: main.map(|frontend| EntryDeclaration { frontend }),
             backend: None,
             contributes: None,
             commands,
@@ -3960,6 +4109,7 @@ impl UtoolsManifest {
             update: PluginUpdateDeclaration::default(),
             compatibility: PluginCompatibility::Utools,
             utools_commands: runtime_commands,
+            utools_tools: runtime_tools,
             utools_preload: self.preload,
         })
     }
@@ -4029,23 +4179,41 @@ fn snapshot_frontend_assets(
     package_root: &Path,
     manifest: &PluginManifest,
 ) -> Result<Vec<PluginArtifactDigest>, String> {
-    let Some(frontend_entry) = manifest_frontend_entry(manifest) else {
-        return Ok(Vec::new());
+    let mut assets = if let Some(frontend_entry) = manifest_frontend_entry(manifest) {
+        let frontend_path =
+            canonical_package_file(package_root, &frontend_entry, "Plugin frontend")?;
+        let asset_root = frontend_path
+            .parent()
+            .ok_or_else(|| "Plugin frontend has no parent directory.".to_owned())?
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
+        ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
+        if asset_root == package_root && !manifest.compatibility.is_utools() {
+            return Err(
+                "Plugin frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
+                    .to_owned(),
+            );
+        }
+        collect_asset_digests(package_root, &asset_root)?
+    } else {
+        Vec::new()
     };
-    let frontend_path = canonical_package_file(package_root, &frontend_entry, "Plugin frontend")?;
-    let asset_root = frontend_path
-        .parent()
-        .ok_or_else(|| "Plugin frontend has no parent directory.".to_owned())?
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve plugin frontend bundle: {error}"))?;
-    ensure_path_within(&asset_root, package_root, "Plugin frontend bundle")?;
-    if asset_root == package_root && !manifest.compatibility.is_utools() {
-        return Err(
-            "Plugin frontend must live in a dedicated child build directory such as dist/index.html, not beside plugin.json."
-                .to_owned(),
-        );
+
+    // A tools-only uTools package executes its declared preload as a
+    // sandboxed ordinary script. Lock it even when there is no HTML bundle,
+    // and also when a conventional dist/ frontend lives in another directory.
+    if let Some(preload) = manifest.utools_preload.as_deref() {
+        let source = canonical_package_file(package_root, preload, "uTools preload")?;
+        let path = normalized_package_relative_path(package_root, &source)?;
+        if !assets.iter().any(|asset| asset.path == path) {
+            assets.push(PluginArtifactDigest {
+                path,
+                sha256: sha256_file(&source)?,
+            });
+        }
     }
-    collect_asset_digests(package_root, &asset_root)
+    assets.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(assets)
 }
 
 fn snapshot_native_binaries(
@@ -4477,6 +4645,120 @@ fn load_manifest_artwork(
     Ok(loaded)
 }
 
+fn is_valid_utools_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= MAX_UTOOLS_TOOL_NAME_CHARS
+        && name.bytes().enumerate().all(|(index, byte)| match byte {
+            b'a'..=b'z' => true,
+            b'_' => index > 0 && index + 1 < name.len(),
+            b'0'..=b'9' => index > 0,
+            _ => false,
+        })
+        && !name.contains("__")
+}
+
+fn validate_utools_tool_schema(name: &str, label: &str, schema: &Value) -> Result<(), String> {
+    if !schema.is_object() {
+        return Err(format!(
+            "uTools MCP tool '{name}' {label} must be a non-null JSON Schema object."
+        ));
+    }
+    let encoded = serde_json::to_vec(schema)
+        .map_err(|error| format!("Could not encode MCP tool '{name}' {label}: {error}"))?;
+    if encoded.len() > MAX_UTOOLS_TOOL_SCHEMA_BYTES {
+        return Err(format!(
+            "uTools MCP tool '{name}' {label} exceeds {MAX_UTOOLS_TOOL_SCHEMA_BYTES} bytes."
+        ));
+    }
+
+    let mut pending = vec![(schema, 1usize)];
+    let mut nodes = 0usize;
+    while let Some((value, depth)) = pending.pop() {
+        nodes = nodes.saturating_add(1);
+        if nodes > MAX_UTOOLS_TOOL_SCHEMA_NODES || depth > MAX_UTOOLS_TOOL_SCHEMA_DEPTH {
+            return Err(format!(
+                "uTools MCP tool '{name}' {label} exceeds the schema complexity limit."
+            ));
+        }
+        match value {
+            Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            Value::Object(object) => {
+                if let Some(reference) = object.get("$ref") {
+                    let reference = reference.as_str().ok_or_else(|| {
+                        format!("uTools MCP tool '{name}' {label} has a non-string $ref.")
+                    })?;
+                    if !reference.starts_with('#') {
+                        return Err(format!(
+                            "uTools MCP tool '{name}' {label} may use only document-local $ref values."
+                        ));
+                    }
+                }
+                pending.extend(object.values().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+
+    jsonschema::validator_for(schema).map_err(|error| {
+        let mut detail = error.to_string();
+        if detail.chars().count() > 1_000 {
+            detail = detail.chars().take(1_000).collect();
+        }
+        format!("uTools MCP tool '{name}' has an invalid {label}: {detail}")
+    })?;
+    Ok(())
+}
+
+fn validate_utools_tool_definition(tool: &UtoolsToolDefinition) -> Result<(), String> {
+    if !is_valid_utools_tool_name(&tool.name) {
+        return Err(format!(
+            "uTools MCP tool name '{}' must be lower snake_case, start with a letter, and contain at most {MAX_UTOOLS_TOOL_NAME_CHARS} characters.",
+            tool.name
+        ));
+    }
+    let description = tool.description.trim();
+    if description.is_empty() || description.chars().count() > MAX_UTOOLS_TOOL_DESCRIPTION_CHARS {
+        return Err(format!(
+            "uTools MCP tool '{}' requires a description of at most {MAX_UTOOLS_TOOL_DESCRIPTION_CHARS} characters.",
+            tool.name
+        ));
+    }
+    validate_utools_tool_schema(&tool.name, "inputSchema", &tool.input_schema)?;
+    if let Some(output_schema) = tool.output_schema.as_ref() {
+        validate_utools_tool_schema(&tool.name, "outputSchema", output_schema)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_utools_tool_value(
+    tool: &UtoolsToolDefinition,
+    value: &Value,
+    output: bool,
+) -> Result<(), String> {
+    let (label, schema) = if output {
+        let Some(schema) = tool.output_schema.as_ref() else {
+            return Ok(());
+        };
+        ("output", schema)
+    } else {
+        ("input", &tool.input_schema)
+    };
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| format!("Could not compile MCP tool '{}' schema: {error}", tool.name))?;
+    validator.validate(value).map_err(|error| {
+        let mut detail = error.to_string();
+        if detail.chars().count() > 1_000 {
+            detail = detail.chars().take(1_000).collect();
+        }
+        format!(
+            "MCP tool '{}' {label} does not match its manifest schema: {detail}",
+            tool.name
+        )
+    })
+}
+
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if !is_valid_identifier(&manifest.id) {
         return Err(
@@ -4500,6 +4782,14 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), String> {
         }
     }
     validate_permission_declarations(&manifest.permissions)?;
+    if manifest.utools_tools.len() > MAX_UTOOLS_TOOLS_PER_PLUGIN {
+        return Err(format!(
+            "uTools plugin declares more than {MAX_UTOOLS_TOOLS_PER_PLUGIN} MCP tools."
+        ));
+    }
+    for tool in manifest.utools_tools.values() {
+        validate_utools_tool_definition(tool)?;
+    }
     let commands = declared_commands(manifest);
     if commands.len() > MAX_COMMANDS_PER_PLUGIN {
         return Err(format!(
@@ -5039,6 +5329,16 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.ubrowser.hostedHttpsAutomation".to_owned());
+        if !manifest.utools_tools.is_empty() {
+            declaration
+                .permissions
+                .insert("compatibility.utools.mcpTools.manifestLocked".to_owned());
+        }
+        if manifest.utools_preload.is_some() {
+            declaration
+                .permissions
+                .insert("compatibility.utools.preload.sandboxedScript".to_owned());
+        }
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5541,7 +5841,7 @@ mod tests {
     }
 
     #[test]
-    fn public_utools_manifest_projects_main_push_without_executing_preload() {
+    fn public_utools_manifest_projects_main_push_with_a_sandboxed_preload() {
         let storage = temporary_directory("utools-manifest-projection");
         let source = storage.join("source");
         fs::create_dir_all(&source).expect("uTools source should be created");
@@ -5614,6 +5914,8 @@ mod tests {
             installed.canonicalize().expect("fixture root")
         );
         assert!(bundle.utools_compat.is_some());
+        assert!(bundle.utools_preload_script.is_some());
+        assert!(!bundle.synthetic_entry);
         assert!(bundle.allows_display_capture);
         assert_eq!(bundle.blocked_asset_paths.len(), 1);
         let (browser_bundle, suffix) = manager
@@ -5678,6 +5980,103 @@ mod tests {
             .expect("uTools compatibility must not grant clipboard read"));
 
         let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn public_utools_tools_only_manifest_locks_schemas_and_preload_runtime() {
+        let storage = temporary_directory("utools-tools-only");
+        let source = storage.join("source");
+        fs::create_dir_all(&source).expect("uTools source should be created");
+        fs::write(
+            source.join("preload.js"),
+            "utools.registerTool('say_hi', async ({ name }) => ({ greeting: `hi ${name}` }))",
+        )
+        .expect("uTools preload fixture should be written");
+        write_test_png(&source.join("logo.png"), [10, 132, 255, 255]);
+        fs::write(
+            source.join("plugin.json"),
+            r#"{
+  "name": "Agent Tools",
+  "logo": "logo.png",
+  "preload": "preload.js",
+  "tools": {
+    "say_hi": {
+      "description": "Return a structured greeting",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "greeting": { "type": "string" } },
+        "required": ["greeting"]
+      }
+    }
+  }
+}"#,
+        )
+        .expect("tools-only manifest should be written");
+
+        let manifest = read_manifest(&source.join("plugin.json"))
+            .expect("tools-only uTools manifest should project");
+        validate_manifest(&manifest).expect("tool schemas should compile");
+        assert!(manifest.commands.is_empty());
+        assert_eq!(manifest.utools_tools.len(), 1);
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.mcpTools.manifestLocked"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.preload.sandboxedScript"));
+
+        let plugin_id = manifest.id.clone();
+        let installed = storage.join(&plugin_id);
+        fs::rename(&source, &installed).expect("fixture should move under managed identity");
+        let manager = manager_at(storage.clone());
+        let bundle = manager
+            .frontend_asset_bundle(&plugin_id)
+            .expect("tools-only package should receive a synthetic hidden runtime");
+        assert!(bundle.synthetic_entry);
+        assert!(bundle.utools_preload_script.is_some());
+        assert_eq!(bundle.utools_compat.as_ref().unwrap().tools.len(), 1);
+        assert_eq!(
+            manager
+                .utools_tool_definition(&plugin_id, "say_hi")
+                .expect("declared tool")
+                .name,
+            "say_hi"
+        );
+        let integrity = snapshot_integrity(
+            &installed,
+            &installed.join("plugin.json"),
+            &read_manifest(&installed.join("plugin.json")).expect("installed manifest"),
+        )
+        .expect("tools-only snapshot should lock preload");
+        assert!(integrity
+            .frontend_assets
+            .iter()
+            .any(|asset| asset.path == "preload.js"));
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn public_utools_tool_manifests_reject_invalid_names_and_remote_refs() {
+        for tools in [
+            r#"{"BadName":{"description":"bad","inputSchema":{"type":"object"}}}"#,
+            r##"{"remote_ref":{"description":"bad","inputSchema":{"$ref":"https://example.com/schema.json"}}}"##,
+        ] {
+            let value = format!(
+                r#"{{"name":"Bad tools","logo":"logo.png","main":"index.html","tools":{tools}}}"#
+            );
+            let raw = serde_json::from_str::<serde_json::Value>(&value).expect("fixture JSON");
+            let parsed = serde_json::from_value::<super::UtoolsManifest>(raw)
+                .expect("shape should deserialize before semantic validation");
+            assert!(parsed
+                .into_plugin_manifest(Path::new("C:/plugins/bad/plugin.json"))
+                .is_err());
+        }
     }
 
     fn write_plugin(root: &Path, id: &str, name: &str, frontend: &str) {

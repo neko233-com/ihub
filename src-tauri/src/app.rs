@@ -59,7 +59,10 @@ use crate::{
         plan_plugin_shortcuts, PluginShortcutBinding, PluginShortcutEvent, PluginShortcutRegistry,
         PluginShortcutStatus,
     },
-    plugins::{PluginManager, UtoolsCompatRuntimeConfig, UTOOLS_MAIN_PUSH_PROVIDER_ID},
+    plugins::{
+        validate_utools_tool_value, PluginManager, UtoolsCompatRuntimeConfig,
+        UTOOLS_MAIN_PUSH_PROVIDER_ID,
+    },
     project_template::create_plugin_project as create_plugin_project_template,
     super_panel::{SuperPanelState, SuperPanelStatus, SuperPanelTrigger},
     system_open::{LocalOpenKind, LocalPathIdentity, PreparedLocalOpen},
@@ -783,6 +786,15 @@ struct PluginHostState {
     /// This one-shot rendezvous binds that callback (and any immediate paste
     /// it schedules) to the exact plugin lease that received the event.
     pending_utools_main_push_selections: Mutex<HashMap<String, PendingUtoolsMainPushSelection>>,
+    /// A handler becomes callable only after the current lifecycle-owning
+    /// iframe registers an exact manifest-declared uTools MCP name. Records
+    /// are bound to the opaque lease and native host window that observed the
+    /// registration, so a replacement document cannot inherit callbacks.
+    utools_tools: RwLock<HashMap<(String, String), RegisteredUtoolsTool>>,
+    /// Tool calls are native-owned rendezvous records. Renderer completions
+    /// must match plugin, tool, request, and lease before they can resolve the
+    /// trusted caller's wait.
+    pending_utools_tool_calls: Mutex<HashMap<String, PendingUtoolsToolCall>>,
     /// A frontend can access only a directory selected through the native
     /// picker during its own session. The opaque id is scoped to the plugin
     /// and expires quickly; it is never a reusable filesystem path grant.
@@ -841,6 +853,8 @@ impl Default for PluginHostState {
             pending_searches: Mutex::new(HashMap::new()),
             issued_search_results: Mutex::new(HashMap::new()),
             pending_utools_main_push_selections: Mutex::new(HashMap::new()),
+            utools_tools: RwLock::new(HashMap::new()),
+            pending_utools_tool_calls: Mutex::new(HashMap::new()),
             filesystem_grants: Mutex::new(HashMap::new()),
             file_grants: Mutex::new(HashMap::new()),
             launcher_contexts: Mutex::new(HashMap::new()),
@@ -1368,6 +1382,53 @@ struct PendingUtoolsMainPushSelection {
     response: SyncSender<Result<bool, String>>,
 }
 
+#[derive(Clone, Debug)]
+struct RegisteredUtoolsTool {
+    plugin_id: String,
+    lease_id: String,
+    window_label: String,
+}
+
+struct PendingUtoolsToolCall {
+    plugin_id: String,
+    name: String,
+    lease_id: String,
+    response: SyncSender<Result<Value, String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsToolCatalogEntry {
+    plugin_id: String,
+    plugin_name: String,
+    name: String,
+    description: String,
+    input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_schema: Option<Value>,
+    registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtoolsToolInvocationResult {
+    request_id: String,
+    result: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UtoolsToolProgressEvent {
+    request_id: String,
+    plugin_id: String,
+    name: String,
+    progress: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 const PLUGIN_SEARCH_TIMEOUT: Duration = Duration::from_millis(280);
 const MAX_PENDING_PLUGIN_SEARCHES: usize = 24;
 const MAX_PLUGIN_SEARCH_RESULTS: usize = 6;
@@ -1378,6 +1439,13 @@ const PLUGIN_SEARCH_SELECTION_TTL: Duration = Duration::from_secs(60);
 const MAX_ISSUED_PLUGIN_SEARCHES: usize = 64;
 const UTOOLS_MAIN_PUSH_SELECTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING_UTOOLS_MAIN_PUSH_SELECTIONS: usize = 16;
+const MAX_REGISTERED_UTOOLS_TOOLS: usize = 512;
+const MAX_PENDING_UTOOLS_TOOL_CALLS: usize = 16;
+const MAX_PENDING_UTOOLS_TOOL_CALLS_PER_PLUGIN: usize = 4;
+const MAX_UTOOLS_TOOL_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_UTOOLS_TOOL_VALUE_NODES: usize = 16_384;
+const MAX_UTOOLS_TOOL_VALUE_DEPTH: usize = 32;
+const UTOOLS_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const FILESYSTEM_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const BATCH_RENAME_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_FILESYSTEM_GRANTS: usize = 48;
@@ -4544,6 +4612,7 @@ pub async fn plugin_host_call(
         && (request.method.starts_with("commands.")
             || request.method.starts_with("search.")
             || request.method.starts_with("compatibility.utools.features.")
+            || request.method.starts_with("compatibility.utools.tools.")
             || matches!(
                 request.method.as_str(),
                 "lifecycle.ready" | "lifecycle.dispose"
@@ -4955,6 +5024,43 @@ pub async fn plugin_host_call(
         return handle_plugin_log_call(&request, &state);
     }
 
+    if request.method.starts_with("compatibility.utools.tools.") {
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !server.is_active_for(&request.lease_id, &request_plugin_id) {
+                return Err(
+                    "This uTools MCP runtime session has expired. Reopen the plugin to continue."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            match request.method.as_str() {
+                "compatibility.utools.tools.register" => register_utools_tool_handler(
+                    &state.host,
+                    &state.plugins,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    window.label(),
+                    &request.params,
+                ),
+                "compatibility.utools.tools.complete" => complete_utools_tool_call(
+                    &state.host,
+                    &state.plugins,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                ),
+                "compatibility.utools.tools.progress" => progress_utools_tool_call(
+                    &app,
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                ),
+                _ => Err("Unsupported uTools MCP runtime method.".to_owned()),
+            }
+        });
+    }
+
     plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
         if !server.is_active_for(&request.lease_id, &request_plugin_id) {
             return Err(
@@ -4974,6 +5080,392 @@ fn emit_plugin_search_providers_changed(
 ) {
     let payload = plugin_search_providers_changed_payload(plugin_id, provider_id, registered);
     let _ = app.emit_to("main", "ihub://plugin-search-providers-changed", payload);
+}
+
+fn validate_utools_tool_json_value(value: &Value, label: &str) -> Result<(), String> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|error| format!("Could not encode uTools MCP {label}: {error}"))?;
+    if encoded.len() > MAX_UTOOLS_TOOL_VALUE_BYTES {
+        return Err(format!(
+            "uTools MCP {label} exceeds {MAX_UTOOLS_TOOL_VALUE_BYTES} bytes."
+        ));
+    }
+    let mut pending = vec![(value, 1usize)];
+    let mut nodes = 0usize;
+    while let Some((next, depth)) = pending.pop() {
+        nodes = nodes.saturating_add(1);
+        if nodes > MAX_UTOOLS_TOOL_VALUE_NODES || depth > MAX_UTOOLS_TOOL_VALUE_DEPTH {
+            return Err(format!(
+                "uTools MCP {label} exceeds the JSON complexity limit."
+            ));
+        }
+        match next {
+            Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            Value::Object(object) => {
+                pending.extend(object.values().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn register_utools_tool_handler(
+    host: &PluginHostState,
+    plugins: &PluginManager,
+    plugin_id: &str,
+    lease_id: &str,
+    window_label: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(params, &["name"])?;
+    let name = required_string(params, "name")?;
+    plugins.utools_tool_definition(plugin_id, name)?;
+    let key = (plugin_id.to_owned(), name.to_owned());
+    let mut tools = host
+        .utools_tools
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !tools.contains_key(&key) && tools.len() >= MAX_REGISTERED_UTOOLS_TOOLS {
+        return Err(format!(
+            "The host has reached its {MAX_REGISTERED_UTOOLS_TOOLS}-tool runtime limit."
+        ));
+    }
+    tools.insert(
+        key,
+        RegisteredUtoolsTool {
+            plugin_id: plugin_id.to_owned(),
+            lease_id: lease_id.to_owned(),
+            window_label: window_label.to_owned(),
+        },
+    );
+    Ok(json!({ "registered": true }))
+}
+
+fn complete_utools_tool_call(
+    host: &PluginHostState,
+    plugins: &PluginManager,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(params, &["requestId", "name", "ok", "result", "error"])?;
+    let request_id = required_string(params, "requestId")?;
+    let name = required_string(params, "name")?;
+    let ok = params
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "uTools MCP completion requires a boolean ok value.".to_owned())?;
+    {
+        let pending = host
+            .pending_utools_tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let call = pending
+            .get(request_id)
+            .ok_or_else(|| "This uTools MCP request expired or was cancelled.".to_owned())?;
+        if call.plugin_id != plugin_id || call.name != name || call.lease_id != lease_id {
+            return Err("This uTools MCP completion belongs to another runtime call.".to_owned());
+        }
+    }
+
+    let outcome = if ok {
+        (|| {
+            let result = params.get("result").cloned().unwrap_or(Value::Null);
+            validate_utools_tool_json_value(&result, "tool result")?;
+            let tool = plugins.utools_tool_definition(plugin_id, name)?;
+            validate_utools_tool_value(&tool, &result, true)?;
+            Ok(result)
+        })()
+    } else {
+        let error = params
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.trim().is_empty() && error.chars().count() <= 2_000)
+            .unwrap_or("uTools MCP handler failed.")
+            .to_owned();
+        Err(error)
+    };
+    let call = host
+        .pending_utools_tool_calls
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(request_id)
+        .ok_or_else(|| "This uTools MCP request was already completed.".to_owned())?;
+    let _ = call.response.send(outcome);
+    Ok(json!({ "completed": true }))
+}
+
+fn progress_utools_tool_call(
+    app: &AppHandle,
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(
+        params,
+        &["requestId", "name", "progress", "total", "message"],
+    )?;
+    let request_id = required_string(params, "requestId")?;
+    let name = required_string(params, "name")?;
+    let progress = params
+        .get("progress")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| "uTools MCP progress must be a finite non-negative number.".to_owned())?;
+    let total = match params.get("total") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0 && *value >= progress)
+                .ok_or_else(|| {
+                    "uTools MCP progress total must be finite, positive, and not below progress."
+                        .to_owned()
+                })?,
+        ),
+    };
+    let message = match params.get("message") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|value| value.chars().count() <= 1_000 && !value.contains('\0'))
+                .ok_or_else(|| "uTools MCP progress message is invalid or too long.".to_owned())?
+                .to_owned(),
+        ),
+    };
+    let pending = host
+        .pending_utools_tool_calls
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let call = pending
+        .get(request_id)
+        .ok_or_else(|| "This uTools MCP request expired or was cancelled.".to_owned())?;
+    if call.plugin_id != plugin_id || call.name != name || call.lease_id != lease_id {
+        return Err("This uTools MCP progress belongs to another runtime call.".to_owned());
+    }
+    drop(pending);
+    app.emit_to(
+        "main",
+        "ihub://utools-tool-progress",
+        UtoolsToolProgressEvent {
+            request_id: request_id.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            name: name.to_owned(),
+            progress,
+            total,
+            message,
+        },
+    )
+    .map_err(|error| format!("Could not emit uTools MCP progress: {error}"))?;
+    Ok(json!({ "accepted": true }))
+}
+
+#[tauri::command]
+pub fn list_utools_tools(
+    state: State<'_, AppState>,
+) -> Result<Vec<UtoolsToolCatalogEntry>, String> {
+    let registered = state
+        .host
+        .utools_tools
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let mut catalog = Vec::new();
+    for plugin in state
+        .plugins
+        .list()
+        .into_iter()
+        .filter(|plugin| plugin.enabled && plugin.tool_count > 0)
+    {
+        for tool in state.plugins.utools_tool_definitions(&plugin.id)? {
+            let active = registered
+                .get(&(plugin.id.clone(), tool.name.clone()))
+                .is_some_and(|handler| {
+                    state
+                        .plugin_assets
+                        .is_active_for(&handler.lease_id, &handler.plugin_id)
+                });
+            catalog.push(UtoolsToolCatalogEntry {
+                plugin_id: plugin.id.clone(),
+                plugin_name: plugin.name.clone(),
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                output_schema: tool.output_schema,
+                registered: active,
+            });
+        }
+    }
+    catalog.sort_by(|left, right| {
+        left.plugin_name
+            .to_lowercase()
+            .cmp(&right.plugin_name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+    });
+    Ok(catalog)
+}
+
+#[tauri::command]
+pub async fn invoke_utools_tool(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+    params: Value,
+    request_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<UtoolsToolInvocationResult, String> {
+    if !is_plugin_id(&plugin_id) {
+        return Err("Invalid plugin ID.".to_owned());
+    }
+    validate_utools_tool_json_value(&params, "tool parameters")?;
+    let tool = state.plugins.utools_tool_definition(&plugin_id, &name)?;
+    validate_utools_tool_value(&tool, &params, false)?;
+    let handler = state
+        .host
+        .utools_tools
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(plugin_id.clone(), name.clone()))
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "uTools MCP handler '{plugin_id}/{name}' is not registered by its current runtime."
+            )
+        })?;
+    if !state
+        .plugin_assets
+        .is_active_for(&handler.lease_id, &handler.plugin_id)
+    {
+        return Err(format!(
+            "uTools MCP handler '{plugin_id}/{name}' belongs to an expired runtime."
+        ));
+    }
+    let request_id = match request_id {
+        Some(request_id) if Uuid::parse_str(&request_id).is_ok() => request_id,
+        Some(_) => return Err("uTools MCP requestId must be a UUID.".to_owned()),
+        None => Uuid::new_v4().to_string(),
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    {
+        let mut pending = state
+            .host
+            .pending_utools_tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_UTOOLS_TOOL_CALLS {
+            return Err(format!(
+                "The host already has {MAX_PENDING_UTOOLS_TOOL_CALLS} uTools MCP calls in progress."
+            ));
+        }
+        let per_plugin = pending
+            .values()
+            .filter(|call| call.plugin_id == plugin_id)
+            .count();
+        if per_plugin >= MAX_PENDING_UTOOLS_TOOL_CALLS_PER_PLUGIN {
+            return Err(format!(
+                "Plugin '{plugin_id}' already has {MAX_PENDING_UTOOLS_TOOL_CALLS_PER_PLUGIN} MCP calls in progress."
+            ));
+        }
+        if pending.contains_key(&request_id) {
+            return Err("This uTools MCP requestId is already in progress.".to_owned());
+        }
+        pending.insert(
+            request_id.clone(),
+            PendingUtoolsToolCall {
+                plugin_id: plugin_id.clone(),
+                name: name.clone(),
+                lease_id: handler.lease_id.clone(),
+                response: sender,
+            },
+        );
+    }
+    let event_name = format!("ihub://plugin/{plugin_id}/event/utools.tool.invoke");
+    if let Err(error) = app.emit_to(
+        &handler.window_label,
+        &event_name,
+        json!({ "requestId": request_id, "name": name, "params": params }),
+    ) {
+        state
+            .host
+            .pending_utools_tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&request_id);
+        return Err(format!("Could not dispatch uTools MCP call: {error}"));
+    }
+    let wait_id = request_id.clone();
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        receiver.recv_timeout(UTOOLS_TOOL_CALL_TIMEOUT)
+    })
+    .await
+    .map_err(|error| format!("uTools MCP wait failed: {error}"))?;
+    let result = match response {
+        Ok(result) => result?,
+        Err(RecvTimeoutError::Timeout) => {
+            state
+                .host
+                .pending_utools_tool_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&wait_id);
+            let event_name = format!("ihub://plugin/{plugin_id}/event/utools.tool.cancel");
+            let _ = app.emit_to(
+                &handler.window_label,
+                &event_name,
+                json!({ "requestId": wait_id, "name": name }),
+            );
+            return Err("uTools MCP handler timed out after 10 minutes.".to_owned());
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err("uTools MCP handler stopped before responding.".to_owned());
+        }
+    };
+    Ok(UtoolsToolInvocationResult { request_id, result })
+}
+
+#[tauri::command]
+pub fn cancel_utools_tool(
+    app: AppHandle,
+    request_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    if Uuid::parse_str(&request_id).is_err() {
+        return Err("Invalid uTools MCP request ID.".to_owned());
+    }
+    let Some(call) = state
+        .host
+        .pending_utools_tool_calls
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&request_id)
+    else {
+        return Ok(false);
+    };
+    let handler = state
+        .host
+        .utools_tools
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(call.plugin_id.clone(), call.name.clone()))
+        .cloned();
+    let _ = call
+        .response
+        .send(Err("uTools MCP call was cancelled by the host.".to_owned()));
+    if let Some(handler) = handler.filter(|handler| handler.lease_id == call.lease_id) {
+        let event_name = format!("ihub://plugin/{}/event/utools.tool.cancel", call.plugin_id);
+        let _ = app.emit_to(
+            &handler.window_label,
+            &event_name,
+            json!({ "requestId": request_id, "name": call.name }),
+        );
+    }
+    Ok(true)
 }
 
 fn validate_utools_browser_message<'a>(
@@ -7820,6 +8312,31 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
             "uTools main-push owner '{plugin_id}' stopped before responding."
         )));
     }
+    host.utools_tools
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(owner, _), _| owner != plugin_id);
+    let pending_tools = {
+        let mut pending = host
+            .pending_utools_tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request_ids = pending
+            .iter()
+            .filter_map(|(request_id, call)| {
+                (call.plugin_id == plugin_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| pending.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+    for call in pending_tools {
+        let _ = call.response.send(Err(format!(
+            "uTools MCP runtime '{plugin_id}' stopped before responding."
+        )));
+    }
     host.issued_search_results
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -9299,6 +9816,9 @@ pub fn run() {
             dispatch_detached_plugin_frontend_event,
             invoke_plugin_frontend_command,
             list_registered_plugin_search_providers,
+            list_utools_tools,
+            invoke_utools_tool,
+            cancel_utools_tool,
             query_plugin_search,
             select_utools_main_push_result
         ])
@@ -10887,16 +11407,17 @@ mod tests {
         IssuedPluginSearchResults, LauncherFocusGate, LauncherHotkeyToggleGate,
         LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
         LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PendingUtoolsMainPushSelection,
-        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
-        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
-        PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
-        TemporaryPathOpenStore, UtoolsMouseButton, UtoolsSimulationAction, LAUNCHER_CONTEXT_TTL,
-        LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
-        LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
-        MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
-        MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
-        MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW,
-        PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
+        PendingUtoolsToolCall, PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest,
+        PluginHostState, PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        PluginLauncherContextRequest, PluginLogAdmission, RegisteredUtoolsTool,
+        TemporaryPathOpenKind, TemporaryPathOpenStore, UtoolsMouseButton, UtoolsSimulationAction,
+        LAUNCHER_CONTEXT_TTL, LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE,
+        LAUNCHER_INITIAL_BLUR_GRACE, LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES,
+        MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS, MAX_PLUGIN_CLIPBOARD_TEXT_BYTES,
+        MAX_PLUGIN_LOGS_PER_WINDOW, MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW,
+        MAX_PLUGIN_NOTIFICATION_BODY_CHARS, MAX_PLUGIN_SEARCH_PAYLOAD_BYTES,
+        MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW, PLUGIN_NOTIFICATION_WINDOW,
+        PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
     };
 
     #[test]
@@ -11833,6 +12354,44 @@ mod tests {
             "main-push-selection-1",
         )
         .is_err());
+    }
+
+    #[test]
+    fn utools_mcp_handlers_and_calls_are_lease_owned_and_clear_on_dispose() {
+        let host = PluginHostState::default();
+        host.utools_tools
+            .write()
+            .expect("tool registry lock")
+            .insert(
+                ("utools-owner".to_owned(), "say_hi".to_owned()),
+                RegisteredUtoolsTool {
+                    plugin_id: "utools-owner".to_owned(),
+                    lease_id: "runtime-lease-owner".to_owned(),
+                    window_label: "main".to_owned(),
+                },
+            );
+        let (sender, receiver) = mpsc::sync_channel(1);
+        host.pending_utools_tool_calls
+            .lock()
+            .expect("pending tool lock")
+            .insert(
+                "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                PendingUtoolsToolCall {
+                    plugin_id: "utools-owner".to_owned(),
+                    name: "say_hi".to_owned(),
+                    lease_id: "runtime-lease-owner".to_owned(),
+                    response: sender,
+                },
+            );
+
+        clear_plugin_runtime_state(&host, "utools-owner");
+        assert!(host.utools_tools.read().expect("registry lock").is_empty());
+        assert!(host
+            .pending_utools_tool_calls
+            .lock()
+            .expect("pending lock")
+            .is_empty());
+        assert!(receiver.recv().expect("dispose response").is_err());
     }
 
     #[test]

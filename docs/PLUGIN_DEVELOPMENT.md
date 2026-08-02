@@ -217,7 +217,11 @@ Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDispl
 
 Windows 上的 `simulateKeyboardTap`、`simulateMouseMove`、`simulateMouseClick`、`simulateMouseDoubleClick` 与 `simulateMouseRightClick` 使用真实 `SendInput/SetCursorPos`，不返回模拟成功。它们只允许当前可见插件 surface 调用，每次执行前由宿主显示插件来源、按键组合或物理屏幕坐标并要求用户确认，与通知共用每插件每 10 秒最多 5 次的限流；隐藏 runtime、屏幕外坐标、非整数坐标、未知按键或修饰键会被拒绝。省略单击坐标时固定使用确认对话框出现前捕获的当前指针位置，避免确认按钮改变操作目标；部分键盘注入失败时宿主会补发按键释放事件，降低修饰键滞留风险。当前仅 Windows 10/11 x64 完成实现，其他平台明确报错。
 
-这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、未经逐次确认的键鼠模拟或其他应用窗口枚举；上述有界显示器元数据也不包含窗口、句柄或像素。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
+这不是 Electron/Node preload 的复刻。iHub 可执行清单明确声明并纳入快照哈希的 uTools preload，但只把它当作 iframe 内普通脚本：提供 `utools/rubick`、`module/exports` 与只含受限 `contextBridge/ipcRenderer` 的 `require("electron")`，不提供 `fs`、`child_process`、`remote`、命令行或其他 Node 模块。依赖这些 ambient API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
+
+### uTools MCP 工具
+
+公开 uTools `plugin.json.tools` 支持小写 `snake_case` 名称、必填 `description/inputSchema` 与可选 `outputSchema`；每插件最多 64 项，每份 schema 最多 64 KiB、2,048 个节点和 32 层，只允许文档内 `$ref`。schema 会在导入和每次调用前由 Rust JSON Schema 实现编译；参数与 handler 返回值分别按输入/输出 schema 验证，单次值最多 1 MiB、16,384 节点和 32 层。只有当前 lifecycle owner 在初始化阶段调用 `utools.registerTool(name, handler)` 后才显示为已注册；BrowserWindow、未声明名称和旧租约均拒绝。`ctx.requestId` 是调用 UUID，`ctx.sendProgress({ progress, total?, message? })` 会向可信主窗口发出 `ihub://utools-tool-progress`。可信主窗口通过 `list_utools_tools`、`invoke_utools_tool` 与 `cancel_utools_tool` 路由调用；调用全局最多 16 个、单插件最多 4 个，并在十分钟后超时。tools-only 包可以省略 `main/features`，但必须同时声明 `preload` 与非空 `tools`；宿主为其创建不可见的合成页面，并且不会把插件目录变成可读取的静态资源根。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 

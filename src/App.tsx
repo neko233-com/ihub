@@ -1272,10 +1272,15 @@ export function App() {
   const searchRuntimePlugins = useMemo(
     () => plugins.filter((plugin) =>
       plugin.enabled !== false
-      && Boolean(plugin.frontendEntry)
-      && Array.isArray(plugin.searchProviders)
-      && plugin.searchProviders.length > 0
-      && requestedSearchRuntimePluginIds.includes(plugin.id)
+      && (Boolean(plugin.frontendEntry) || (plugin.toolCount ?? 0) > 0)
+      && (
+        (plugin.toolCount ?? 0) > 0
+        || (
+          Array.isArray(plugin.searchProviders)
+          && plugin.searchProviders.length > 0
+          && requestedSearchRuntimePluginIds.includes(plugin.id)
+        )
+      )
       // Exactly one iframe runtime owns a plugin at a time. The visible
       // surface takes over when a provider result or command opens it.
       && plugin.id !== activePlugin?.id,

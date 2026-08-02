@@ -24,6 +24,8 @@ export const PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES = 256 * 1024;
 export const PLUGIN_BRIDGE_MAX_BROWSER_JSON_BYTES = 800 * 1024;
 export const PLUGIN_BRIDGE_MAX_UBROWSER_JSON_BYTES = 4 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_UBROWSER_JSON_NODES = 32_768;
+export const PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_BYTES = 4 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_NODES = 16_384;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
@@ -74,6 +76,9 @@ const pluginHostMethods = new Set([
   "compatibility.utools.input.pasteFiles",
   "compatibility.utools.input.typeString",
   "compatibility.utools.mainPush.selectComplete",
+  "compatibility.utools.tools.register",
+  "compatibility.utools.tools.complete",
+  "compatibility.utools.tools.progress",
   "compatibility.utools.notification.show",
   "compatibility.utools.screen.capture",
   "compatibility.utools.shell.beep",
@@ -323,6 +328,7 @@ export function validatePluginBridgeCall(
   const isUtoolsSimulation = method.startsWith("compatibility.utools.simulate.");
   const isUtoolsBrowser = method.startsWith("compatibility.utools.browser.");
   const isUtoolsUBrowser = method === "compatibility.utools.ubrowser.run";
+  const isUtoolsTool = method.startsWith("compatibility.utools.tools.");
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
     if (!params || !hasOnlyKeys(params, new Set())) {
@@ -682,6 +688,54 @@ export function validatePluginBridgeCall(
       };
     }
   }
+  if (isUtoolsTool) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const validName = (value: unknown) => typeof value === "string"
+      && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)
+      && [...value].length <= 64;
+    const validRequestId = (value: unknown) => typeof value === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+    let valid = false;
+    if (method === "compatibility.utools.tools.register") {
+      valid = !!params
+        && hasOnlyKeys(params, new Set(["name"]))
+        && validName(params.name);
+    } else if (method === "compatibility.utools.tools.complete") {
+      valid = !!params
+        && hasOnlyKeys(params, new Set(["requestId", "name", "ok", "result", "error"]))
+        && validRequestId(params.requestId)
+        && validName(params.name)
+        && typeof params.ok === "boolean"
+        && Object.prototype.hasOwnProperty.call(params, "result")
+        && (params.error === null || (
+          typeof params.error === "string" && [...params.error].length <= 2_000
+        ));
+    } else if (method === "compatibility.utools.tools.progress") {
+      const progress = params?.progress;
+      const total = params?.total;
+      const message = params?.message;
+      valid = !!params
+        && hasOnlyKeys(params, new Set(["requestId", "name", "progress", "total", "message"]))
+        && validRequestId(params.requestId)
+        && validName(params.name)
+        && typeof progress === "number"
+        && Number.isFinite(progress)
+        && progress >= 0
+        && (total === null || total === undefined || (
+          typeof total === "number" && Number.isFinite(total) && total > 0 && total >= progress
+        ))
+        && (message === null || message === undefined || (
+          typeof message === "string" && [...message].length <= 1_000 && !message.includes("\0")
+        ));
+    }
+    if (!valid) {
+      return {
+        ok: false,
+        error: "uTools MCP Bridge parameters are invalid.",
+        responseId,
+      };
+    }
+  }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
   if (isImageCopy || isUtoolsRedirect) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
@@ -697,11 +751,15 @@ export function validatePluginBridgeCall(
     maxJsonBytes = PLUGIN_BRIDGE_MAX_BROWSER_JSON_BYTES;
   } else if (isUtoolsUBrowser) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_UBROWSER_JSON_BYTES;
+  } else if (isUtoolsTool) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_BYTES;
   }
   const maxJsonNodes = isDbWrite
     ? PLUGIN_BRIDGE_MAX_DB_JSON_NODES
     : isUtoolsUBrowser
       ? PLUGIN_BRIDGE_MAX_UBROWSER_JSON_NODES
+      : isUtoolsTool
+        ? PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_NODES
       : PLUGIN_BRIDGE_MAX_JSON_NODES;
   if (!boundedJsonValue(normalizedCall, maxJsonBytes, maxJsonNodes)) {
     return {
@@ -759,5 +817,6 @@ export function isLargePluginBridgeMethod(method: string): boolean {
     || method === "compatibility.utools.browser.executeResult"
     || method === "compatibility.utools.browser.send"
     || method === "compatibility.utools.browser.sendToParent"
-    || method === "compatibility.utools.ubrowser.run";
+    || method === "compatibility.utools.ubrowser.run"
+    || method === "compatibility.utools.tools.complete";
 }

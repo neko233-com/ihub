@@ -137,7 +137,7 @@ bash /tmp/ihub-install.sh
 
 用户可以直接输入 GitHub 仓库；官方 catalog 只是发现入口，绝不是唯一下载中心。当前 MVP 会解析 <code>owner/repo@tag</code> 或 URL <code>#ref</code>，在下载前锁定远端的实际 commit，并为 canonical <code>plugin.json</code>、整个可服务前端目录、声明图标和原生二进制写入并复核 SHA-256，绝不执行仓库脚本。同一插件 ID 首次安装后会绑定其来源与 ref，其他仓库不能借同名 ID 覆盖它；更新必须走已安装来源的只读检查与用户确认。<code>ihub.plugin.json</code> 仅作为旧包的导入兼容别名，新插件与生成模板都使用 <code>plugin.json</code>。发布者签名、界面中的逐字段权限／哈希 diff 和锁定版本回滚尚未实现，属于后续安装器能力。
 
-也可导入公开 uTools <code>plugin.json</code> 的受限子集：<code>main</code>、<code>logo</code> 与文本型 <code>features</code> 会投影为 iHub 前端命令，并提供 ready/enter/out 生命周期、宿主子输入框、动态功能、同步文档/附件数据库、取色与选区截图、显示器 API、经系统选择器授权的录屏源、受确认保护的本地 Shell 动作，以及 Windows 原生文件图标。存储按插件隔离并在 ready 前恢复；取色、截图、打开／定位／回收本机路径等敏感动作由可信宿主确认，隐藏 runtime 不能调用前台能力。iHub 不执行或提供 <code>preload</code>、Node、Electron、任意文件/图片 matcher 或浏览器可访问的本地搜索索引；uTools 同级目录中的预加载脚本也不会作为 loopback 资源提供。本地搜索继续完全由 Rust 原生索引实现。
+也可导入公开 uTools <code>plugin.json</code>：<code>main</code>、<code>logo</code> 与文本型 <code>features</code> 会投影为 iHub 前端命令；<code>tools</code> 会按有界 JSON Schema 锁定，并由当前隐藏 runtime 的 <code>utools.registerTool</code> 注册，支持结构化调用、进度、取消、超时和生命周期清理。tools-only 包可只声明 <code>preload + tools</code>；声明的 preload 会纳入 SHA-256 快照，并从宿主内存路由作为无 Node 权限的普通 WebView 脚本加载。兼容层还提供 ready/enter/out 生命周期、宿主子输入框、动态功能、同步文档/附件数据库、取色与选区截图、显示器 API、经系统选择器授权的录屏源、受确认保护的本地 Shell 动作，以及 Windows 原生文件图标。该沙箱不提供 <code>fs</code>、<code>child_process</code> 或其他 Node/Electron ambient authority；文件/图片 matcher 与浏览器可访问的本地搜索索引也不会因此开放。本地搜索继续完全由 Rust 原生索引实现。
 
 ~~~text
 GitHub source → resolved immutable commit → manifest / integrity lock

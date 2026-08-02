@@ -307,6 +307,11 @@ pub struct PluginInfo {
     /// checks. Applying a Git snapshot remains an explicit user action.
     pub auto_update: bool,
     pub command_count: usize,
+    /// Number of manifest-declared uTools MCP tools. Handlers remain
+    /// unavailable until the current sandbox runtime registers the exact
+    /// declaration name.
+    #[serde(default)]
+    pub tool_count: usize,
     pub commands: Vec<PluginCommandInfo>,
     /// Plugin-level shortcut-to-command/keyword mappings declared in the
     /// manifest. Command-local shorthand remains on `commands[].shortcut`.

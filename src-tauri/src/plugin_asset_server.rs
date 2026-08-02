@@ -36,6 +36,7 @@ const ASSET_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_COMPAT_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const UTOOLS_COMPAT_SCRIPT_NAME: &str = "__ihub_utools_compat.js";
+const UTOOLS_PRELOAD_SCRIPT_NAME: &str = "__ihub_utools_preload.js";
 const UTOOLS_SYNC_DB_ROUTE: &str = "__ihub_utools_db_sync";
 const UTOOLS_SYNC_DB_HEADER: &str = "x-ihub-utools-db";
 const UTOOLS_SYNC_SCREEN_ROUTE: &str = "__ihub_utools_screen_sync";
@@ -224,10 +225,12 @@ struct ServedBundle {
     purpose: PluginFrontendPurpose,
     asset_root: PathBuf,
     entry: PathBuf,
+    synthetic_entry: bool,
     blocked_asset_paths: Vec<PathBuf>,
     route_token: String,
     allows_remote_network: bool,
     utools_compat_script: Option<Vec<u8>>,
+    utools_preload_script: Option<Vec<u8>>,
     utools_documents: Option<UtoolsDocumentStore>,
     utools_browser_preload_src: Option<String>,
 }
@@ -409,17 +412,24 @@ impl PluginAssetServer {
             plugin_id,
             asset_root,
             entry,
+            synthetic_entry,
             blocked_asset_paths,
             allows_display_capture,
             allows_microphone,
             allows_remote_network,
             utools_compat,
+            utools_preload_script,
             utools_browser_preload_src,
         } = bundle;
         if utools_compat.is_some() != utools_documents.is_some() {
             return Err(
                 "A uTools frontend lease requires its plugin-scoped synchronous database."
                     .to_owned(),
+            );
+        }
+        if utools_preload_script.is_some() && utools_compat.is_none() {
+            return Err(
+                "Only a verified uTools package may receive a sandboxed preload.".to_owned(),
             );
         }
         if self.is_transitioning(&plugin_id) {
@@ -452,10 +462,12 @@ impl PluginAssetServer {
             purpose,
             asset_root,
             entry,
+            synthetic_entry,
             blocked_asset_paths,
             route_token,
             allows_remote_network,
             utools_compat_script,
+            utools_preload_script,
             utools_documents,
             utools_browser_preload_src,
         };
@@ -943,6 +955,41 @@ fn handle_connection(
         );
         return;
     }
+    if is_utools_preload_script_request(bundle, &request.target) {
+        let Some(script) = bundle.utools_preload_script.as_deref() else {
+            let _ = write_status(stream, "404 Not Found");
+            return;
+        };
+        let _ = serve_memory_asset(
+            stream,
+            request.method,
+            script,
+            "text/javascript; charset=utf-8",
+            bundle.allows_remote_network,
+            false,
+        );
+        return;
+    }
+    if bundle.synthetic_entry && route_relative_path(bundle, &request.target).as_deref() == Some("")
+    {
+        let preload = bundle
+            .utools_preload_script
+            .as_ref()
+            .map(|_| UTOOLS_PRELOAD_SCRIPT_NAME);
+        let document = inject_utools_compat_document(
+            b"<!doctype html><html><head></head><body></body></html>".to_vec(),
+            preload,
+        );
+        let _ = serve_memory_asset(
+            stream,
+            request.method,
+            &document,
+            "text/html; charset=utf-8",
+            bundle.allows_remote_network,
+            false,
+        );
+        return;
+    }
     let Some(path) = resolve_asset_path(bundle, &request.target) else {
         let _ = write_status(stream, "404 Not Found");
         return;
@@ -957,8 +1004,10 @@ fn handle_connection(
             .as_deref()
             .filter(|_| path == bundle.entry),
         utools_browser_preload_src: bundle
-            .utools_browser_preload_src
-            .as_deref()
+            .utools_preload_script
+            .as_ref()
+            .map(|_| UTOOLS_PRELOAD_SCRIPT_NAME)
+            .or(bundle.utools_browser_preload_src.as_deref())
             .filter(|_| path == bundle.entry),
         allows_script_execution: bundle.purpose == PluginFrontendPurpose::Browser,
     };
@@ -977,6 +1026,11 @@ fn is_utools_compat_script_request(bundle: &ServedBundle, target: &str) -> bool 
         return false;
     };
     relative == UTOOLS_COMPAT_SCRIPT_NAME
+}
+
+fn is_utools_preload_script_request(bundle: &ServedBundle, target: &str) -> bool {
+    bundle.utools_preload_script.is_some()
+        && route_relative_path(bundle, target).as_deref() == Some(UTOOLS_PRELOAD_SCRIPT_NAME)
 }
 
 fn is_utools_sync_db_request(bundle: &ServedBundle, target: &str) -> bool {
@@ -1755,6 +1809,9 @@ fn resolve_asset_path(bundle: &ServedBundle, target: &str) -> Option<PathBuf> {
     if relative.is_empty() {
         return Some(bundle.entry.clone());
     }
+    if bundle.synthetic_entry {
+        return None;
+    }
 
     let relative_path = Path::new(&relative);
     if relative_path.is_absolute()
@@ -1918,6 +1975,16 @@ fn inject_utools_compat_script(
     }
     let mut document = Vec::with_capacity(metadata.len() as usize + 96);
     File::open(entry)?.read_to_end(&mut document)?;
+    Ok(inject_utools_compat_document(
+        document,
+        utools_browser_preload_src,
+    ))
+}
+
+fn inject_utools_compat_document(
+    mut document: Vec<u8>,
+    utools_browser_preload_src: Option<&str>,
+) -> Vec<u8> {
     let preload = utools_browser_preload_src
         .map(|src| format!("<script src=\"{src}\"></script>"))
         .unwrap_or_default();
@@ -1936,7 +2003,7 @@ fn inject_utools_compat_script(
         // any package script instead of silently losing the compatibility API.
         .unwrap_or(0);
     document.splice(insertion..insertion, bootstrap);
-    Ok(document)
+    document
 }
 
 /// Builds the only script injected into a compatible page. Configuration is
@@ -1981,6 +2048,11 @@ let currentWindowType = config.windowType;
 const ipcListeners = new Map();
 const browserWindows = new Map();
 const browserReady = new Set();
+const declaredTools = new Map(Array.isArray(config.tools)
+  ? config.tools.filter((tool) => tool && typeof tool.name === "string").map((tool) => [tool.name, Object.freeze({{ ...tool }})])
+  : []);
+const toolHandlers = new Map();
+const activeToolCalls = new Map();
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
 function call(method, params, interactionId, timeoutMs) {{
@@ -2786,6 +2858,49 @@ function selectMainPushOption(message) {{
     interactionId,
   )).catch((error) => console.error("iHub compatibility main-push completion failed", error));
 }}
+function boundedToolResult(value) {{
+  if (value === undefined) return null;
+  let encoded;
+  try {{ encoded = JSON.stringify(value); }} catch {{ throw new TypeError("uTools MCP result must be JSON-serializable."); }}
+  if (typeof encoded !== "string" || new TextEncoder().encode(encoded).byteLength > 1048576) throw new RangeError("uTools MCP result exceeds 1 MiB.");
+  return JSON.parse(encoded);
+}}
+function invokeRegisteredTool(payload) {{
+  const requestId = payload && payload.requestId;
+  const name = payload && payload.name;
+  const params = payload && payload.params;
+  if (typeof requestId !== "string" || typeof name !== "string" || !declaredTools.has(name)) return;
+  const handler = toolHandlers.get(name);
+  if (typeof handler !== "function") return;
+  const state = {{ cancelled: false }};
+  activeToolCalls.set(requestId, state);
+  const context = Object.freeze({{
+    requestId,
+    sendProgress(options) {{
+      if (state.cancelled) return Promise.reject(new Error("uTools MCP call was cancelled."));
+      if (!options || typeof options !== "object" || Array.isArray(options)) return Promise.reject(new TypeError("uTools MCP progress must be an object."));
+      const progress = options.progress;
+      const total = options.total;
+      const message = options.message;
+      if (typeof progress !== "number" || !Number.isFinite(progress) || progress < 0) return Promise.reject(new TypeError("uTools MCP progress must be finite and non-negative."));
+      if (total !== undefined && (typeof total !== "number" || !Number.isFinite(total) || total <= 0 || total < progress)) return Promise.reject(new TypeError("uTools MCP progress total is invalid."));
+      if (message !== undefined && (typeof message !== "string" || Array.from(message).length > 1000 || message.includes("\0"))) return Promise.reject(new TypeError("uTools MCP progress message is invalid."));
+      return call("compatibility.utools.tools.progress", {{ requestId, name, progress, total: total ?? null, message: message ?? null }});
+    }}
+  }});
+  void Promise.resolve()
+    .then(() => handler(params, context))
+    .then((value) => boundedToolResult(value))
+    .then((result) => state.cancelled ? undefined : call("compatibility.utools.tools.complete", {{ requestId, name, ok: true, result, error: null }}, undefined, 125000))
+    .catch((error) => state.cancelled ? undefined : call("compatibility.utools.tools.complete", {{
+      requestId,
+      name,
+      ok: false,
+      result: null,
+      error: String(error instanceof Error ? error.message : error).slice(0, 2000)
+    }}, undefined, 125000).catch(() => undefined))
+    .finally(() => activeToolCalls.delete(requestId));
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -2797,6 +2912,16 @@ window.addEventListener("message", (event) => {{
     return;
   }}
   if (message.type !== "event") return;
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.tool.invoke") {{
+    invokeRegisteredTool(message.payload);
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.tool.cancel") {{
+    const requestId = message.payload && message.payload.requestId;
+    const state = typeof requestId === "string" ? activeToolCalls.get(requestId) : null;
+    if (state) state.cancelled = true;
+    return;
+  }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.ipc") {{
     const payload = message.payload;
     if (payload && validBrowserChannel(payload.channel) && Array.isArray(payload.args)) dispatchBrowserIpc(payload.channel, payload.args);
@@ -2975,6 +3100,20 @@ const utools = Object.freeze({{
     void call("compatibility.utools.ubrowser.clearCache", {{}})
       .catch((error) => console.error("iHub ubrowser cache clearing failed", error));
     return true;
+  }},
+  registerTool(name, handler) {{
+    if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot register MCP tools.");
+    if (typeof name !== "string" || !declaredTools.has(name)) throw new TypeError("uTools registerTool name must exactly match plugin.json tools.");
+    if (typeof handler !== "function") throw new TypeError("uTools registerTool handler must be a function.");
+    const previous = toolHandlers.get(name);
+    toolHandlers.set(name, handler);
+    void call("compatibility.utools.tools.register", {{ name }})
+      .catch((error) => {{
+        if (toolHandlers.get(name) === handler) {{
+          if (previous) toolHandlers.set(name, previous); else toolHandlers.delete(name);
+        }}
+        console.error("iHub uTools MCP registration failed", error);
+      }});
   }},
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
@@ -3404,6 +3543,14 @@ Object.defineProperties(window, {{
   utools: {{ value: utools, configurable: false, writable: false }},
   rubick: {{ value: utools, configurable: false, writable: false }}
 }});
+// Public uTools preloads are CommonJS scripts. iHub deliberately exposes only
+// a tiny sandbox module surface here: no Node filesystem/process/network
+// authority is implied by loading the declared script in the WebView.
+const sandboxModule = {{ exports: {{}} }};
+try {{
+  if (!("module" in window)) Object.defineProperty(window, "module", {{ value: sandboxModule, configurable: false, writable: false }});
+  if (!("exports" in window)) Object.defineProperty(window, "exports", {{ value: sandboxModule.exports, configurable: true, writable: true }});
+}} catch {{ /* A package page may already own one of these ordinary CommonJS names. */ }}
 if (config.windowType === "browser") {{
   try {{
     Object.defineProperty(window, "close", {{
@@ -3527,10 +3674,10 @@ mod tests {
     };
 
     use super::{
-        execute_utools_sync_clipboard_request, inject_utools_compat_script,
-        render_utools_compat_script, resolve_asset_path, HttpMethod, HttpRequest,
-        PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose, ServedBundle,
-        LOCKED_PLUGIN_CSP, NETWORKED_PLUGIN_CSP,
+        execute_utools_sync_clipboard_request, inject_utools_compat_document,
+        inject_utools_compat_script, render_utools_compat_script, resolve_asset_path, HttpMethod,
+        HttpRequest, PluginAssetServer, PluginFrontendAssetBundle, PluginFrontendPurpose,
+        ServedBundle, LOCKED_PLUGIN_CSP, NETWORKED_PLUGIN_CSP, UTOOLS_PRELOAD_SCRIPT_NAME,
     };
     use crate::plugins::{UtoolsCompatCommand, UtoolsCompatRuntimeConfig};
     use crate::utools_db::UtoolsDocumentStore;
@@ -3555,11 +3702,13 @@ mod tests {
                 plugin_id: plugin_id.to_owned(),
                 asset_root,
                 entry,
+                synthetic_entry: false,
                 blocked_asset_paths: Vec::new(),
                 allows_display_capture: false,
                 allows_microphone: false,
                 allows_remote_network,
                 utools_compat: None,
+                utools_preload_script: None,
                 utools_browser_preload_src: None,
             },
         )
@@ -3571,6 +3720,7 @@ mod tests {
             is_development: false,
             plugin_id: plugin_id.to_owned(),
             commands: Vec::new(),
+            tools: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
             paths: Default::default(),
             idle_ubrowsers: Vec::new(),
@@ -3819,6 +3969,7 @@ mod tests {
                 keywords: vec!["取色".to_owned()],
                 main_push: true,
             }],
+            tools: Vec::new(),
             native_id: "ihub-0123456789abcdef0123456789abcdef".to_owned(),
             paths: [("home".to_owned(), "C:\\Users\\Tester".to_owned())]
                 .into_iter()
@@ -3968,6 +4119,12 @@ mod tests {
         assert!(script.contains("setExpendHeight"));
         assert!(script.contains("compatibility.utools.window.setHeight"));
         assert!(script.contains("compatibility.utools.window.outPlugin"));
+        assert!(script.contains("registerTool(name, handler)"));
+        assert!(script.contains("compatibility.utools.tools.register"));
+        assert!(script.contains("compatibility.utools.tools.complete"));
+        assert!(script.contains("compatibility.utools.tools.progress"));
+        assert!(script.contains("event/utools.tool.invoke"));
+        assert!(script.contains("const sandboxModule"));
         assert!(script.contains("getAppVersion"));
         assert!(script.contains("getNativeId"));
         assert!(script.contains("ihub-0123456789abcdef0123456789abcdef"));
@@ -4039,6 +4196,17 @@ mod tests {
             .find("window.pluginLoaded")
             .expect("BrowserWindow page script");
         assert!(browser_bootstrap < preload && preload < browser_page_script);
+        let runtime_document = String::from_utf8(inject_utools_compat_document(
+            b"<!doctype html><html><head></head><body></body></html>".to_vec(),
+            Some(UTOOLS_PRELOAD_SCRIPT_NAME),
+        ))
+        .expect("synthetic tools runtime should stay UTF-8");
+        assert!(runtime_document.contains("__ihub_utools_compat.js"));
+        assert!(runtime_document.contains("__ihub_utools_preload.js"));
+        assert!(
+            runtime_document.find("__ihub_utools_compat.js")
+                < runtime_document.find("__ihub_utools_preload.js")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4210,10 +4378,12 @@ mod tests {
             purpose: PluginFrontendPurpose::Surface,
             asset_root: asset_root.clone(),
             entry: entry.canonicalize().expect("entry should canonicalize"),
+            synthetic_entry: false,
             blocked_asset_paths: vec![preload.canonicalize().expect("preload should canonicalize")],
             route_token: "route-token".to_owned(),
             allows_remote_network: false,
             utools_compat_script: None,
+            utools_preload_script: None,
             utools_documents: None,
             utools_browser_preload_src: None,
         };

@@ -121,6 +121,9 @@ export interface PluginInfo {
   autoUpdate?: boolean;
   commands?: number | PluginCommandInfo[];
   commandCount?: number;
+  /** Manifest-declared uTools MCP tools; a hidden sandbox runtime still has
+   * to register each exact handler before an Agent can invoke it. */
+  toolCount?: number;
   /** Host-owned plugin-level shortcut-to-command/keyword mappings. */
   globalShortcuts?: PluginGlobalShortcutInfo[];
   /** Metadata declared in the plugin manifest. The iframe must still register
@@ -132,6 +135,30 @@ export interface PluginInfo {
    * revalidates every category before it creates a one-shot context token.
    */
   launcherContext?: PluginLauncherContextPermissions;
+}
+
+export interface UtoolsToolCatalogEntry {
+  pluginId: string;
+  pluginName: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  registered: boolean;
+}
+
+export interface UtoolsToolInvocationResult {
+  requestId: string;
+  result: unknown;
+}
+
+export interface UtoolsToolProgressEvent {
+  requestId: string;
+  pluginId: string;
+  name: string;
+  progress: number;
+  total?: number;
+  message?: string;
 }
 
 /** Native-validated availability for a first-party plugin that can be linked

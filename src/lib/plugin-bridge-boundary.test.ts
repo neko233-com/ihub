@@ -78,6 +78,23 @@ describe("plugin iframe Bridge boundary", () => {
       config: { proxyRules: "http://127.0.0.1:1080" },
     })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.ubrowser.clearCache", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.tools.register", {
+      name: "video_convert",
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.tools.complete", {
+      requestId: browserId,
+      name: "video_convert",
+      ok: true,
+      result: { outputPath: "C:\\Users\\Tester\\video.webm" },
+      error: null,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.tools.progress", {
+      requestId: browserId,
+      name: "video_convert",
+      progress: 42.5,
+      total: 100,
+      message: "处理中",
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -264,6 +281,17 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.send")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.browser.sendToParent")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.ubrowser.run")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.tools.complete")).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.tools.register", {
+      name: "VideoConvert",
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.tools.progress", {
+      requestId: "not-a-request",
+      name: "video_convert",
+      progress: 101,
+      total: 100,
+      message: null,
+    })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",
       dataBase64: "c2FmZQ==",

@@ -296,6 +296,7 @@ mod tests {
             update_channel: None,
             auto_update: false,
             command_count: 1,
+            tool_count: 0,
             commands: vec![PluginCommandInfo {
                 id: "open".to_owned(),
                 name: "Open".to_owned(),

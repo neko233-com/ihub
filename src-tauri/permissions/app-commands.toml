@@ -106,6 +106,9 @@ commands.allow = [
   "dispatch_detached_plugin_frontend_event",
   "invoke_plugin_frontend_command",
   "list_registered_plugin_search_providers",
+  "list_utools_tools",
+  "invoke_utools_tool",
+  "cancel_utools_tool",
   "query_plugin_search",
   "select_utools_main_push_result",
 ]
