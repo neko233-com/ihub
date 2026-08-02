@@ -19,7 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fuzzy-matcher = "0.3"
 ignore = "0.4"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "tiff", "webp"] }
 jsonschema = { version = "0.26.2", default-features = false }
 notify = "6.1"
 ib-pinyin = { version = "=0.3.1", default-features = false }
@@ -47,6 +47,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2.5"
 unicode-normalization = "=0.1.25"
 zeroize = { version = "1.8", features = ["derive"] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }

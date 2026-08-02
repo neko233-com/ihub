@@ -1125,7 +1125,9 @@ export function PluginFrontendFrame({
         | "event/utools.tool.cancel"
         | "event/utools.ai.chunk"
         | "event/utools.ai.tool.invoke"
-        | "event/utools.ai.complete",
+        | "event/utools.ai.complete"
+        | "event/utools.ffmpeg.progress"
+        | "event/utools.ffmpeg.complete",
     ) => {
       try {
         const stop = await listen<unknown>(`ihub://plugin/${pluginId}/${kind}`, (event) => {
@@ -1179,6 +1181,8 @@ export function PluginFrontendFrame({
       subscribe("event/utools.ai.chunk"),
       subscribe("event/utools.ai.tool.invoke"),
       subscribe("event/utools.ai.complete"),
+      subscribe("event/utools.ffmpeg.progress"),
+      subscribe("event/utools.ffmpeg.complete"),
       subscribeBrowserEvent("ihub://utools-browser/parent-message", "ipc"),
       subscribeBrowserEvent("ihub://utools-browser/ready", "ready"),
     ]);

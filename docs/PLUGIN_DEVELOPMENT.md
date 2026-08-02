@@ -227,6 +227,12 @@ Windows 上的 `simulateKeyboardTap`、`simulateMouseMove`、`simulateMouseClick
 
 兼容层实现官方 Promise-like `utools.ai(option[, streamCallback])` 与 `utools.allAiModels()`。用户先在 iHub 偏好设置中配置一个或多个 OpenAI-compatible Chat Completions Provider；远程地址必须是 HTTPS 且以 `/v1` 结尾，本机 `localhost`/loopback 才允许 HTTP。模型目录返回宿主生成的 provider-scoped ID，插件应保存并使用 `allAiModels()` 返回的 `id`，不要自行拼接。未指定模型时使用用户设置的默认 Provider 与默认模型。Provider 元数据保存在 iHub 自有设置命名空间，API key 使用系统凭据保护的加密存储，列表与插件 Bridge 都不会返回明文密钥。
 
+### uTools Sharp 与 FFmpeg
+
+`utools.sharp(input, options)` 提供宿主拥有的声明式图像管线。当前支持经 `showOpenDialog` 授权的图片路径、1–16 MiB 字节输入、3/4 通道 raw/create 输入，及 resize、90° rotate、flip/flop、grayscale、negate、blur、sharpen、threshold、normalize、gamma、median、tint、flatten、extend、trim、extract、单层 over composite 和 JPEG/PNG/WebP/GIF/TIFF 输出。图像限制为每边 16,384、总计 64M 像素、最多 48 个操作；`toBuffer({ resolveWithObject: true })`、`metadata()` 与使用一次性 `showSaveDialog` 路径的 `toFile()` 均由 Rust 执行。任意角度旋转、多帧动画、SVG/PDF、文字渲染和 libvips 的完整高级算子尚未实现，调用会明确失败而不是静默产生不同结果。
+
+`utools.runFFmpeg(args, onProgress?)` 返回带 `kill()` / `quit()` 的 Promise-like 对象。Windows 首次调用会显示宿主确认；同意后 iHub 固定从 gyan.dev 下载 FFmpeg 8.1.2 essentials ZIP（GPLv3，归档 SHA-256 `db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec`），只提取 `ffmpeg.exe` 和许可说明，并为后续启动校验可执行文件 proof。参数最多 256 项 / 64 KiB；输入文件必须作为独立参数精确匹配当前 surface 的 `showOpenDialog` 结果，最后一个参数必须是未使用的 `showSaveDialog` 新文件路径。网络 URL、pipe、插件自定义 progress 管道与嵌入式本机路径均拒绝。宿主写入同目录随机临时文件，成功并复核父目录身份后才原子发布；关闭、重载、停用或卸载插件会请求 kill，并保留 native-operation reservation 直到进程真正退出。BrowserWindow 与隐藏 runtime 不可启动或控制 FFmpeg。
+
 `option.messages` 只接受 `system`、`user`、`assistant`，`tools` 只接受有界 function schema。非流式调用 resolve 最终 assistant message；提供 callback 时会按 SSE 增量投递 `{ role: "assistant", content?, reasoning_content? }`，完成后 resolve `undefined`。返回 Promise 带 `abort()`，iframe 销毁、租约替换、插件停用/更新/卸载也会取消原生请求。模型发起 function tool call 时，兼容层仅调用同一 iframe 全局对象中同名的函数，并把有界 JSON 结果送回模型；全局请求最多 8 个、单插件最多 2 个，最多 8 轮和 16 次函数调用，单次函数等待最多 2 分钟。BrowserWindow 不开放 AI 调用，避免脱离当前 surface 生命周期的后台网络请求。Provider 的网络请求禁用重定向并限制连接、总时长、单行 SSE、错误正文和总响应大小；Provider 或插件返回的无界数据会被拒绝。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。

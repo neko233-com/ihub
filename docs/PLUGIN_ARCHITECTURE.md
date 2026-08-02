@@ -47,6 +47,8 @@ flowchart LR
 
 `utools.ai` 也不把 Provider 凭据或任意网络能力交给 iframe。用户在第一方偏好设置中配置 OpenAI-compatible `/v1` 端点、模型和默认项；Rust 从系统凭据保护的加密存储读取 API key，执行禁重定向且有大小/时限的 Chat Completions 请求，再把有界文本、推理增量或同一 surface 的函数调用事件投影给兼容脚本。模型 ID 带 provider scope，原始 ID 只有在多个 Provider 间唯一时才可直接解析。请求注册表同时绑定插件 ID、活动 lease 与取消句柄；surface 释放会中止请求并拒绝尚未完成的函数回调。BrowserWindow 不取得该通路。
 
+`utools.sharp` 与 `utools.runFFmpeg` 同样不把原生库句柄、进程创建或任意文件系统权限交给 iframe。Sharp 把有界操作序列送到 Rust 图像管线，路径输入与文件输出分别消费当前 lease 的系统 open/save 授权。FFmpeg 是独立的固定版本宿主集成：首次下载需要用户确认，归档和每次启动的可执行文件均以编译期 SHA-256 proof 校验；参数层拒绝网络和管道，只接受选择器绑定的输入与一个一次性输出。每个 job 同时进入 plugin native-command 计数和 lease-owned 运行表，进度/完成事件只投递给原始窗口，生命周期清理先置 kill 再等待实际子进程退出。因此下面原生 worker 的宽权限和 `process` 审计元数据不适用于这两个兼容 API。
+
 uTools 同步文件对话框不经过异步 iframe Bridge：兼容脚本只向本插件随机 origin 下的固定 POST 路由发送同步 XHR，服务器重新确认该 lease 仍是当前可见 surface、保留一个宿主原生操作槽，再调用 setup 时安装的可信 UI-thread dispatcher。请求具有专用 capability header、same-origin/Host/Origin 检查、32 KiB JSON 上限与严格选项白名单；返回值也重新检查为有界路径数组、单一路径或取消值。dispatcher 仍会复核插件启用状态与 uTools 来源，并只把系统选择器中由用户明确选定的路径投影回该插件。
 
 跨插件 `redirect` 不允许 iframe 指定目标 plugin ID 或 command ID。源只提交官方 label 与有界 typed payload；Rust 根据当前已验证插件清单解析候选，并把候选 ID、展示名和规范化 action 作为可信桌面事件交给主窗口。React 会再次对照当前启用插件与命令；唯一候选直接创建目标 command event，歧义候选由启动器选择，其他选择或 surface 隐藏会清除 payload。目标 uTools bootstrap 最后再次验证 action 形状，才以 `from: "redirect"` 触发 `onPluginEnter`。

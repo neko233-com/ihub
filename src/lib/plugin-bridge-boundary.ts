@@ -28,6 +28,8 @@ export const PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_BYTES = 4 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_NODES = 16_384;
 export const PLUGIN_BRIDGE_MAX_UTOOLS_AI_JSON_BYTES = 2 * 1024 * 1024;
 export const PLUGIN_BRIDGE_MAX_UTOOLS_AI_JSON_NODES = 32_768;
+export const PLUGIN_BRIDGE_MAX_UTOOLS_SHARP_JSON_BYTES = 70 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_UTOOLS_SHARP_JSON_NODES = 16_384;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
@@ -85,6 +87,10 @@ const pluginHostMethods = new Set([
   "compatibility.utools.ai.start",
   "compatibility.utools.ai.abort",
   "compatibility.utools.ai.toolComplete",
+  "compatibility.utools.ffmpeg.start",
+  "compatibility.utools.ffmpeg.kill",
+  "compatibility.utools.ffmpeg.quit",
+  "compatibility.utools.sharp.execute",
   "compatibility.utools.notification.show",
   "compatibility.utools.screen.capture",
   "compatibility.utools.shell.beep",
@@ -336,6 +342,8 @@ export function validatePluginBridgeCall(
   const isUtoolsUBrowser = method === "compatibility.utools.ubrowser.run";
   const isUtoolsTool = method.startsWith("compatibility.utools.tools.");
   const isUtoolsAi = method.startsWith("compatibility.utools.ai.");
+  const isUtoolsFfmpeg = method.startsWith("compatibility.utools.ffmpeg.");
+  const isUtoolsSharp = method === "compatibility.utools.sharp.execute";
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
     if (!params || !hasOnlyKeys(params, new Set())) {
@@ -829,6 +837,106 @@ export function validatePluginBridgeCall(
       };
     }
   }
+  if (isUtoolsFfmpeg) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const validRequestId = (value: unknown) => typeof value === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+    let valid = false;
+    if (method === "compatibility.utools.ffmpeg.start") {
+      const args = params?.args;
+      let totalBytes = 0;
+      valid = !!params
+        && hasOnlyKeys(params, new Set(["requestId", "args"]))
+        && validRequestId(params.requestId)
+        && Array.isArray(args)
+        && args.length > 0
+        && args.length <= 256
+        && args.every((arg) => {
+          if (typeof arg !== "string" || arg.length === 0 || [...arg].some((character) => character < " " || character === "\u007f")) {
+            return false;
+          }
+          const bytes = new TextEncoder().encode(arg).byteLength;
+          totalBytes += bytes;
+          return bytes <= 8 * 1024 && totalBytes <= 64 * 1024;
+        });
+    } else if (method === "compatibility.utools.ffmpeg.kill" || method === "compatibility.utools.ffmpeg.quit") {
+      valid = !!params
+        && hasOnlyKeys(params, new Set(["requestId"]))
+        && validRequestId(params.requestId);
+    }
+    if (!valid) {
+      return {
+        ok: false,
+        error: "uTools FFmpeg Bridge parameters are invalid.",
+        responseId,
+      };
+    }
+  }
+  if (isUtoolsSharp) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const input = params && isPlainRecord(params.input) ? params.input : null;
+    const output = params && isPlainRecord(params.output) ? params.output : null;
+    const operations = params?.operations;
+    const validBase64 = (value: unknown) => typeof value === "string"
+      && value.length > 0
+      && value.length <= Math.ceil((16 * 1024 * 1024) / 3) * 4 + 8
+      && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+    const validDimension = (value: unknown) => typeof value === "number"
+      && Number.isSafeInteger(value)
+      && value >= 1
+      && value <= 16_384;
+    const validInput = !!input && (
+      input.kind === "bytes"
+        ? hasOnlyKeys(input, new Set(["kind", "dataBase64"])) && validBase64(input.dataBase64)
+        : input.kind === "path"
+          ? hasOnlyKeys(input, new Set(["kind", "path"]))
+            && typeof input.path === "string"
+            && input.path.length > 0
+            && [...input.path].length <= 1_024
+            && ![...input.path].some((character) => character < " " || character === "\u007f")
+          : input.kind === "raw"
+            ? hasOnlyKeys(input, new Set(["kind", "dataBase64", "width", "height", "channels"]))
+              && validBase64(input.dataBase64)
+              && validDimension(input.width)
+              && validDimension(input.height)
+              && [3, 4].includes(Number(input.channels))
+            : input.kind === "create"
+              && hasOnlyKeys(input, new Set(["kind", "width", "height", "channels", "background"]))
+              && validDimension(input.width)
+              && validDimension(input.height)
+              && [3, 4].includes(Number(input.channels))
+    );
+    const validOutput = !!output && (
+      ["buffer", "metadata"].includes(String(output.kind))
+        ? hasOnlyKeys(output, new Set(["kind"]))
+        : output.kind === "file"
+          && hasOnlyKeys(output, new Set(["kind", "path"]))
+          && typeof output.path === "string"
+          && output.path.length > 0
+          && [...output.path].length <= 1_024
+    );
+    const validOperations = Array.isArray(operations)
+      && operations.length <= 48
+      && operations.every((operation) => isPlainRecord(operation)
+        && hasOnlyKeys(operation, new Set(["method", "args"]))
+        && typeof operation.method === "string"
+        && /^[A-Za-z0-9_]{1,48}$/.test(operation.method)
+        && Array.isArray(operation.args)
+        && operation.args.length <= 16);
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["input", "operations", "output"]))
+      || !validInput
+      || !validOutput
+      || !validOperations
+    ) {
+      return {
+        ok: false,
+        error: "uTools Sharp requires one bounded declarative image pipeline.",
+        responseId,
+      };
+    }
+  }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;
   if (isImageCopy || isUtoolsRedirect) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_IMAGE_JSON_BYTES;
@@ -848,6 +956,8 @@ export function validatePluginBridgeCall(
     maxJsonBytes = PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_BYTES;
   } else if (isUtoolsAi) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_UTOOLS_AI_JSON_BYTES;
+  } else if (isUtoolsSharp) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_UTOOLS_SHARP_JSON_BYTES;
   }
   const maxJsonNodes = isDbWrite
     ? PLUGIN_BRIDGE_MAX_DB_JSON_NODES
@@ -857,6 +967,8 @@ export function validatePluginBridgeCall(
         ? PLUGIN_BRIDGE_MAX_UTOOLS_TOOL_JSON_NODES
         : isUtoolsAi
           ? PLUGIN_BRIDGE_MAX_UTOOLS_AI_JSON_NODES
+          : isUtoolsSharp
+            ? PLUGIN_BRIDGE_MAX_UTOOLS_SHARP_JSON_NODES
           : PLUGIN_BRIDGE_MAX_JSON_NODES;
   if (!boundedJsonValue(normalizedCall, maxJsonBytes, maxJsonNodes)) {
     return {
@@ -917,5 +1029,6 @@ export function isLargePluginBridgeMethod(method: string): boolean {
     || method === "compatibility.utools.ubrowser.run"
     || method === "compatibility.utools.tools.complete"
     || method === "compatibility.utools.ai.start"
-    || method === "compatibility.utools.ai.toolComplete";
+    || method === "compatibility.utools.ai.toolComplete"
+    || method === "compatibility.utools.sharp.execute";
 }

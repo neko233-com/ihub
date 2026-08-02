@@ -123,6 +123,24 @@ describe("plugin iframe Bridge boundary", () => {
       result: { platform: "win32" },
       error: null,
     })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.start", {
+      requestId: browserId,
+      args: ["-i", "C:\\Users\\Tester\\video.mp4", "C:\\Users\\Tester\\video.webm"],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.quit", {
+      requestId: browserId,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.kill", {
+      requestId: browserId,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.sharp.execute", {
+      input: { kind: "bytes", dataBase64: "iVBORw0KGgo=" },
+      operations: [
+        { method: "resize", args: [300, 200] },
+        { method: "webp", args: [{ quality: 80 }] },
+      ],
+      output: { kind: "buffer" },
+    })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.startDrag", {
       paths: ["C:\\Users\\Tester\\Desktop\\notes.txt"],
     })).ok).toBe(true);
@@ -221,6 +239,13 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: `${boundedImage}A`,
     })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.start", {
+      requestId: "550e8400-e29b-41d4-a716-446655440000",
+      args: ["-i", "video.mp4", "bad\0output.mp4"],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.ffmpeg.kill", {
+      requestId: "not-a-request",
+    })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.clipboard.writeImage", {
       dataUrl: "C:\\untrusted\\image.png",
     })).ok).toBe(false);
@@ -312,6 +337,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.tools.complete")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.ai.start")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.ai.toolComplete")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.sharp.execute")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.tools.register", {
       name: "VideoConvert",
     })).ok).toBe(false);
@@ -336,6 +362,11 @@ describe("plugin iframe Bridge boundary", () => {
       ok: true,
       result: null,
       error: null,
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.sharp.execute", {
+      input: { kind: "path", path: "C:\\Users\\Tester\\input.png" },
+      operations: [{ method: "arbitrary-native", args: [] }],
+      output: { kind: "file", path: "C:\\Users\\Tester\\output.png" },
     })).ok).toBe(false);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
       id: "asset/logo",

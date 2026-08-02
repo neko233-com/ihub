@@ -56,7 +56,8 @@ use crate::{
     },
     native_icons::NativeIconService,
     plugin_asset_server::{
-        PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose, UtoolsDialogRequest,
+        PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose, PluginNativeCommandLease,
+        UtoolsDialogRequest,
     },
     plugin_crypto_storage::PluginCryptoStorage,
     plugin_settings::PluginSettingsStore,
@@ -76,6 +77,8 @@ use crate::{
         create_utools_browser_window, UtoolsBrowserWindowOptions, UtoolsBrowserWindowRegistry,
         UTOOLS_BROWSER_WINDOW_PREFIX,
     },
+    utools_ffmpeg::{FfmpegControl, UtoolsFfmpegIntegration},
+    utools_sharp::SharpRequest,
     utools_ubrowser::{
         run_chain as run_utools_ubrowser_chain, UBrowserRunRequest, UtoolsUBrowserRegistry,
         UTOOLS_UBROWSER_WINDOW_PREFIX,
@@ -584,6 +587,7 @@ pub struct AppState {
     plugin_crypto_storage: PluginCryptoStorage,
     plugin_settings: PluginSettingsStore,
     ai_providers: AiProviderStore,
+    ffmpeg: UtoolsFfmpegIntegration,
     utools_documents: crate::utools_db::UtoolsDocumentStore,
     host: Arc<PluginHostState>,
     launcher_focus: LauncherFocusGate,
@@ -625,6 +629,7 @@ impl AppState {
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
         let ai_providers =
             AiProviderStore::new(plugin_settings.clone(), plugin_crypto_storage.clone());
+        let ffmpeg = UtoolsFfmpegIntegration::new(app_data_dir.clone());
         let utools_documents = crate::utools_db::UtoolsDocumentStore::new(app_data_dir.clone());
         let super_panel = Arc::new(SuperPanelState::with_storage(app_data_dir.clone()));
         // Older development builds persisted every setting. Before plugin
@@ -651,6 +656,7 @@ impl AppState {
             plugin_crypto_storage,
             plugin_settings,
             ai_providers,
+            ffmpeg,
             utools_documents,
             host: Arc::new(PluginHostState::default()),
             launcher_focus: LauncherFocusGate::default(),
@@ -829,6 +835,15 @@ struct PluginHostState {
     /// picker to this exact uTools iframe lease. Bind each visible raw path to
     /// the selected object identity and revalidate it before native dragging.
     utools_drag_grants: Mutex<HashMap<(String, String), Vec<UtoolsDragGrant>>>,
+    /// `showSaveDialog` exposes a path string for uTools source compatibility,
+    /// but writes remain bound to the exact parent directory identity and are
+    /// single-use. Only host-owned Sharp/FFmpeg publishers consume this map.
+    utools_save_grants: Mutex<HashMap<(String, String), Vec<UtoolsSaveGrant>>>,
+    /// Long-running FFmpeg jobs are bound to one plugin lease and controlled
+    /// only through their unguessable request ID. Lifecycle disposal requests
+    /// a native kill while the worker lease remains held until the process
+    /// has actually exited.
+    utools_ffmpeg_jobs: Mutex<HashMap<String, ActiveUtoolsFfmpegJob>>,
     /// Native dialogs briefly move focus away from the frameless launcher.
     /// Keep its resident auto-hide behavior suspended until every modal
     /// picker has returned to avoid dismissing the plugin UI underneath it.
@@ -877,6 +892,8 @@ impl Default for PluginHostState {
             launcher_contexts: Mutex::new(HashMap::new()),
             batch_rename_previews: Mutex::new(HashMap::new()),
             utools_drag_grants: Mutex::new(HashMap::new()),
+            utools_save_grants: Mutex::new(HashMap::new()),
+            utools_ffmpeg_jobs: Mutex::new(HashMap::new()),
             native_dialog_depth: AtomicUsize::new(0),
             capture_focus_leases: Mutex::new(HashMap::new()),
             cursor_color_sampled_at: Mutex::new(HashMap::new()),
@@ -907,6 +924,29 @@ struct UtoolsDragGrant {
     path: PathBuf,
     kind: LocalOpenKind,
     identity: LocalPathIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct UtoolsSaveGrant {
+    path: PathBuf,
+    parent: PathBuf,
+    parent_identity: LocalPathIdentity,
+}
+
+struct ActiveUtoolsFfmpegJob {
+    plugin_id: String,
+    lease_id: String,
+    control: Arc<FfmpegControl>,
+}
+
+#[derive(Debug)]
+struct PreparedUtoolsFfmpegRun {
+    args: Vec<String>,
+    duration_seconds: Option<f64>,
+    output_grant: UtoolsSaveGrant,
+    staging_output: PathBuf,
+    /// Revalidated picker objects stay alive for the complete native run.
+    _inputs: Vec<PreparedLocalOpen>,
 }
 
 #[derive(Debug, Clone)]
@@ -1514,6 +1554,13 @@ const MAX_UTOOLS_COPY_FILE_ITEMS: usize = 16;
 const MAX_UTOOLS_COPY_FILE_PATH_CHARS: usize = 1_024;
 const MAX_UTOOLS_COPY_FILE_PATH_BYTES: usize = 8 * 1024;
 const MAX_UTOOLS_DRAG_GRANTS_PER_LEASE: usize = 64;
+const MAX_UTOOLS_SAVE_GRANTS_PER_LEASE: usize = 32;
+const MAX_UTOOLS_SHARP_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_UTOOLS_SHARP_OUTPUT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_UTOOLS_FFMPEG_ARGS: usize = 256;
+const MAX_UTOOLS_FFMPEG_ARG_BYTES: usize = 8 * 1024;
+const MAX_UTOOLS_FFMPEG_TOTAL_ARG_BYTES: usize = 64 * 1024;
+const MAX_UTOOLS_FFMPEG_OUTPUT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Launcher context is intentionally shorter than a filesystem picker grant:
 /// it exists only to bridge one already-chosen action while a frontend loads.
 const LAUNCHER_CONTEXT_TTL: Duration = Duration::from_secs(60);
@@ -4098,6 +4145,348 @@ fn remember_utools_drag_grants(
     Ok(())
 }
 
+fn remember_utools_save_grant(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    if !target.is_absolute() || target.exists() {
+        return Err(
+            "uTools host-owned output requires a new file selected by showSaveDialog.".to_owned(),
+        );
+    }
+    let file_name = target
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "The uTools save target has no file name.".to_owned())?;
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "The uTools save target has no parent directory.".to_owned())?;
+    let prepared_parent =
+        crate::system_open::prepare_local_open(parent, Some(LocalOpenKind::Folder))?;
+    let normalized_target = prepared_parent.path().join(file_name);
+    if normalized_target.to_string_lossy().as_ref() != path {
+        return Err("The uTools save target changed while its grant was recorded.".to_owned());
+    }
+    let grant = UtoolsSaveGrant {
+        path: normalized_target,
+        parent: prepared_parent.path().to_owned(),
+        parent_identity: prepared_parent.identity(),
+    };
+    let mut grants = host
+        .utools_save_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lease_grants = grants
+        .entry((plugin_id.to_owned(), lease_id.to_owned()))
+        .or_default();
+    lease_grants.retain(|existing| existing.path != grant.path);
+    lease_grants.push(grant);
+    if lease_grants.len() > MAX_UTOOLS_SAVE_GRANTS_PER_LEASE {
+        lease_grants.drain(..lease_grants.len() - MAX_UTOOLS_SAVE_GRANTS_PER_LEASE);
+    }
+    Ok(())
+}
+
+fn read_authorized_utools_sharp_input(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    let params = json!({ "paths": [path] });
+    let prepared =
+        prepare_authorized_utools_picker_paths(host, plugin_id, lease_id, &params, "sharp")?;
+    let item = prepared
+        .first()
+        .ok_or_else(|| "uTools Sharp has no authorized input file.".to_owned())?;
+    if item.kind() != LocalOpenKind::File {
+        return Err("uTools Sharp input must be a file.".to_owned());
+    }
+    let mut file = fs::File::open(item.path())
+        .map_err(|error| format!("Could not open the selected Sharp input: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the selected Sharp input: {error}"))?
+        .len();
+    if length == 0 || length > MAX_UTOOLS_SHARP_SOURCE_BYTES as u64 {
+        return Err("uTools Sharp input must contain 1-16 MiB.".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_UTOOLS_SHARP_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read the selected Sharp input: {error}"))?;
+    if bytes.len() != length as usize || bytes.len() > MAX_UTOOLS_SHARP_SOURCE_BYTES {
+        return Err(
+            "The selected Sharp input changed or exceeded 16 MiB while reading.".to_owned(),
+        );
+    }
+    Ok(bytes)
+}
+
+fn publish_authorized_utools_sharp_output(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > MAX_UTOOLS_SHARP_OUTPUT_BYTES {
+        return Err("uTools Sharp output is empty or exceeds 24 MiB.".to_owned());
+    }
+    let grant = take_utools_save_grant(host, plugin_id, lease_id, path, "Sharp")?;
+    let prepared_parent =
+        crate::system_open::prepare_local_open(&grant.parent, Some(LocalOpenKind::Folder))?;
+    if prepared_parent.identity() != grant.parent_identity
+        || prepared_parent.path() != grant.parent
+        || grant.path.exists()
+    {
+        return Err("The uTools Sharp save target changed before publication.".to_owned());
+    }
+    drop(prepared_parent);
+    let temporary = grant
+        .parent
+        .join(format!(".ihub-sharp-{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("Could not create the Sharp output staging file: {error}"))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Could not persist the Sharp output staging file: {error}"))?;
+        if grant.path.exists() {
+            return Err("The Sharp output target was created by another process.".to_owned());
+        }
+        fs::rename(&temporary, &grant.path)
+            .map_err(|error| format!("Could not publish the Sharp output file: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn take_utools_save_grant(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    path: &str,
+    api: &str,
+) -> Result<UtoolsSaveGrant, String> {
+    let mut grants = host
+        .utools_save_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (plugin_id.to_owned(), lease_id.to_owned());
+    let lease_grants = grants
+        .get_mut(&key)
+        .ok_or_else(|| format!("uTools {api} output must use showSaveDialog."))?;
+    let index = lease_grants
+        .iter()
+        .position(|grant| grant.path.to_string_lossy().as_ref() == path)
+        .ok_or_else(|| {
+            format!("uTools {api} output must match the exact unused showSaveDialog path.")
+        })?;
+    let grant = lease_grants.remove(index);
+    if lease_grants.is_empty() {
+        grants.remove(&key);
+    }
+    Ok(grant)
+}
+
+fn parse_ffmpeg_duration(value: &str) -> Option<f64> {
+    if let Ok(seconds) = value.parse::<f64>() {
+        return (seconds.is_finite() && seconds > 0.0).then_some(seconds);
+    }
+    let parts = value
+        .split(':')
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60.0 + seconds,
+        [hours, minutes, seconds] => hours * 3600.0 + minutes * 60.0 + seconds,
+        _ => return None,
+    };
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
+fn prepare_utools_ffmpeg_run(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+) -> Result<(String, PreparedUtoolsFfmpegRun), String> {
+    validate_exact_plugin_params(params, &["requestId", "args"])?;
+    let request_id = required_string(params, "requestId")?;
+    let parsed = Uuid::parse_str(request_id)
+        .map_err(|_| "utools.runFFmpeg requestId must be a UUID.".to_owned())?;
+    if parsed.get_version() != Some(uuid::Version::Random) {
+        return Err("utools.runFFmpeg requestId must be a version 4 UUID.".to_owned());
+    }
+    let raw_args = params
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "utools.runFFmpeg args must be an array.".to_owned())?;
+    if raw_args.is_empty() || raw_args.len() > MAX_UTOOLS_FFMPEG_ARGS {
+        return Err(format!(
+            "utools.runFFmpeg requires 1-{MAX_UTOOLS_FFMPEG_ARGS} arguments."
+        ));
+    }
+    let mut total = 0usize;
+    let mut args = Vec::with_capacity(raw_args.len());
+    for value in raw_args {
+        let arg = value
+            .as_str()
+            .ok_or_else(|| "Every utools.runFFmpeg argument must be a string.".to_owned())?;
+        total = total
+            .checked_add(arg.len())
+            .ok_or_else(|| "utools.runFFmpeg argument bytes overflow.".to_owned())?;
+        if arg.is_empty()
+            || arg.len() > MAX_UTOOLS_FFMPEG_ARG_BYTES
+            || total > MAX_UTOOLS_FFMPEG_TOTAL_ARG_BYTES
+            || arg.chars().any(char::is_control)
+        {
+            return Err(
+                "A utools.runFFmpeg argument is empty, too long, or contains controls.".to_owned(),
+            );
+        }
+        let lowered = arg.to_ascii_lowercase();
+        if matches!(lowered.as_str(), "-progress" | "-nostats")
+            || lowered.starts_with("pipe:")
+            || lowered.contains("://")
+        {
+            return Err(
+                "utools.runFFmpeg cannot override host progress or access pipes/network URLs."
+                    .to_owned(),
+            );
+        }
+        args.push(arg.to_owned());
+    }
+
+    let output_path = args
+        .last()
+        .cloned()
+        .ok_or_else(|| "utools.runFFmpeg has no output path.".to_owned())?;
+    if !Path::new(&output_path).is_absolute() {
+        return Err(
+            "utools.runFFmpeg requires the final argument to be a showSaveDialog path.".to_owned(),
+        );
+    }
+
+    let mut input_paths = Vec::new();
+    for arg in &args[..args.len() - 1] {
+        let path = Path::new(arg);
+        if path.is_absolute() {
+            input_paths.push(arg.clone());
+        } else if arg.contains(":\\") || arg.starts_with("\\\\") {
+            return Err(
+                "utools.runFFmpeg does not accept embedded filesystem paths; pass exact showOpenDialog paths as separate arguments."
+                    .to_owned(),
+            );
+        }
+    }
+    let inputs = if input_paths.is_empty() {
+        Vec::new()
+    } else {
+        prepare_authorized_utools_picker_paths(
+            host,
+            plugin_id,
+            lease_id,
+            &json!({ "paths": input_paths }),
+            "runFFmpeg",
+        )?
+    };
+
+    let output_grant = take_utools_save_grant(host, plugin_id, lease_id, &output_path, "FFmpeg")?;
+    let prepared_parent =
+        crate::system_open::prepare_local_open(&output_grant.parent, Some(LocalOpenKind::Folder))?;
+    if prepared_parent.path() != output_grant.parent
+        || prepared_parent.identity() != output_grant.parent_identity
+        || output_grant.path.exists()
+    {
+        return Err("The uTools FFmpeg save target changed before execution.".to_owned());
+    }
+    let extension = output_grant
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let staging_output = output_grant.parent.join(format!(
+        ".ihub-ffmpeg-{}{}",
+        Uuid::new_v4().simple(),
+        extension
+    ));
+    *args
+        .last_mut()
+        .ok_or_else(|| "utools.runFFmpeg has no output argument.".to_owned())? =
+        staging_output.to_string_lossy().into_owned();
+    let duration_seconds = args.windows(2).find_map(|pair| {
+        matches!(pair[0].as_str(), "-t" | "-to")
+            .then(|| parse_ffmpeg_duration(&pair[1]))
+            .flatten()
+    });
+    Ok((
+        request_id.to_owned(),
+        PreparedUtoolsFfmpegRun {
+            args,
+            duration_seconds,
+            output_grant,
+            staging_output,
+            _inputs: inputs,
+        },
+    ))
+}
+
+fn publish_utools_ffmpeg_output(run: &PreparedUtoolsFfmpegRun) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(&run.staging_output)
+        .map_err(|error| format!("Could not inspect the FFmpeg output: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_UTOOLS_FFMPEG_OUTPUT_BYTES
+    {
+        return Err("uTools FFmpeg produced an empty, unsafe, or oversized output.".to_owned());
+    }
+    let parent = crate::system_open::prepare_local_open(
+        &run.output_grant.parent,
+        Some(LocalOpenKind::Folder),
+    )?;
+    if parent.path() != run.output_grant.parent
+        || parent.identity() != run.output_grant.parent_identity
+        || run.output_grant.path.exists()
+    {
+        return Err("The uTools FFmpeg save target changed before publication.".to_owned());
+    }
+    drop(parent);
+    fs::rename(&run.staging_output, &run.output_grant.path)
+        .map_err(|error| format!("Could not publish the FFmpeg output: {error}"))
+}
+
+fn confirm_utools_ffmpeg_install(app: &AppHandle, host: &PluginHostState, plugin_id: &str) -> bool {
+    let mut dialog = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("iHub · {plugin_id} 请求安装 FFmpeg"))
+        .set_description(format!(
+            "此插件需要 FFmpeg {}。iHub 将从 gyan.dev 下载约 104 MiB 的 GPLv3 静态构建，并使用内置 SHA-256 校验后安装到当前用户的应用数据目录。\n\n是否继续？",
+            crate::utools_ffmpeg::FFMPEG_VERSION
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _guard = NativeDialogGuard::begin(host);
+    dialog.show() == rfd::MessageDialogResult::Yes
+}
+
 fn prepare_authorized_utools_drag_paths(
     host: &PluginHostState,
     plugin_id: &str,
@@ -4697,6 +5086,7 @@ pub async fn plugin_host_call(
             || request.method.starts_with("compatibility.utools.features.")
             || request.method.starts_with("compatibility.utools.tools.")
             || request.method.starts_with("compatibility.utools.ai.")
+            || request.method.starts_with("compatibility.utools.ffmpeg.")
             || matches!(
                 request.method.as_str(),
                 "lifecycle.ready" | "lifecycle.dispose"
@@ -5023,6 +5413,143 @@ pub async fn plugin_host_call(
         dispatch_utools_file_drag(&app, window_label, prepared)?;
         drop(native_lease);
         return Ok(json!({ "completed": true }));
+    }
+
+    if request.method == "compatibility.utools.sharp.execute" {
+        let (sharp_request, native_lease) =
+            plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+                if !request.surface
+                    || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                {
+                    return Err(
+                        "uTools Sharp requires the plugin's visible active surface.".to_owned()
+                    );
+                }
+                ensure_plugin_host_request_is_allowed(&request, &state)?;
+                let mut sharp_request =
+                    serde_json::from_value::<SharpRequest>(request.params.clone())
+                        .map_err(|error| format!("Invalid uTools Sharp pipeline: {error}"))?;
+                if let Some(path) = sharp_request.picker_path().map(str::to_owned) {
+                    let bytes = read_authorized_utools_sharp_input(
+                        &state.host,
+                        &request_plugin_id,
+                        &request.lease_id,
+                        &path,
+                    )?;
+                    sharp_request.replace_picker_path(&bytes)?;
+                }
+                Ok((
+                    sharp_request,
+                    server.begin_native_command(&request_plugin_id)?,
+                ))
+            })?;
+        let execution = tauri::async_runtime::spawn_blocking(move || {
+            crate::utools_sharp::execute(sharp_request)
+        })
+        .await
+        .map_err(|error| format!("uTools Sharp host task failed: {error}"))??;
+        if let Some((path, bytes)) = execution.output_file {
+            publish_authorized_utools_sharp_output(
+                &state.host,
+                &request_plugin_id,
+                &request.lease_id,
+                &path,
+                &bytes,
+            )?;
+        }
+        drop(native_lease);
+        return Ok(execution.response);
+    }
+
+    if request.method.starts_with("compatibility.utools.ffmpeg.") {
+        if request.method == "compatibility.utools.ffmpeg.start" {
+            let installed = plugin_assets.with_plugin_bridge_operation(
+                &request_plugin_id,
+                || -> Result<bool, String> {
+                    if !request.surface
+                        || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                    {
+                        return Err(
+                            "uTools FFmpeg requires the plugin's visible active surface."
+                                .to_owned(),
+                        );
+                    }
+                    ensure_plugin_host_request_is_allowed(&request, &state)?;
+                    if !state.plugins.uses_utools_compatibility(&request_plugin_id)? {
+                        return Err(
+                            "utools.runFFmpeg is available only to validated imported uTools packages."
+                                .to_owned(),
+                        );
+                    }
+                    Ok(state.ffmpeg.installed_executable()?.is_some())
+                },
+            )?;
+            if !installed && !confirm_utools_ffmpeg_install(&app, &state.host, &request_plugin_id) {
+                return Err("The user declined the managed FFmpeg installation.".to_owned());
+            }
+            let (request_id, prepared, native_lease) =
+                plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+                    if !request.surface
+                        || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+                    {
+                        return Err(
+                            "uTools FFmpeg requires the plugin's visible active surface."
+                                .to_owned(),
+                        );
+                    }
+                    ensure_plugin_host_request_is_allowed(&request, &state)?;
+                    let (request_id, prepared) = prepare_utools_ffmpeg_run(
+                        &state.host,
+                        &request_plugin_id,
+                        &request.lease_id,
+                        &request.params,
+                    )?;
+                    Ok((
+                        request_id,
+                        prepared,
+                        server.begin_native_command(&request_plugin_id)?,
+                    ))
+                })?;
+            return start_utools_ffmpeg_request(
+                app,
+                state.host.clone(),
+                state.ffmpeg.clone(),
+                request_plugin_id,
+                request.lease_id,
+                window.label().to_owned(),
+                request_id,
+                prepared,
+                native_lease,
+            );
+        }
+        return plugin_assets.with_plugin_bridge_operation(&request_plugin_id, || {
+            if !request.surface
+                || !server.is_active_surface_for(&request.lease_id, &request_plugin_id)
+            {
+                return Err(
+                    "uTools FFmpeg controls require the plugin's visible active surface."
+                        .to_owned(),
+                );
+            }
+            ensure_plugin_host_request_is_allowed(&request, &state)?;
+            match request.method.as_str() {
+                "compatibility.utools.ffmpeg.quit" => control_utools_ffmpeg_request(
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                    false,
+                ),
+                "compatibility.utools.ffmpeg.kill" => control_utools_ffmpeg_request(
+                    &state.host,
+                    &request_plugin_id,
+                    &request.lease_id,
+                    &request.params,
+                    true,
+                ),
+                _ => Err("Unsupported uTools FFmpeg method.".to_owned()),
+            }
+        });
     }
 
     // A native worker can take up to the host command deadline. Reserve it
@@ -5593,6 +6120,157 @@ pub fn cancel_utools_tool(
         );
     }
     Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_utools_ffmpeg_request(
+    app: AppHandle,
+    host: Arc<PluginHostState>,
+    integration: UtoolsFfmpegIntegration,
+    plugin_id: String,
+    lease_id: String,
+    window_label: String,
+    request_id: String,
+    run: PreparedUtoolsFfmpegRun,
+    native_lease: PluginNativeCommandLease,
+) -> Result<Value, String> {
+    let control = Arc::new(FfmpegControl::default());
+    {
+        let mut active = host
+            .utools_ffmpeg_jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(&request_id) {
+            return Err("This uTools FFmpeg requestId is already active.".to_owned());
+        }
+        active.insert(
+            request_id.clone(),
+            ActiveUtoolsFfmpegJob {
+                plugin_id: plugin_id.clone(),
+                lease_id: lease_id.clone(),
+                control: control.clone(),
+            },
+        );
+    }
+
+    let response_request_id = request_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let executable = integration.ensure_installed().await;
+        let outcome = match executable {
+            Ok(executable) => {
+                let progress_app = app.clone();
+                let progress_host = host.clone();
+                let progress_plugin_id = plugin_id.clone();
+                let progress_lease_id = lease_id.clone();
+                let progress_request_id = request_id.clone();
+                let progress_window_label = window_label.clone();
+                let task_control = control.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let result = crate::utools_ffmpeg::run(
+                        &executable,
+                        &run.args,
+                        run.duration_seconds,
+                        &task_control,
+                        move |progress| {
+                            let still_owned = progress_host
+                                .utools_ffmpeg_jobs
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .get(&progress_request_id)
+                                .is_some_and(|job| {
+                                    job.plugin_id == progress_plugin_id
+                                        && job.lease_id == progress_lease_id
+                                });
+                            if still_owned {
+                                let event_name = format!(
+                                    "ihub://plugin/{progress_plugin_id}/event/utools.ffmpeg.progress"
+                                );
+                                let _ = progress_app.emit_to(
+                                    &progress_window_label,
+                                    &event_name,
+                                    json!({
+                                        "requestId": progress_request_id,
+                                        "progress": progress,
+                                    }),
+                                );
+                            }
+                        },
+                    );
+                    let result = result.and_then(|_| publish_utools_ffmpeg_output(&run));
+                    if result.is_err() {
+                        let _ = fs::remove_file(&run.staging_output);
+                    }
+                    result
+                })
+                .await
+                .map_err(|error| format!("uTools FFmpeg host task failed: {error}"))
+                .and_then(|value| value)
+            }
+            Err(error) => Err(error),
+        };
+        // The process is now gone. Only now may lifecycle transitions observe
+        // the native worker reservation as released.
+        drop(native_lease);
+        let still_owned = {
+            let mut active = host
+                .utools_ffmpeg_jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let still_owned = active
+                .get(&request_id)
+                .is_some_and(|job| job.plugin_id == plugin_id && job.lease_id == lease_id);
+            if still_owned {
+                active.remove(&request_id);
+            }
+            still_owned
+        };
+        if !still_owned {
+            return;
+        }
+        let event_name = format!("ihub://plugin/{plugin_id}/event/utools.ffmpeg.complete");
+        let payload = match outcome {
+            Ok(()) => json!({ "requestId": request_id, "ok": true, "error": null }),
+            Err(error) => json!({
+                "requestId": request_id,
+                "ok": false,
+                "error": error.chars().take(4_000).collect::<String>(),
+            }),
+        };
+        let _ = app.emit_to(&window_label, &event_name, payload);
+    });
+    Ok(json!({ "accepted": true, "requestId": response_request_id }))
+}
+
+fn control_utools_ffmpeg_request(
+    host: &PluginHostState,
+    plugin_id: &str,
+    lease_id: &str,
+    params: &Value,
+    kill: bool,
+) -> Result<Value, String> {
+    validate_exact_plugin_params(params, &["requestId"])?;
+    let request_id = required_string(params, "requestId")?;
+    let parsed = Uuid::parse_str(request_id)
+        .map_err(|_| "utools.runFFmpeg requestId must be a UUID.".to_owned())?;
+    if parsed.get_version() != Some(uuid::Version::Random) {
+        return Err("utools.runFFmpeg requestId must be a version 4 UUID.".to_owned());
+    }
+    let active = host
+        .utools_ffmpeg_jobs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(job) = active.get(request_id) else {
+        return Ok(json!({ "accepted": false }));
+    };
+    if job.plugin_id != plugin_id || job.lease_id != lease_id {
+        return Err("This uTools FFmpeg job belongs to another plugin session.".to_owned());
+    }
+    if kill {
+        job.control.kill();
+    } else {
+        job.control.quit();
+    }
+    Ok(json!({ "accepted": true }))
 }
 
 fn start_utools_ai_request(context: UtoolsAiStartContext, params: &Value) -> Result<Value, String> {
@@ -8899,6 +9577,25 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
             abort_handle.abort();
         }
     }
+    let ffmpeg_jobs = {
+        let mut active = host
+            .utools_ffmpeg_jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request_ids = active
+            .iter()
+            .filter_map(|(request_id, job)| {
+                (job.plugin_id == plugin_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| active.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+    for job in ffmpeg_jobs {
+        job.control.kill();
+    }
     reject_pending_utools_ai_functions(
         host,
         |call| call.plugin_id == plugin_id,
@@ -8938,6 +9635,10 @@ fn clear_plugin_runtime_state(host: &PluginHostState, plugin_id: &str) {
     remove_expired_plugin_batch_rename_previews(&mut previews);
     previews.retain(|_, preview| preview.plugin_id != plugin_id);
     host.utools_drag_grants
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(owner, _), _| owner != plugin_id);
+    host.utools_save_grants
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|(owner, _), _| owner != plugin_id);
@@ -9549,11 +10250,14 @@ fn show_utools_dialog_on_main_thread(
     let dialog = configure_utools_file_dialog(app, &request.plugin_id, &request.kind, &options);
     let _dialog_guard = NativeDialogGuard::begin(&state.host);
     if request.kind == "save" {
-        return dialog
+        let selected = dialog
             .save_file()
             .map(validate_utools_save_selection)
-            .transpose()
-            .map(|path| path.map_or(Value::Null, Value::String));
+            .transpose()?;
+        if let Some(path) = selected.as_deref() {
+            remember_utools_save_grant(&state.host, &request.plugin_id, &request.lease_id, path)?;
+        }
+        return Ok(selected.map_or(Value::Null, Value::String));
     }
     let folder = options
         .properties
@@ -11963,7 +12667,8 @@ mod tests {
         normalize_utools_main_push_selection, normalized_host_target, optional_u32, optional_u8,
         physical_point_in_monitor, plugin_clipboard_history_snapshot, plugin_notification_body,
         plugin_search_providers_changed_payload, prepare_authorized_utools_drag_paths,
-        prepare_directory_for_grant, remember_utools_drag_grants, renderer_display_path,
+        prepare_directory_for_grant, prepare_utools_ffmpeg_run, publish_utools_ffmpeg_output,
+        remember_utools_drag_grants, remember_utools_save_grant, renderer_display_path,
         resolve_issued_plugin_search_selection, revoke_plugin_launcher_context_transfer,
         set_plugin_session_secret, startup_launcher_hotkey_candidates, take_file_grant,
         take_plugin_batch_rename_preview, take_plugin_launcher_context_transfer,
@@ -14412,6 +15117,81 @@ mod tests {
         clear_plugin_runtime_state(&host, "plugin-one");
         assert!(host.utools_drag_grants.lock().unwrap().is_empty());
         fs::remove_dir_all(directory).expect("cleanup file drag fixture directory");
+    }
+
+    #[test]
+    fn utools_ffmpeg_paths_are_picker_bound_and_publish_once() {
+        let directory = std::env::temp_dir().join(format!(
+            "ihub-utools-ffmpeg-grant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).expect("create FFmpeg fixture directory");
+        let directory = std::path::PathBuf::from(
+            super::canonical_selected_directory(directory)
+                .expect("canonicalize FFmpeg fixture directory"),
+        );
+        let input = directory.join("input.mp4");
+        fs::write(&input, b"fixture").expect("create FFmpeg input fixture");
+        let input = canonical_selected_file(input)
+            .expect("canonicalize FFmpeg input fixture")
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let output = directory.join("output.webm").to_string_lossy().into_owned();
+        let host = PluginHostState::default();
+        remember_utools_drag_grants(
+            &host,
+            "plugin-one",
+            "lease-one",
+            std::slice::from_ref(&input),
+            crate::system_open::LocalOpenKind::File,
+        )
+        .expect("remember FFmpeg input picker grant");
+        remember_utools_save_grant(&host, "plugin-one", "lease-one", &output)
+            .expect("remember FFmpeg output picker grant");
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (_, run) = prepare_utools_ffmpeg_run(
+            &host,
+            "plugin-one",
+            "lease-one",
+            &json!({
+                "requestId": request_id,
+                "args": ["-y", "-i", input, "-t", "00:00:02", output]
+            }),
+        )
+        .expect("exact picker paths should prepare FFmpeg");
+        assert_eq!(run.duration_seconds, Some(2.0));
+        assert!(run.staging_output.starts_with(&directory));
+        assert!(run
+            .args
+            .last()
+            .is_some_and(|value| value == &run.staging_output.to_string_lossy()));
+        assert!(host.utools_save_grants.lock().unwrap().is_empty());
+
+        fs::write(&run.staging_output, b"encoded").expect("create staged FFmpeg output");
+        publish_utools_ffmpeg_output(&run).expect("publish exact FFmpeg output once");
+        assert_eq!(fs::read(&run.output_grant.path).unwrap(), b"encoded");
+        assert!(publish_utools_ffmpeg_output(&run).is_err());
+        drop(run);
+        fs::remove_dir_all(directory).expect("cleanup FFmpeg fixture directory");
+    }
+
+    #[test]
+    fn utools_ffmpeg_rejects_network_and_ungranted_output_paths() {
+        let host = PluginHostState::default();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let output = std::env::temp_dir()
+            .join(format!("ihub-ungranted-{}.mp4", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(prepare_utools_ffmpeg_run(
+            &host,
+            "plugin-one",
+            "lease-one",
+            &json!({ "requestId": request_id, "args": ["-i", "https://example.com/video", output] })
+        )
+        .expect_err("network inputs must remain unavailable")
+        .contains("network"));
     }
 
     #[test]

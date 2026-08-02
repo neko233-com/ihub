@@ -60,6 +60,16 @@ describe("PluginFrontendFrame surface chrome", () => {
     );
   });
 
+  it("forwards lease-scoped FFmpeg progress and completion events", () => {
+    const frameSource = readFileSync(
+      new URL("./PluginFrontendFrame.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(frameSource).toContain('subscribe("event/utools.ffmpeg.progress")');
+    expect(frameSource).toContain('subscribe("event/utools.ffmpeg.complete")');
+  });
+
   it("sandboxes every real plugin document without navigation or popup capabilities", () => {
     const markup = renderToStaticMarkup(
       <PluginFrontendIframe

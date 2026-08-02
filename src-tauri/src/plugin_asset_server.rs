@@ -2054,6 +2054,7 @@ const declaredTools = new Map(Array.isArray(config.tools)
 const toolHandlers = new Map();
 const activeToolCalls = new Map();
 const activeAiRequests = new Map();
+const activeFfmpegRequests = new Map();
 let desktopCaptureSlot = null;
 let desktopCaptureSequence = 0;
 function call(method, params, interactionId, timeoutMs) {{
@@ -2971,6 +2972,37 @@ function ai(option, streamCallback) {{
   }});
   return promise;
 }}
+function runFFmpeg(args, onProgress) {{
+  if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot start FFmpeg jobs.");
+  if (!Array.isArray(args) || args.length === 0 || args.length > 256 || args.some((value) => typeof value !== "string" || value.length === 0 || new TextEncoder().encode(value).byteLength > 8192 || /[\u0000-\u001f\u007f]/.test(value))) {{
+    throw new TypeError("utools.runFFmpeg requires 1-256 bounded string arguments.");
+  }}
+  if (onProgress !== undefined && typeof onProgress !== "function") throw new TypeError("utools.runFFmpeg progress callback must be a function.");
+  const requestId = crypto.randomUUID();
+  const snapshot = args.slice();
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {{ resolvePromise = resolve; rejectPromise = reject; }});
+  const state = {{ resolve: resolvePromise, reject: rejectPromise, onProgress, settled: false, started: null }};
+  activeFfmpegRequests.set(requestId, state);
+  state.started = call("compatibility.utools.ffmpeg.start", {{ requestId, args: snapshot }}, undefined, 125000);
+  void state.started.catch((error) => {{
+    if (state.settled) return;
+    state.settled = true;
+    activeFfmpegRequests.delete(requestId);
+    rejectPromise(error);
+  }});
+  const control = (action) => {{
+    if (state.settled) return false;
+    void state.started.then(() => call("compatibility.utools.ffmpeg." + action, {{ requestId }})).catch(() => undefined);
+    return true;
+  }};
+  Object.defineProperties(promise, {{
+    kill: {{ configurable: false, enumerable: false, writable: false, value: () => control("kill") }},
+    quit: {{ configurable: false, enumerable: false, writable: false, value: () => control("quit") }}
+  }});
+  return promise;
+}}
 window.addEventListener("message", (event) => {{
   if (event.source !== window.parent || !event.data || event.data.channel !== responseChannel) return;
   const message = event.data;
@@ -3012,6 +3044,24 @@ window.addEventListener("message", (event) => {{
     activeAiRequests.delete(payload.requestId);
     if (payload.ok === true) state.resolve(typeof state.streamCallback === "function" ? undefined : Object.freeze({{ ...(payload.result || {{}}) }}));
     else state.reject(new Error(typeof payload.error === "string" ? payload.error : "uTools AI request failed."));
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.ffmpeg.progress") {{
+    const payload = message.payload;
+    const state = payload && typeof payload.requestId === "string" ? activeFfmpegRequests.get(payload.requestId) : null;
+    if (!state || state.settled || typeof state.onProgress !== "function" || !payload.progress || typeof payload.progress !== "object") return;
+    try {{ state.onProgress(Object.freeze({{ ...payload.progress }})); }}
+    catch (error) {{ console.error("uTools FFmpeg progress callback failed", error); }}
+    return;
+  }}
+  if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.ffmpeg.complete") {{
+    const payload = message.payload;
+    const state = payload && typeof payload.requestId === "string" ? activeFfmpegRequests.get(payload.requestId) : null;
+    if (!state || state.settled) return;
+    state.settled = true;
+    activeFfmpegRequests.delete(payload.requestId);
+    if (payload.ok === true) state.resolve();
+    else state.reject(new Error(typeof payload.error === "string" ? payload.error : "uTools FFmpeg job failed."));
     return;
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/utools.browser.ipc") {{
@@ -3175,6 +3225,105 @@ for (const method of ["goto", "evaluate", "wait", "when", "download", ...ubrowse
   ubrowser[method] = (...args) => createUBrowserChain(method, args);
 }}
 Object.freeze(ubrowser);
+function sharpBytesBase64(value) {{
+  let bytes;
+  if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+  else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  else throw new TypeError("utools.sharp byte input must be Uint8Array or ArrayBuffer.");
+  if (bytes.byteLength === 0 || bytes.byteLength > 16 * 1024 * 1024) throw new RangeError("utools.sharp input must contain 1-16 MiB.");
+  let binary = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.byteLength, offset + 32768)));
+  return btoa(binary);
+}}
+function sharpPlainValue(value, depth) {{
+  if (depth > 12) throw new RangeError("utools.sharp options are nested too deeply.");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {{ if (!Number.isFinite(value)) throw new TypeError("utools.sharp numbers must be finite."); return value; }}
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return {{ dataBase64: sharpBytesBase64(value) }};
+  if (Array.isArray(value)) {{ if (value.length > 64) throw new RangeError("utools.sharp arrays are too large."); return value.map((item) => sharpPlainValue(item, depth + 1)); }}
+  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError("utools.sharp options must contain plain JSON values.");
+  const entries = Object.entries(value);
+  if (entries.length > 64) throw new RangeError("utools.sharp objects are too large.");
+  const result = {{}};
+  for (const [key, item] of entries) {{
+    if (!key || Array.from(key).length > 128 || /[\u0000-\u001f\u007f]/.test(key)) throw new TypeError("utools.sharp option key is invalid.");
+    result[key] = sharpPlainValue(item, depth + 1);
+  }}
+  return result;
+}}
+function normalizedSharpInput(input, options) {{
+  const normalizedOptions = options === undefined ? {{}} : sharpPlainValue(options, 0);
+  if (!normalizedOptions || typeof normalizedOptions !== "object" || Array.isArray(normalizedOptions)) throw new TypeError("utools.sharp options must be an object.");
+  if (typeof input === "string") {{
+    if (!input || Array.from(input).length > 1024 || /[\u0000-\u001f\u007f]/.test(input)) throw new TypeError("utools.sharp path is invalid.");
+    return {{ kind: "path", path: input }};
+  }}
+  if (input instanceof ArrayBuffer || ArrayBuffer.isView(input)) {{
+    const dataBase64 = sharpBytesBase64(input);
+    if (normalizedOptions.raw) {{
+      const raw = normalizedOptions.raw;
+      return {{ kind: "raw", dataBase64, width: raw.width, height: raw.height, channels: raw.channels }};
+    }}
+    return {{ kind: "bytes", dataBase64 }};
+  }}
+  const source = input === undefined || input === null ? normalizedOptions : sharpPlainValue(input, 0);
+  if (source && typeof source === "object" && !Array.isArray(source) && source.create && typeof source.create === "object") {{
+    const create = source.create;
+    return {{ kind: "create", width: create.width, height: create.height, channels: create.channels, background: create.background ?? null }};
+  }}
+  throw new TypeError("utools.sharp supports picker paths, bounded bytes, raw pixels, or create input.");
+}}
+const sharpChainMethods = new Set([
+  "resize", "rotate", "flip", "flop", "grayscale", "greyscale", "negate", "blur", "sharpen", "threshold",
+  "normalize", "normalise", "gamma", "median", "tint", "flatten", "extend", "trim", "extract", "composite",
+  "jpeg", "jpg", "png", "webp", "gif", "tiff"
+]);
+function sharpDataBytes(dataBase64) {{
+  if (typeof dataBase64 !== "string" || dataBase64.length === 0) throw new Error("iHub returned invalid uTools Sharp bytes.");
+  const binary = atob(dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}}
+function createSharp(input, options, inherited) {{
+  if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot start Sharp pipelines.");
+  const state = inherited || {{ input: normalizedSharpInput(input, options), operations: [] }};
+  const terminal = (output) => call("compatibility.utools.sharp.execute", {{
+    input: sharpPlainValue(state.input, 0),
+    operations: state.operations.map((operation) => ({{ method: operation.method, args: sharpPlainValue(operation.args, 0) }})),
+    output
+  }}, undefined, 125000);
+  let proxy;
+  const target = {{}};
+  proxy = new Proxy(target, {{
+    get(_target, property) {{
+      if (property === "then") return undefined;
+      if (property === "clone") return () => createSharp(undefined, undefined, {{ input: sharpPlainValue(state.input, 0), operations: state.operations.map((operation) => ({{ method: operation.method, args: sharpPlainValue(operation.args, 0) }})) }});
+      if (property === "metadata") return () => terminal({{ kind: "metadata" }});
+      if (property === "toFile") return (path) => {{
+        if (typeof path !== "string" || !path || Array.from(path).length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return Promise.reject(new TypeError("utools.sharp toFile requires a showSaveDialog path."));
+        return terminal({{ kind: "file", path }});
+      }};
+      if (property === "toBuffer") return (bufferOptions) => terminal({{ kind: "buffer" }}).then((result) => {{
+        const data = sharpDataBytes(result && result.dataBase64);
+        return bufferOptions && bufferOptions.resolveWithObject === true ? {{ data, info: Object.freeze({{ ...(result.info || {{}}) }}) }} : data;
+      }});
+      if (property === "toFormat") return (format, formatOptions) => {{
+        const method = typeof format === "string" ? format.toLowerCase() : "";
+        if (!sharpChainMethods.has(method) || !["jpeg", "jpg", "png", "webp", "gif", "tiff"].includes(method)) throw new TypeError("utools.sharp toFormat format is unsupported.");
+        state.operations.push({{ method, args: formatOptions === undefined ? [] : [sharpPlainValue(formatOptions, 0)] }});
+        return proxy;
+      }};
+      if (typeof property === "string" && sharpChainMethods.has(property)) return (...args) => {{
+        if (state.operations.length >= 48) throw new RangeError("utools.sharp pipelines are limited to 48 operations.");
+        state.operations.push({{ method: property, args: sharpPlainValue(args, 0) }});
+        return proxy;
+      }};
+      return undefined;
+    }}
+  }});
+  return proxy;
+}}
 const utools = Object.freeze({{
   db,
   dbStorage,
@@ -3195,6 +3344,8 @@ const utools = Object.freeze({{
   }},
   ai,
   allAiModels() {{ return call("compatibility.utools.ai.models", {{}}); }},
+  runFFmpeg,
+  sharp: createSharp,
   registerTool(name, handler) {{
     if (!config.lifecycleOwner) throw new Error("A uTools BrowserWindow cannot register MCP tools.");
     if (typeof name !== "string" || !declaredTools.has(name)) throw new TypeError("uTools registerTool name must exactly match plugin.json tools.");
@@ -3688,6 +3839,8 @@ const bootstrap = Promise.all([
 void bootstrap;
 window.addEventListener("pagehide", () => {{
   stopDesktopCaptureSlot();
+  for (const requestId of activeFfmpegRequests.keys()) void call("compatibility.utools.ffmpeg.kill", {{ requestId }}).catch(() => undefined);
+  activeFfmpegRequests.clear();
   if (config.lifecycleOwner) {{ invokePluginOut(false); void call("lifecycle.dispose", {{}}).catch(() => undefined); }}
 }}, {{ once: true }});
 }})();
@@ -4224,6 +4377,15 @@ mod tests {
         assert!(script.contains("compatibility.utools.ai.toolComplete"));
         assert!(script.contains("event/utools.ai.chunk"));
         assert!(script.contains("allAiModels()"));
+        assert!(script.contains("function createSharp(input, options, inherited)"));
+        assert!(script.contains("compatibility.utools.sharp.execute"));
+        assert!(script.contains("compatibility.utools.ffmpeg.start"));
+        assert!(script.contains("compatibility.utools.ffmpeg."));
+        assert!(script.contains("control(\"kill\")"));
+        assert!(script.contains("control(\"quit\")"));
+        assert!(script.contains("event/utools.ffmpeg.progress"));
+        assert!(script.contains("event/utools.ffmpeg.complete"));
+        assert!(script.contains("sharp: createSharp"));
         assert!(script.contains("const sandboxModule"));
         assert!(script.contains("getAppVersion"));
         assert!(script.contains("getNativeId"));
