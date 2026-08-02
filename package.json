@@ -24,8 +24,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@codemirror/lang-json": "6.0.2",
+    "@codemirror/language": "6.11.3",
+    "@lezer/highlight": "1.2.3",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
+    "codemirror": "6.0.2",
     "jsqr": "1.4.0",
     "lucide-react": "^1.27.0",
     "motion": "^12.42.2",

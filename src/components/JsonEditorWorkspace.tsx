@@ -1,6 +1,16 @@
+import { json } from "@codemirror/lang-json";
+import {
+  HighlightStyle,
+  foldAll,
+  syntaxHighlighting,
+  unfoldAll,
+} from "@codemirror/language";
+import { tags } from "@lezer/highlight";
+import { basicSetup, EditorView } from "codemirror";
 import {
   Braces,
-  Check,
+  ChevronsDown,
+  ChevronsUp,
   CircleAlert,
   Code2,
   Copy,
@@ -8,11 +18,10 @@ import {
   FileCode2,
   Minimize2,
   Quote,
-  Search,
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   escapeJsonValue,
   formatJsonValue,
@@ -33,8 +42,6 @@ interface JsonEditorWorkspaceProps {
   onToast: (message: string) => void;
 }
 
-type OutputMode = "preview" | "formatted" | "minified" | "escaped" | "xml" | "typescript" | "query";
-
 interface EditorStatus {
   kind: "success" | "error" | "idle";
   text: string;
@@ -47,28 +54,71 @@ const inputKindLabels: Record<StructuredInputKind, string> = {
   yaml: "YAML",
 };
 
-const outputModeLabels: Record<OutputMode, string> = {
-  preview: "格式化预览",
-  formatted: "JSON",
-  minified: "压缩 JSON",
-  escaped: "转义字符串",
-  xml: "XML",
-  typescript: "TypeScript",
-  query: "查询结果",
-};
+const jsonHighlightStyle = HighlightStyle.define([
+  { tag: tags.propertyName, color: "#64d2ff" },
+  { tag: tags.string, color: "#ff9f7a" },
+  { tag: [tags.number, tags.bool], color: "#bf5af2" },
+  { tag: tags.null, color: "#ff375f" },
+  { tag: tags.invalid, color: "#ff375f", textDecoration: "underline wavy" },
+]);
 
-function initialOutput(input: string): string {
-  try {
-    return formatJsonValue(parseStructuredInput(input).value);
-  } catch {
-    return "";
-  }
-}
-
-function lineNumbers(value: string): string {
-  const count = Math.max(1, value.split("\n").length);
-  return Array.from({ length: count }, (_, index) => index + 1).join("\n");
-}
+const jsonEditorTheme = EditorView.theme({
+  "&": {
+    backgroundColor: "#191b1f",
+    color: "#f4f6fa",
+    height: "100%",
+  },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": {
+    fontFamily: '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
+    fontSize: "13px",
+    lineHeight: "1.65",
+    overflow: "auto",
+  },
+  ".cm-content": {
+    caretColor: "#64d2ff",
+    minHeight: "100%",
+    padding: "8px 0 46px",
+  },
+  ".cm-line": { padding: "0 15px 0 8px" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#64d2ff" },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
+    backgroundColor: "rgba(10, 132, 255, 0.34) !important",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "rgba(10, 132, 255, 0.065)",
+    boxShadow: "inset 0 1px rgba(100, 210, 255, 0.055), inset 0 -1px rgba(100, 210, 255, 0.055)",
+  },
+  ".cm-gutters": {
+    backgroundColor: "#1c1e22",
+    border: "none",
+    color: "#8d98a8",
+    paddingLeft: "7px",
+  },
+  ".cm-activeLineGutter": {
+    backgroundColor: "rgba(10, 132, 255, 0.1)",
+    color: "#d8edff",
+  },
+  ".cm-lineNumbers .cm-gutterElement": {
+    minWidth: "34px",
+    padding: "0 10px 0 4px",
+  },
+  ".cm-foldGutter .cm-gutterElement": {
+    color: "#b8c5d5",
+    padding: "0 3px",
+  },
+  ".cm-foldPlaceholder": {
+    backgroundColor: "rgba(94, 92, 230, 0.2)",
+    border: "1px solid rgba(100, 210, 255, 0.34)",
+    color: "#d8edff",
+  },
+  ".cm-panels": {
+    backgroundColor: "#2c2f35",
+    color: "#f4f6fa",
+  },
+  ".cm-searchMatch": { backgroundColor: "rgba(255, 159, 10, 0.32)" },
+  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "rgba(10, 132, 255, 0.42)" },
+}, { dark: true });
 
 export function JsonEditorWorkspace({
   input,
@@ -78,15 +128,19 @@ export function JsonEditorWorkspace({
   onStartWindowDrag,
   onToast,
 }: JsonEditorWorkspaceProps) {
-  const [output, setOutput] = useState(() => initialOutput(input));
-  const [outputMode, setOutputMode] = useState<OutputMode>("preview");
   const [query, setQuery] = useState("$");
   const [status, setStatus] = useState<EditorStatus>({
     kind: "idle",
     text: "支持 JSON、URL Params、XML 与 YAML",
   });
-  const inputGutterRef = useRef<HTMLPreElement>(null);
-  const outputGutterRef = useRef<HTMLPreElement>(null);
+  const editorHostRef = useRef<HTMLDivElement>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const inputRef = useRef(input);
+  const callbacksRef = useRef({ onInputChange, onToast });
+  const synchronizingRef = useRef(false);
+
+  callbacksRef.current = { onInputChange, onToast };
+
   const parsed = useMemo(() => {
     try {
       return { result: parseStructuredInput(input), error: null };
@@ -96,46 +150,130 @@ export function JsonEditorWorkspace({
   }, [input]);
 
   useEffect(() => {
-    if (outputMode !== "preview") return;
-    setOutput(parsed.result ? formatJsonValue(parsed.result.value) : "");
-    setStatus(parsed.result
-      ? { kind: "success", text: `${inputKindLabels[parsed.result.kind]} 已就绪 · 全程离线` }
-      : { kind: input.trim() ? "error" : "idle", text: parsed.error ?? "等待输入" });
-  }, [input, outputMode, parsed]);
+    if (!editorHostRef.current) return;
 
-  const commitOutput = (mode: OutputMode, value: string, message: string) => {
-    setOutputMode(mode);
-    setOutput(value);
+    const view = new EditorView({
+      doc: inputRef.current,
+      extensions: [
+        basicSetup,
+        json(),
+        syntaxHighlighting(jsonHighlightStyle),
+        jsonEditorTheme,
+        EditorView.updateListener.of((update) => {
+          if (!update.docChanged) return;
+          const value = update.state.doc.toString();
+          inputRef.current = value;
+          if (!synchronizingRef.current) {
+            callbacksRef.current.onInputChange(value);
+          }
+        }),
+        EditorView.domEventHandlers({
+          paste(event, activeView) {
+            const pasted = event.clipboardData?.getData("text/plain") ?? "";
+            if (!pasted.trim()) return false;
+            try {
+              const converted = parseStructuredInput(pasted);
+              if (converted.kind === "json") return false;
+              event.preventDefault();
+              const formatted = formatJsonValue(converted.value);
+              activeView.dispatch(activeView.state.replaceSelection(formatted));
+              const message = `${inputKindLabels[converted.kind]} 已自动转换为 JSON。`;
+              setStatus({ kind: "success", text: message });
+              callbacksRef.current.onToast(message);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        }),
+      ],
+      parent: editorHostRef.current,
+    });
+    editorViewRef.current = view;
+    return () => {
+      editorViewRef.current = null;
+      view.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view || view.state.doc.toString() === input) {
+      inputRef.current = input;
+      return;
+    }
+    synchronizingRef.current = true;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: input } });
+    synchronizingRef.current = false;
+    inputRef.current = input;
+  }, [input]);
+
+  useEffect(() => {
+    if (parsed.result) {
+      setStatus({
+        kind: "success",
+        text: `${inputKindLabels[parsed.result.kind]} 有效 · 本地离线`,
+      });
+    } else {
+      setStatus({
+        kind: input.trim() ? "error" : "idle",
+        text: parsed.error ?? "等待输入",
+      });
+    }
+  }, [input, parsed]);
+
+  const replaceEditorDocument = (value: string, message: string) => {
+    const view = editorViewRef.current;
+    if (view) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: value },
+        selection: { anchor: Math.min(value.length, view.state.selection.main.head) },
+        scrollIntoView: true,
+      });
+      view.focus();
+    } else {
+      onInputChange(value);
+    }
     setStatus({ kind: "success", text: message });
     onToast(message);
   };
 
   const requireParsed = () => {
-    if (!parsed.result) {
-      const message = parsed.error ?? "无法解析输入。";
-      setStatus({ kind: "error", text: message });
-      onToast(message);
-      return null;
-    }
-    return parsed.result;
+    if (parsed.result) return parsed.result;
+    const message = parsed.error ?? "无法解析输入。";
+    setStatus({ kind: "error", text: message });
+    onToast(message);
+    return null;
   };
 
-  const applyTransform = (mode: Exclude<OutputMode, "preview" | "query">) => {
+  const formatEditor = () => {
     const source = requireParsed();
     if (!source) return;
-    if (mode === "formatted") {
-      const formatted = formatJsonValue(source.value);
-      onInputChange(formatted);
-      commitOutput(mode, formatted, `${inputKindLabels[source.kind]} 已转换并格式化为 JSON。`);
-    } else if (mode === "minified") {
-      commitOutput(mode, minifyJsonValue(source.value), "JSON 已压缩。原输入保持不变。");
-    } else if (mode === "escaped") {
-      commitOutput(mode, escapeJsonValue(source.value), "JSON 已转换为转义字符串。");
-    } else if (mode === "xml") {
-      commitOutput(mode, jsonValueToXml(source.value), "JSON 已转换为 XML。");
-    } else {
-      commitOutput(mode, jsonValueToTypeScript(source.value), "JSON 已转换为 TypeScript 类型。");
-    }
+    replaceEditorDocument(
+      formatJsonValue(source.value),
+      `${inputKindLabels[source.kind]} 已格式化为 JSON。`,
+    );
+  };
+
+  const minifyEditor = () => {
+    const source = requireParsed();
+    if (!source) return;
+    replaceEditorDocument(minifyJsonValue(source.value), "JSON 已压缩，可用 Ctrl/⌘ + Z 撤销。");
+  };
+
+  const escapeEditor = () => {
+    const source = requireParsed();
+    if (!source) return;
+    replaceEditorDocument(escapeJsonValue(source.value), "JSON 已转义，可用 Ctrl/⌘ + Z 撤销。");
+  };
+
+  const copyConverted = (kind: "xml" | "typescript") => {
+    const source = requireParsed();
+    if (!source) return;
+    const value = kind === "xml" ? jsonValueToXml(source.value) : jsonValueToTypeScript(source.value);
+    const label = kind === "xml" ? "XML" : "TypeScript";
+    void onCopy(value, label);
+    setStatus({ kind: "success", text: `${label} 已复制，原 JSON 保持不变。` });
   };
 
   const runQuery = () => {
@@ -143,7 +281,10 @@ export function JsonEditorWorkspace({
     if (!source) return;
     try {
       const result = queryJsonPath(source.value, query);
-      commitOutput("query", result.formatted, `查询完成，返回 ${result.matches.length} 项。`);
+      replaceEditorDocument(
+        result.formatted,
+        `查询完成，返回 ${result.matches.length} 项；可用 Ctrl/⌘ + Z 撤销。`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "无法执行查询。";
       setStatus({ kind: "error", text: message });
@@ -155,26 +296,15 @@ export function JsonEditorWorkspace({
     if (!(event.ctrlKey || event.metaKey)) return;
     if (event.key.toLowerCase() === "l") {
       event.preventDefault();
-      applyTransform("formatted");
+      formatEditor();
     } else if (event.key === "Enter") {
       event.preventDefault();
       runQuery();
     }
   };
 
-  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const pasted = event.clipboardData.getData("text/plain");
-    if (!pasted.trim()) return;
-    try {
-      const converted = parseStructuredInput(pasted);
-      if (converted.kind === "json") return;
-      event.preventDefault();
-      const formatted = formatJsonValue(converted.value);
-      onInputChange(formatted);
-      commitOutput("formatted", formatted, `${inputKindLabels[converted.kind]} 已自动转换为 JSON。`);
-    } catch {
-      // Let the editor accept ordinary text and surface the parser error inline.
-    }
+  const clearEditor = () => {
+    replaceEditorDocument("", "编辑器已清空，可用 Ctrl/⌘ + Z 撤销。");
   };
 
   return (
@@ -182,77 +312,61 @@ export function JsonEditorWorkspace({
       aria-labelledby="json-editor-title"
       className="json-editor-workspace"
       id="toolbox-panel-json"
-      onKeyDown={handleWorkspaceKeyDown}
+      onKeyDownCapture={handleWorkspaceKeyDown}
       role="tabpanel"
     >
       <header className="json-editor-workspace__header" onPointerDown={onStartWindowDrag}>
-        <div className="json-editor-workspace__identity">
-          <span className="json-editor-workspace__command"><Braces size={17} /> JSON</span>
-          <div>
+        <div className="json-editor-workspace__tabs">
+          <div className="json-editor-workspace__tab is-product">
+            <span className="json-editor-workspace__tab-icon"><Braces size={12} /></span>
             <h2 id="json-editor-title">JSON 编辑器</h2>
-            <p>{parsed.result ? `${inputKindLabels[parsed.result.kind]} 输入` : "结构化数据工作台"}</p>
+          </div>
+          <div className="json-editor-workspace__tab is-document">
+            <span>Json</span>
+            <button
+              aria-label="关闭 JSON 编辑器"
+              onClick={onClose}
+              onPointerDown={(event) => event.stopPropagation()}
+              type="button"
+            >
+              <X size={20} />
+            </button>
           </div>
         </div>
-        <div className={`json-editor-workspace__status is-${status.kind}`} role="status">
-          {status.kind === "success" ? <Check size={14} /> : status.kind === "error" ? <CircleAlert size={14} /> : null}
-          <span>{status.text}</span>
-        </div>
-        <div className="json-editor-workspace__window-actions">
-          <button aria-label="JSON 编辑器菜单" title="转换操作位于底部工具栏" type="button"><EllipsisVertical size={18} /></button>
-          <button aria-label="关闭 JSON 编辑器" onClick={onClose} type="button"><X size={18} /></button>
+
+        <div className="json-editor-workspace__window-actions" onPointerDown={(event) => event.stopPropagation()}>
+          <details className="json-editor-workspace__menu">
+            <summary aria-label="JSON 编辑器菜单" title="JSON 编辑器菜单">
+              <EllipsisVertical size={21} />
+            </summary>
+            <div role="menu">
+              <button onClick={formatEditor} role="menuitem" type="button">格式化 JSON</button>
+              <button onClick={() => void onCopy(input, "JSON")} role="menuitem" type="button">复制当前内容</button>
+              <button className="is-danger" onClick={clearEditor} role="menuitem" type="button">清空编辑器</button>
+            </div>
+          </details>
+          <span
+            className={`json-editor-workspace__app-mark is-${status.kind}`}
+            title={status.text}
+          >
+            <Braces size={14} />
+            <strong>JSON</strong>
+          </span>
         </div>
       </header>
 
-      <div className="json-editor-workspace__panes">
-        <section className="json-editor-pane" aria-labelledby="json-input-title">
-          <header>
-            <div>
-              <strong id="json-input-title">输入</strong>
-              <span>{parsed.result ? inputKindLabels[parsed.result.kind] : "等待有效数据"}</span>
-            </div>
-            <button onClick={() => applyTransform("formatted")} title="格式化（Ctrl/⌘ + L）" type="button"><Braces size={15} /> 格式化</button>
-          </header>
-          <div className="json-code-editor">
-            <pre aria-hidden="true" className="json-code-editor__gutter" ref={inputGutterRef}>{lineNumbers(input)}</pre>
-            <textarea
-              aria-label="JSON 输入"
-              onChange={(event) => {
-                setOutputMode("preview");
-                onInputChange(event.target.value);
-              }}
-              onPaste={handlePaste}
-              onScroll={(event) => {
-                if (inputGutterRef.current) inputGutterRef.current.scrollTop = event.currentTarget.scrollTop;
-              }}
-              placeholder={'{\n  "name": "iHub"\n}'}
-              spellCheck="false"
-              value={input}
-            />
+      <div className="json-editor-workspace__canvas">
+        <div
+          aria-label="JSON 输入"
+          className="json-code-editor"
+          ref={editorHostRef}
+        />
+        {status.kind === "error" ? (
+          <div className="json-editor-workspace__diagnostic" role="status">
+            <CircleAlert size={14} />
+            <span>{status.text}</span>
           </div>
-        </section>
-
-        <section className="json-editor-pane json-editor-pane--output" aria-labelledby="json-output-title">
-          <header>
-            <div>
-              <strong id="json-output-title">输出</strong>
-              <span>{outputModeLabels[outputMode]}</span>
-            </div>
-            <button disabled={!output} onClick={() => void onCopy(output, outputModeLabels[outputMode])} title="复制输出" type="button"><Copy size={15} /> 复制</button>
-          </header>
-          <div className="json-code-editor is-readonly">
-            <pre aria-hidden="true" className="json-code-editor__gutter" ref={outputGutterRef}>{lineNumbers(output)}</pre>
-            <textarea
-              aria-label="JSON 输出"
-              onScroll={(event) => {
-                if (outputGutterRef.current) outputGutterRef.current.scrollTop = event.currentTarget.scrollTop;
-              }}
-              placeholder="格式化结果会显示在这里"
-              readOnly
-              spellCheck="false"
-              value={output}
-            />
-          </div>
-        </section>
+        ) : null}
       </div>
 
       <footer className="json-editor-workspace__footer">
@@ -267,25 +381,21 @@ export function JsonEditorWorkspace({
                 runQuery();
               }
             }}
-            placeholder="$.items[*].id"
+            placeholder={'JS 过滤；示例 ".key.subkey"、"[0][1]"、".map(x=>x.val)"'}
             spellCheck="false"
             value={query}
           />
-          <button onClick={runQuery} title="运行受限 JSONPath 查询（Ctrl/⌘ + Enter）" type="button"><Search size={16} /> 查询</button>
         </label>
         <div className="json-editor-workspace__tools" aria-label="JSON 转换工具">
-          <button onClick={() => applyTransform("formatted")} title="格式化 JSON" type="button"><Braces size={17} /><span>格式化</span></button>
-          <button onClick={() => applyTransform("minified")} title="压缩 JSON" type="button"><Minimize2 size={17} /><span>压缩</span></button>
-          <button onClick={() => applyTransform("escaped")} title="JSON 转义" type="button"><Quote size={17} /><span>转义</span></button>
-          <button onClick={() => applyTransform("xml")} title="转换为 XML" type="button"><FileCode2 size={17} /><span>XML</span></button>
-          <button onClick={() => applyTransform("typescript")} title="转换为 TypeScript" type="button"><Code2 size={17} /><span>TypeScript</span></button>
-          <button disabled={!output} onClick={() => void onCopy(output, outputModeLabels[outputMode])} title="复制当前输出" type="button"><Copy size={17} /><span>复制</span></button>
-          <button className="is-danger" onClick={() => {
-            onInputChange("");
-            setOutput("");
-            setOutputMode("preview");
-            setStatus({ kind: "idle", text: "内容已清空" });
-          }} title="清空编辑器" type="button"><Trash2 size={17} /><span>清空</span></button>
+          <button onClick={formatEditor} title="格式化 JSON（Ctrl/⌘ + L）" type="button"><Braces size={21} /></button>
+          <button onClick={() => editorViewRef.current && foldAll(editorViewRef.current)} title="全部折叠" type="button"><ChevronsUp size={21} /></button>
+          <button onClick={() => editorViewRef.current && unfoldAll(editorViewRef.current)} title="全部展开" type="button"><ChevronsDown size={21} /></button>
+          <button onClick={minifyEditor} title="压缩 JSON" type="button"><Minimize2 size={21} /></button>
+          <button onClick={escapeEditor} title="转义 JSON" type="button"><Quote size={21} /></button>
+          <button onClick={() => copyConverted("xml")} title="复制为 XML" type="button"><Code2 size={21} /></button>
+          <button onClick={() => copyConverted("typescript")} title="复制为 TypeScript" type="button"><FileCode2 size={21} /></button>
+          <button disabled={!input} onClick={() => void onCopy(input, "JSON")} title="复制当前内容" type="button"><Copy size={21} /></button>
+          <button className="is-danger" onClick={clearEditor} title="清空编辑器" type="button"><Trash2 size={20} /></button>
         </div>
       </footer>
     </section>
