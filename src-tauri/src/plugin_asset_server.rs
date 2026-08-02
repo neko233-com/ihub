@@ -2234,6 +2234,8 @@ function invokePluginDetach() {{
 }}
 const dbStorageState = Object.create(null);
 const dbStorageVersions = new Map();
+const dbCryptoStorageState = Object.create(null);
+const dbCryptoStorageVersions = new Map();
 const dbPromises = Object.freeze({{
   get(id) {{ return call("compatibility.utools.db.get", {{ id }}); }},
   put(doc) {{ return call("compatibility.utools.db.put", {{ doc }}); }},
@@ -2331,6 +2333,56 @@ const dbStorage = Object.freeze({{
     void call("compatibility.utools.dbStorage.remove", {{ key }}).catch((error) => {{
       if (hadPrevious && dbStorageVersions.get(key) === version) dbStorageState[key] = previous;
       console.error("iHub compatibility dbStorage remove failed", error);
+    }});
+  }}
+}});
+function dbCryptoStorageKey(key) {{
+  if (typeof key !== "string") throw new TypeError("uTools dbCryptoStorage keys must be strings.");
+  if (new TextEncoder().encode(key).byteLength > 48) throw new RangeError("uTools dbCryptoStorage keys must not exceed 48 UTF-8 bytes.");
+  return key;
+}}
+function cloneDbCryptoStorageValue(value) {{
+  const serialized = JSON.stringify(value);
+  if (typeof serialized !== "string") throw new TypeError("uTools dbCryptoStorage values must be JSON-serializable.");
+  if (new TextEncoder().encode(serialized).byteLength > 65536) throw new RangeError("uTools dbCryptoStorage values must not exceed 64 KiB.");
+  return JSON.parse(serialized);
+}}
+function nextDbCryptoStorageVersion(key) {{
+  const version = (dbCryptoStorageVersions.get(key) || 0) + 1;
+  dbCryptoStorageVersions.set(key, version);
+  return version;
+}}
+const dbCryptoStorage = Object.freeze({{
+  setItem(rawKey, value) {{
+    const key = dbCryptoStorageKey(rawKey);
+    const storedValue = cloneDbCryptoStorageValue(value);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(dbCryptoStorageState, key);
+    const previous = dbCryptoStorageState[key];
+    const version = nextDbCryptoStorageVersion(key);
+    dbCryptoStorageState[key] = storedValue;
+    void call("compatibility.utools.dbCryptoStorage.set", {{ key, value: storedValue }}).catch((error) => {{
+      if (dbCryptoStorageVersions.get(key) === version) {{
+        if (hadPrevious) dbCryptoStorageState[key] = previous;
+        else delete dbCryptoStorageState[key];
+      }}
+      console.error("iHub compatibility dbCryptoStorage encrypted write failed", error);
+    }});
+  }},
+  getItem(rawKey) {{
+    const key = dbCryptoStorageKey(rawKey);
+    return Object.prototype.hasOwnProperty.call(dbCryptoStorageState, key)
+      ? cloneDbCryptoStorageValue(dbCryptoStorageState[key])
+      : null;
+  }},
+  removeItem(rawKey) {{
+    const key = dbCryptoStorageKey(rawKey);
+    const hadPrevious = Object.prototype.hasOwnProperty.call(dbCryptoStorageState, key);
+    const previous = dbCryptoStorageState[key];
+    const version = nextDbCryptoStorageVersion(key);
+    delete dbCryptoStorageState[key];
+    void call("compatibility.utools.dbCryptoStorage.remove", {{ key }}).catch((error) => {{
+      if (hadPrevious && dbCryptoStorageVersions.get(key) === version) dbCryptoStorageState[key] = previous;
+      console.error("iHub compatibility dbCryptoStorage encrypted remove failed", error);
     }});
   }}
 }});
@@ -2545,6 +2597,7 @@ window.addEventListener("message", (event) => {{
 const utools = Object.freeze({{
   db,
   dbStorage,
+  dbCryptoStorage,
   onPluginReady(callback) {{ if (typeof callback === "function") readyCallbacks.push(callback); }},
   onPluginEnter(callback) {{ if (typeof callback === "function") enterCallbacks.push(callback); }},
   onPluginOut(callback) {{ if (typeof callback === "function") outCallbacks.push(callback); }},
@@ -2944,12 +2997,21 @@ Object.defineProperties(window, {{
 }});
 Promise.all([
   call("compatibility.utools.dbStorage.snapshot", {{}}),
+  call("compatibility.utools.dbCryptoStorage.snapshot", {{}}).catch((error) => {{
+    console.error("iHub compatibility dbCryptoStorage restore failed", error);
+    return null;
+  }}),
   call("compatibility.utools.features.snapshot", {{}})
 ])
-  .then(([snapshot, features]) => {{
+  .then(([snapshot, cryptoSnapshot, features]) => {{
     if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {{
       for (const [key, value] of Object.entries(snapshot)) {{
         if (!dbStorageVersions.has(key)) dbStorageState[key] = value;
+      }}
+    }}
+    if (cryptoSnapshot && typeof cryptoSnapshot === "object" && !Array.isArray(cryptoSnapshot)) {{
+      for (const [key, value] of Object.entries(cryptoSnapshot)) {{
+        if (!dbCryptoStorageVersions.has(key)) dbCryptoStorageState[key] = value;
       }}
     }}
     if (Array.isArray(features)) {{
@@ -2960,7 +3022,7 @@ Promise.all([
     }}
     ensureMainPushProviderRegistration();
   }})
-  .catch((error) => console.error("iHub compatibility dbStorage restore failed", error))
+  .catch((error) => console.error("iHub compatibility storage restore failed", error))
   .then(() => call("lifecycle.ready", {{}}))
   .then(() => invoke(readyCallbacks, undefined))
   .catch((error) => console.error("iHub uTools compatibility bootstrap failed", error));
@@ -3410,6 +3472,10 @@ mod tests {
         assert!(script.contains("dbStorage"));
         assert!(script.contains("compatibility.utools.dbStorage.set"));
         assert!(script.contains("compatibility.utools.dbStorage.remove"));
+        assert!(script.contains("dbCryptoStorage"));
+        assert!(script.contains("compatibility.utools.dbCryptoStorage.snapshot"));
+        assert!(script.contains("compatibility.utools.dbCryptoStorage.set"));
+        assert!(script.contains("compatibility.utools.dbCryptoStorage.remove"));
         assert!(script.contains("const dbPromises = Object.freeze"));
         assert!(script.contains("compatibility.utools.db.get"));
         assert!(script.contains("compatibility.utools.db.put"));
@@ -3474,6 +3540,13 @@ mod tests {
         assert!(
             storage_snapshot < lifecycle_ready,
             "dbStorage must be hydrated before onPluginReady callbacks run"
+        );
+        let crypto_storage_snapshot = script
+            .find("compatibility.utools.dbCryptoStorage.snapshot")
+            .expect("bootstrap should hydrate encrypted compatibility storage");
+        assert!(
+            crypto_storage_snapshot < lifecycle_ready,
+            "dbCryptoStorage must be hydrated before onPluginReady callbacks run"
         );
         let feature_snapshot = script
             .find("compatibility.utools.features.snapshot")

@@ -293,6 +293,10 @@ if (preview.canApply && preview.previewId) {
 
 宿主只枚举所选目录的直接普通文件，并在预览与执行时分别复查路径、符号链接、重名冲突和过期记录。前端不能传 `directory` 或 `items` 给执行调用；预览令牌与授权目录、插件 ID 绑定且用后即失效。不要试图把 `grantId` 保存到设置、日志或远端服务。
 
+### uTools 加密键值存储
+
+`dbCryptoStorage.setItem/getItem/removeItem` 保持官方同步签名，并与 `dbStorage` 一样在 `onPluginReady` 前完成页面缓存水合。每个插件的随机 256 位密钥只保存在 Windows Credential Manager 或 macOS Keychain；app-data 文件除版本和插件命名空间外只保存 AES-256-GCM 密文与随机 nonce，AEAD 附加数据与加密信封同时绑定插件 ID，交换、篡改或丢失凭据时会拒绝读取和覆盖。键和值都不会明文落盘；每插件最多 128 键，键最多 48 UTF-8 字节，单值最多 64 KiB，总明文最多 512 KiB。普通更新和本地开发重载会保留密文，受管插件卸载会先删除密文再清理系统凭据。
+
 ### 用户选择文件与原生 worker
 
 图片、OCR 等插件不应要求用户把本地绝对路径粘贴进网页。声明 `filesystem.read: ["user-selected"]` 与 `nativeApi: true` 后，前端可以在用户点击时选择文件，再将短期 `grantId` 交给自身已声明的 worker：

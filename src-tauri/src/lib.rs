@@ -21,6 +21,7 @@ mod ntfs_usn;
 mod ocr;
 mod plugin_artwork;
 mod plugin_asset_server;
+mod plugin_crypto_storage;
 mod plugin_settings;
 mod plugin_shortcuts;
 mod plugins;

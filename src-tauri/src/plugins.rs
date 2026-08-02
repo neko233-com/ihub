@@ -4867,6 +4867,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.simulation.visibleConfirmed".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.dbCryptoStorage.osKeyringAesGcm".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5412,6 +5415,9 @@ mod tests {
         assert!(plugin_security_declaration(&manifest)
             .permissions
             .contains("compatibility.utools.simulation.visibleConfirmed"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.dbCryptoStorage.osKeyringAesGcm"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);

@@ -24,6 +24,7 @@ notify = "6.1"
 ib-pinyin = { version = "=0.3.1", default-features = false }
 rayon = "1.10"
 regex = "1"
+ring = "0.17"
 # Use Rustls with ring rather than enabling reqwest's AWS-LC default. This keeps
 # the first-party WebDAV client on the same pure-Rust TLS path already used by
 # the desktop stack and avoids introducing a second crypto provider/toolchain.

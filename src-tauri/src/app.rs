@@ -51,6 +51,7 @@ use crate::{
     plugin_asset_server::{
         PluginAssetServer, PluginFrontendLease, PluginFrontendPurpose, UtoolsDialogRequest,
     },
+    plugin_crypto_storage::PluginCryptoStorage,
     plugin_settings::PluginSettingsStore,
     plugin_shortcuts::{
         apply_plugin_shortcut_statuses, binding_is_current, binding_targets_frontend_command,
@@ -562,6 +563,7 @@ pub struct AppState {
     pub started_at: String,
     launcher_shortcuts: LauncherShortcutStore,
     plugin_assets: PluginAssetServer,
+    plugin_crypto_storage: PluginCryptoStorage,
     plugin_settings: PluginSettingsStore,
     utools_documents: crate::utools_db::UtoolsDocumentStore,
     host: Arc<PluginHostState>,
@@ -600,6 +602,7 @@ pub(crate) enum SuperPanelContextPayload {
 impl AppState {
     fn new(app_data_dir: PathBuf) -> Self {
         let plugins = PluginManager::new();
+        let plugin_crypto_storage = PluginCryptoStorage::new(app_data_dir.clone());
         let plugin_settings = PluginSettingsStore::new(app_data_dir.clone());
         let utools_documents = crate::utools_db::UtoolsDocumentStore::new(app_data_dir.clone());
         let super_panel = Arc::new(SuperPanelState::with_storage(app_data_dir.clone()));
@@ -624,6 +627,7 @@ impl AppState {
             started_at: Utc::now().to_rfc3339(),
             launcher_shortcuts: LauncherShortcutStore::new(app_data_dir.clone()),
             plugin_assets: PluginAssetServer::new(),
+            plugin_crypto_storage,
             plugin_settings,
             utools_documents,
             host: Arc::new(PluginHostState::default()),
@@ -2512,6 +2516,7 @@ pub async fn uninstall_managed_plugin(
 ) -> Result<PluginUninstallResult, String> {
     let plugins = state.plugins.clone();
     let plugin_assets = state.plugin_assets.clone();
+    let plugin_crypto_storage = state.plugin_crypto_storage.clone();
     let plugin_settings = state.plugin_settings.clone();
     let utools_documents = state.utools_documents.clone();
     let host = state.host.clone();
@@ -2531,6 +2536,15 @@ pub async fn uninstall_managed_plugin(
                     "plugins",
                     format!(
                         "Could not remove settings for uninstalled plugin '{}': {error}",
+                        removed.plugin_id
+                    ),
+                );
+            }
+            if let Err(error) = plugin_crypto_storage.remove_plugin(&removed.plugin_id) {
+                host_log::warn(
+                    "plugins",
+                    format!(
+                        "Could not remove encrypted storage for uninstalled plugin '{}': {error}",
                         removed.plugin_id
                     ),
                 );
@@ -4552,6 +4566,30 @@ fn plugin_host_call_for_active_lease(
             let removed = state.plugin_settings.remove(
                 &request.plugin_id,
                 &utools_db_storage_key(key)?,
+            )?;
+            Ok(json!({ "removed": removed }))
+        }
+        "compatibility.utools.dbCryptoStorage.snapshot" => {
+            validate_exact_plugin_params(&request.params, &[])?;
+            serde_json::to_value(state.plugin_crypto_storage.snapshot(&request.plugin_id)?)
+                .map_err(|error| {
+                    format!("Could not encode the uTools encrypted storage snapshot: {error}")
+                })
+        }
+        "compatibility.utools.dbCryptoStorage.set" => {
+            validate_exact_plugin_params(&request.params, &["key", "value"])?;
+            state.plugin_crypto_storage.set(
+                &request.plugin_id,
+                required_string(&request.params, "key")?,
+                required_value(&request.params, "value")?.clone(),
+            )?;
+            Ok(json!({ "saved": true, "persistent": true, "encrypted": true }))
+        }
+        "compatibility.utools.dbCryptoStorage.remove" => {
+            validate_exact_plugin_params(&request.params, &["key"])?;
+            let removed = state.plugin_crypto_storage.remove(
+                &request.plugin_id,
+                required_string(&request.params, "key")?,
             )?;
             Ok(json!({ "removed": removed }))
         }

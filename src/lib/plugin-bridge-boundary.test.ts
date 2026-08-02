@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PLUGIN_BRIDGE_MAX_IN_FLIGHT,
   PLUGIN_BRIDGE_MAX_DB_JSON_BYTES,
+  PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES,
   PLUGIN_BRIDGE_MAX_IMAGE_DATA_URL_CHARS,
   PLUGIN_BRIDGE_MAX_JSON_BYTES,
   PLUGIN_BRIDGE_MAX_JSON_DEPTH,
@@ -34,6 +35,9 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.snapshot", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.set", { key: "theme", value: "dark" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.dbStorage.remove", { key: "theme" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.snapshot", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.set", { key: "token", value: { secret: true } })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.remove", { key: "token" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.get", { id: "note/1" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.put", { doc: { _id: "note/1", text: "hello" } })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.remove", { target: "note/1" })).ok).toBe(true);
@@ -182,6 +186,7 @@ describe("plugin iframe Bridge boundary", () => {
     expect(isLargePluginBridgeMethod("compatibility.utools.db.bulkDocs")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.allDocs")).toBe(false);
     expect(isLargePluginBridgeMethod("compatibility.utools.db.postAttachment")).toBe(true);
+    expect(isLargePluginBridgeMethod("compatibility.utools.dbCryptoStorage.set")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.input.pasteImage")).toBe(true);
     expect(isLargePluginBridgeMethod("compatibility.utools.window.redirect")).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.db.postAttachment", {
@@ -189,6 +194,27 @@ describe("plugin iframe Bridge boundary", () => {
       dataBase64: "c2FmZQ==",
       contentType: "text/plain",
       extra: true,
+    })).ok).toBe(false);
+  });
+
+  it("reserves the encrypted-storage envelope for an exact bounded set request", () => {
+    const value = "密".repeat(24 * 1024);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.set", {
+      key: "token",
+      value,
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.set", {
+      key: "x".repeat(49),
+      value: true,
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.set", {
+      key: "token",
+      value: "x".repeat(PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES),
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.dbCryptoStorage.set", {
+      key: "token",
+      value: true,
+      extra: false,
     })).ok).toBe(false);
   });
 

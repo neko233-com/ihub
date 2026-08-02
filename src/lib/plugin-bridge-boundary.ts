@@ -20,6 +20,7 @@ export const PLUGIN_BRIDGE_MAX_ATTACHMENT_BASE64_CHARS = Math.ceil(
   PLUGIN_BRIDGE_MAX_ATTACHMENT_BYTES / 3,
 ) * 4;
 export const PLUGIN_BRIDGE_MAX_ATTACHMENT_JSON_BYTES = 43 * 1024 * 1024;
+export const PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES = 256 * 1024;
 export const PLUGIN_BRIDGE_MAX_JSON_DEPTH = 32;
 export const PLUGIN_BRIDGE_MAX_JSON_NODES = 4_096;
 export const PLUGIN_BRIDGE_MAX_DB_JSON_NODES = 65_536;
@@ -49,6 +50,9 @@ const pluginHostMethods = new Set([
   "compatibility.utools.dbStorage.remove",
   "compatibility.utools.dbStorage.set",
   "compatibility.utools.dbStorage.snapshot",
+  "compatibility.utools.dbCryptoStorage.remove",
+  "compatibility.utools.dbCryptoStorage.set",
+  "compatibility.utools.dbCryptoStorage.snapshot",
   "compatibility.utools.features.remove",
   "compatibility.utools.features.set",
   "compatibility.utools.features.snapshot",
@@ -298,6 +302,7 @@ export function validatePluginBridgeCall(
     || method === "compatibility.utools.db.bulkDocs";
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
+  const isCryptoStorageWrite = method === "compatibility.utools.dbCryptoStorage.set";
   const isUtoolsRedirect = method === "compatibility.utools.window.redirect";
   const isUtoolsSimulation = method.startsWith("compatibility.utools.simulate.");
   if (method === "compatibility.utools.screen.capture") {
@@ -372,6 +377,22 @@ export function validatePluginBridgeCall(
       return {
         ok: false,
         error: "uTools postAttachment accepts one bounded ID, MIME type, and 10 MiB attachment.",
+        responseId,
+      };
+    }
+  }
+  if (isCryptoStorageWrite) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    const key = params?.key;
+    if (
+      !params
+      || !hasOnlyKeys(params, new Set(["key", "value"]))
+      || typeof key !== "string"
+      || new TextEncoder().encode(key).byteLength > 48
+    ) {
+      return {
+        ok: false,
+        error: "uTools dbCryptoStorage.set accepts one bounded string key and JSON value.",
         responseId,
       };
     }
@@ -483,6 +504,8 @@ export function validatePluginBridgeCall(
     maxJsonBytes = PLUGIN_BRIDGE_MAX_ATTACHMENT_JSON_BYTES;
   } else if (isDbAllDocs) {
     maxJsonBytes = PLUGIN_BRIDGE_MAX_DB_QUERY_JSON_BYTES;
+  } else if (isCryptoStorageWrite) {
+    maxJsonBytes = PLUGIN_BRIDGE_MAX_CRYPTO_STORAGE_JSON_BYTES;
   }
   const maxJsonNodes = isDbWrite
     ? PLUGIN_BRIDGE_MAX_DB_JSON_NODES
@@ -537,5 +560,6 @@ export function isLargePluginBridgeMethod(method: string): boolean {
     || method === "compatibility.utools.window.redirect"
     || method === "compatibility.utools.db.put"
     || method === "compatibility.utools.db.bulkDocs"
-    || method === "compatibility.utools.db.postAttachment";
+    || method === "compatibility.utools.db.postAttachment"
+    || method === "compatibility.utools.dbCryptoStorage.set";
 }
