@@ -2068,6 +2068,11 @@ function normalizedRedirect(label, value) {{
   if (action.type === "text" && (new TextEncoder().encode(action.payload).byteLength > 49152 || action.payload.includes("\u0000"))) throw new TypeError("uTools redirect text is too large or contains NUL.");
   return {{ label: normalizedLabel, action }};
 }}
+function normalizedSimulationPoint(x, y, optional) {{
+  if (x === undefined && y === undefined && optional) return {{}};
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < -2147483648 || x > 2147483647 || y < -2147483648 || y > 2147483647) return null;
+  return {{ x, y }};
+}}
 function screenPoint(value, label) {{
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y)) throw new TypeError(label + " requires finite x and y coordinates.");
   return {{ x: Math.round(value.x), y: Math.round(value.y) }};
@@ -2625,6 +2630,35 @@ const utools = Object.freeze({{
     void interactionCall("compatibility.utools.input.typeString", {{ value }})
       .catch((error) => console.error("iHub compatibility text input failed", error));
     return true;
+  }},
+  simulateKeyboardTap(key, ...modifiers) {{
+    if (typeof key !== "string" || key.length === 0 || Array.from(key).length > 32 || /[\u0000-\u001f\u007f]/.test(key) || modifiers.length > 4 || modifiers.some((modifier) => typeof modifier !== "string" || !["control", "ctrl", "shift", "option", "alt", "command", "super", "meta"].includes(modifier.trim().toLowerCase()))) return;
+    void call("compatibility.utools.simulate.keyboardTap", {{ key, modifiers }})
+      .catch((error) => console.error("iHub compatibility keyboard simulation failed", error));
+  }},
+  simulateMouseMove(x, y) {{
+    const point = normalizedSimulationPoint(x, y, false);
+    if (!point) return;
+    void call("compatibility.utools.simulate.mouseMove", point)
+      .catch((error) => console.error("iHub compatibility mouse move failed", error));
+  }},
+  simulateMouseClick(x, y) {{
+    const point = normalizedSimulationPoint(x, y, true);
+    if (!point) return;
+    void call("compatibility.utools.simulate.mouseClick", point)
+      .catch((error) => console.error("iHub compatibility mouse click failed", error));
+  }},
+  simulateMouseDoubleClick(x, y) {{
+    const point = normalizedSimulationPoint(x, y, true);
+    if (!point) return;
+    void call("compatibility.utools.simulate.mouseDoubleClick", point)
+      .catch((error) => console.error("iHub compatibility mouse double-click failed", error));
+  }},
+  simulateMouseRightClick(x, y) {{
+    const point = normalizedSimulationPoint(x, y, true);
+    if (!point) return;
+    void call("compatibility.utools.simulate.mouseRightClick", point)
+      .catch((error) => console.error("iHub compatibility mouse right-click failed", error));
   }},
   findInPage(text, options) {{
     if (typeof text !== "string" || text.length === 0 || Array.from(text).length > 512) return;
@@ -3409,6 +3443,16 @@ mod tests {
         assert!(script.contains("compatibility.utools.input.pasteFiles"));
         assert!(script.contains("hideMainWindowTypeString"));
         assert!(script.contains("compatibility.utools.input.typeString"));
+        assert!(script.contains("simulateKeyboardTap(key, ...modifiers)"));
+        assert!(script.contains("compatibility.utools.simulate.keyboardTap"));
+        assert!(script.contains("simulateMouseMove(x, y)"));
+        assert!(script.contains("compatibility.utools.simulate.mouseMove"));
+        assert!(script.contains("simulateMouseClick(x, y)"));
+        assert!(script.contains("compatibility.utools.simulate.mouseClick"));
+        assert!(script.contains("simulateMouseDoubleClick(x, y)"));
+        assert!(script.contains("compatibility.utools.simulate.mouseDoubleClick"));
+        assert!(script.contains("simulateMouseRightClick(x, y)"));
+        assert!(script.contains("compatibility.utools.simulate.mouseRightClick"));
         assert!(script.contains("setSubInput"));
         assert!(script.contains("subInputSelect"));
         assert!(script.contains("compatibility.utools.window.hideMain"));

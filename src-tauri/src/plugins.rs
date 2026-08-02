@@ -4864,6 +4864,9 @@ fn plugin_security_declaration(manifest: &PluginManifest) -> PluginSecurityDecla
         declaration
             .permissions
             .insert("compatibility.utools.getCopyedFiles.visibleBounded".to_owned());
+        declaration
+            .permissions
+            .insert("compatibility.utools.simulation.visibleConfirmed".to_owned());
     }
 
     if let Some(filesystem) = permissions.filesystem.as_ref() {
@@ -5406,6 +5409,9 @@ mod tests {
         assert!(plugin_security_declaration(&manifest)
             .permissions
             .contains("compatibility.utools.getCopyedFiles.visibleBounded"));
+        assert!(plugin_security_declaration(&manifest)
+            .permissions
+            .contains("compatibility.utools.simulation.visibleConfirmed"));
 
         let plugin_id = manifest.id.clone();
         let installed = storage.join(&plugin_id);

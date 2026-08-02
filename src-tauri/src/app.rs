@@ -1415,6 +1415,32 @@ enum UtoolsInputAction {
     TypeString(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UtoolsSimulationAction {
+    KeyboardTap {
+        key: u16,
+        key_label: String,
+        modifiers: Vec<u16>,
+        modifier_labels: Vec<String>,
+    },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    MouseClick {
+        x: i32,
+        y: i32,
+        button: UtoolsMouseButton,
+        double: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UtoolsMouseButton {
+    Left,
+    Right,
+}
+
 /// The plugin-facing projection deliberately strips the cursor coordinates
 /// from the trusted Toolbox result. A plugin receives a color value only;
 /// it never receives a screen position, screenshot, display identity, or
@@ -3687,6 +3713,203 @@ fn confirm_utools_foreground_read(
     dialog.show() == rfd::MessageDialogResult::Yes
 }
 
+#[cfg(target_os = "windows")]
+fn resolve_utools_simulation_action(
+    method: &str,
+    params: &Value,
+) -> Result<UtoolsSimulationAction, String> {
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let snapshot = crate::utools_screen::screen_snapshot()?;
+    let physical_display_bounds = snapshot
+        .metrics
+        .into_iter()
+        .map(|metric| metric.physical_bounds)
+        .collect::<Vec<_>>();
+    let mut cursor = POINT::default();
+    let current_cursor =
+        (unsafe { GetCursorPos(&mut cursor) } != 0).then_some((cursor.x, cursor.y));
+    validate_utools_simulation_action(method, params, &physical_display_bounds, current_cursor)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_utools_simulation_action(
+    _method: &str,
+    _params: &Value,
+) -> Result<UtoolsSimulationAction, String> {
+    Err("uTools input simulation has not been runtime-verified on this platform.".to_owned())
+}
+
+fn utools_simulation_description(action: &UtoolsSimulationAction) -> String {
+    match action {
+        UtoolsSimulationAction::KeyboardTap {
+            key_label,
+            modifier_labels,
+            ..
+        } => {
+            let chord = modifier_labels
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(key_label.as_str()))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            format!("模拟键盘按键：{chord}")
+        }
+        UtoolsSimulationAction::MouseMove { x, y } => {
+            format!("把鼠标指针移动到物理屏幕坐标 ({x}, {y})")
+        }
+        UtoolsSimulationAction::MouseClick {
+            x,
+            y,
+            button,
+            double,
+        } => {
+            let action = match (button, double) {
+                (UtoolsMouseButton::Left, false) => "单击鼠标左键",
+                (UtoolsMouseButton::Left, true) => "双击鼠标左键",
+                (UtoolsMouseButton::Right, false) => "单击鼠标右键",
+                (UtoolsMouseButton::Right, true) => "双击鼠标右键",
+            };
+            format!("在物理屏幕坐标 ({x}, {y}) {action}")
+        }
+    }
+}
+
+fn confirm_utools_simulation(
+    app: &AppHandle,
+    host: &PluginHostState,
+    plugin_id: &str,
+    action: &UtoolsSimulationAction,
+) -> bool {
+    let mut dialog = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("iHub · {plugin_id} 请求模拟输入"))
+        .set_description(format!(
+            "插件请求执行以下系统输入：\n\n{}\n\n该操作会影响当前活动应用。是否允许本次操作？",
+            utools_simulation_description(action)
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let _dialog_guard = NativeDialogGuard::begin(host);
+    dialog.show() == rfd::MessageDialogResult::Yes
+}
+
+#[cfg(target_os = "windows")]
+fn perform_utools_windows_simulation(action: &UtoolsSimulationAction) -> Result<(), String> {
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        },
+        WindowsAndMessaging::SetCursorPos,
+    };
+
+    fn keyboard_input(key: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        let flags = if utools_windows_key_is_extended(key) {
+            flags | KEYEVENTF_EXTENDEDKEY
+        } else {
+            flags
+        };
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(key),
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn send(inputs: &[INPUT], cleanup: &[INPUT]) -> Result<(), String> {
+        let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize == inputs.len() {
+            return Ok(());
+        }
+        if !cleanup.is_empty() {
+            unsafe {
+                let _ = SendInput(cleanup, std::mem::size_of::<INPUT>() as i32);
+            }
+        }
+        Err(format!(
+            "Windows accepted {sent} of {} confirmed uTools simulation events.",
+            inputs.len()
+        ))
+    }
+
+    match action {
+        UtoolsSimulationAction::KeyboardTap { key, modifiers, .. } => {
+            let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+            for modifier in modifiers {
+                inputs.push(keyboard_input(*modifier, KEYBD_EVENT_FLAGS(0)));
+            }
+            inputs.push(keyboard_input(*key, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(keyboard_input(*key, KEYEVENTF_KEYUP));
+            for modifier in modifiers.iter().rev() {
+                inputs.push(keyboard_input(*modifier, KEYEVENTF_KEYUP));
+            }
+            let mut cleanup = vec![keyboard_input(*key, KEYEVENTF_KEYUP)];
+            cleanup.extend(
+                modifiers
+                    .iter()
+                    .rev()
+                    .map(|modifier| keyboard_input(*modifier, KEYEVENTF_KEYUP)),
+            );
+            send(&inputs, &cleanup)
+        }
+        UtoolsSimulationAction::MouseMove { x, y } => unsafe { SetCursorPos(*x, *y) }
+            .map_err(|error| format!("Windows could not move the pointer: {error}")),
+        UtoolsSimulationAction::MouseClick {
+            x,
+            y,
+            button,
+            double,
+        } => {
+            unsafe { SetCursorPos(*x, *y) }.map_err(|error| {
+                format!("Windows could not position the pointer before clicking: {error}")
+            })?;
+            let (down, up) = match button {
+                UtoolsMouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+                UtoolsMouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            };
+            let repeat = if *double { 2 } else { 1 };
+            let mut inputs = Vec::with_capacity(repeat * 2);
+            for _ in 0..repeat {
+                inputs.push(mouse_input(down));
+                inputs.push(mouse_input(up));
+            }
+            send(&inputs, &[mouse_input(up)])
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn perform_utools_windows_simulation(_action: &UtoolsSimulationAction) -> Result<(), String> {
+    Err("uTools input simulation has not been runtime-verified on this platform.".to_owned())
+}
+
 fn decode_utools_clipboard_png_data_url(
     data_url: &str,
 ) -> Result<arboard::ImageData<'static>, String> {
@@ -4467,6 +4690,29 @@ fn plugin_host_call_for_active_lease(
                 app,
                 UtoolsInputAction::TypeString(value.to_owned()),
             )?;
+            Ok(json!({ "accepted": true }))
+        }
+        "compatibility.utools.simulate.keyboardTap"
+        | "compatibility.utools.simulate.mouseMove"
+        | "compatibility.utools.simulate.mouseClick"
+        | "compatibility.utools.simulate.mouseDoubleClick"
+        | "compatibility.utools.simulate.mouseRightClick" => {
+            let action = resolve_utools_simulation_action(&request.method, &request.params)?;
+            if !state.host.admit_plugin_notification(&request.plugin_id) {
+                return Err(format!(
+                    "Interactive uTools simulation prompts are limited to {MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW} every {} seconds.",
+                    PLUGIN_NOTIFICATION_WINDOW.as_secs()
+                ));
+            }
+            if !confirm_utools_simulation(
+                app,
+                &state.host,
+                &request.plugin_id,
+                &action,
+            ) {
+                return Ok(json!({ "accepted": false, "cancelled": true }));
+            }
+            perform_utools_windows_simulation(&action)?;
             Ok(json!({ "accepted": true }))
         }
         "compatibility.utools.window.hideMain" => {
@@ -5386,6 +5632,7 @@ fn ensure_plugin_host_request_is_allowed(
         );
     }
     let is_utools_input = request.method.starts_with("compatibility.utools.input.");
+    let is_utools_simulation = request.method.starts_with("compatibility.utools.simulate.");
     let has_main_push_interaction = !request.surface
         && is_utools_input
         && request
@@ -5414,12 +5661,13 @@ fn ensure_plugin_host_request_is_allowed(
         || request.method == "compatibility.utools.system.readCurrentFolderPath"
         || request.method == "compatibility.utools.system.readCurrentBrowserUrl"
         || request.method == "compatibility.utools.window.redirect"
-        || request.method == "compatibility.utools.clipboard.writeFiles")
+        || request.method == "compatibility.utools.clipboard.writeFiles"
+        || is_utools_simulation)
         && !request.surface
         && !has_main_push_interaction
     {
         return Err(
-            "uTools window, input, and confirmed file-copy methods require the plugin's visible active surface."
+            "uTools window, input, simulation, and confirmed file-copy methods require the plugin's visible active surface."
                 .to_owned(),
         );
     }
@@ -8586,6 +8834,278 @@ fn validate_utools_input_text(
     Ok(value)
 }
 
+fn validate_exact_utools_simulation_params(params: &Value, allowed: &[&str]) -> Result<(), String> {
+    let Some(object) = params.as_object() else {
+        return Err("uTools simulation parameters must be an object.".to_owned());
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("uTools simulation parameters contain an unsupported field.".to_owned());
+    }
+    Ok(())
+}
+
+fn utools_virtual_key(value: &str) -> Option<(u16, bool)> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() == 1 {
+        let byte = normalized.as_bytes()[0];
+        if byte.is_ascii_lowercase() {
+            return Some((u16::from(byte.to_ascii_uppercase()), false));
+        }
+        if byte.is_ascii_digit() {
+            return Some((u16::from(byte), false));
+        }
+        return match byte {
+            b' ' => Some((0x20, false)),
+            b'`' => Some((0xc0, false)),
+            b'~' => Some((0xc0, true)),
+            b'-' => Some((0xbd, false)),
+            b'_' => Some((0xbd, true)),
+            b'=' => Some((0xbb, false)),
+            b'+' => Some((0xbb, true)),
+            b'[' => Some((0xdb, false)),
+            b'{' => Some((0xdb, true)),
+            b']' => Some((0xdd, false)),
+            b'}' => Some((0xdd, true)),
+            b'\\' => Some((0xdc, false)),
+            b'|' => Some((0xdc, true)),
+            b';' => Some((0xba, false)),
+            b':' => Some((0xba, true)),
+            b'\'' => Some((0xde, false)),
+            b'"' => Some((0xde, true)),
+            b',' => Some((0xbc, false)),
+            b'<' => Some((0xbc, true)),
+            b'.' => Some((0xbe, false)),
+            b'>' => Some((0xbe, true)),
+            b'/' => Some((0xbf, false)),
+            b'?' => Some((0xbf, true)),
+            b'!' => Some((b'1'.into(), true)),
+            b'@' => Some((b'2'.into(), true)),
+            b'#' => Some((b'3'.into(), true)),
+            b'$' => Some((b'4'.into(), true)),
+            b'%' => Some((b'5'.into(), true)),
+            b'^' => Some((b'6'.into(), true)),
+            b'&' => Some((b'7'.into(), true)),
+            b'*' => Some((b'8'.into(), true)),
+            b'(' => Some((b'9'.into(), true)),
+            b')' => Some((b'0'.into(), true)),
+            _ => None,
+        };
+    }
+    if let Some(number) = normalized
+        .strip_prefix('f')
+        .and_then(|number| number.parse::<u16>().ok())
+        .filter(|number| (1..=24).contains(number))
+    {
+        return Some((0x70 + number - 1, false));
+    }
+    if let Some(number) = normalized
+        .strip_prefix("numpad")
+        .map(|number| number.trim_start_matches('_'))
+        .and_then(|number| number.parse::<u16>().ok())
+        .filter(|number| *number <= 9)
+    {
+        return Some((0x60 + number, false));
+    }
+    let key = match normalized.as_str() {
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "clear" => 0x0c,
+        "enter" | "return" => 0x0d,
+        "shift" => 0x10,
+        "left_shift" => 0xa0,
+        "right_shift" => 0xa1,
+        "control" | "ctrl" => 0x11,
+        "left_control" | "left_ctrl" => 0xa2,
+        "right_control" | "right_ctrl" => 0xa3,
+        "option" | "alt" => 0x12,
+        "left_alt" | "left_option" => 0xa4,
+        "right_alt" | "right_option" => 0xa5,
+        "pause" => 0x13,
+        "capslock" | "caps_lock" => 0x14,
+        "escape" | "esc" => 0x1b,
+        "space" => 0x20,
+        "pageup" | "page_up" => 0x21,
+        "pagedown" | "page_down" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "printscreen" | "print_screen" => 0x2c,
+        "insert" => 0x2d,
+        "delete" => 0x2e,
+        "command" | "super" | "meta" | "left_command" | "left_super" | "left_meta" => 0x5b,
+        "right_command" | "right_super" | "right_meta" => 0x5c,
+        "menu" | "contextmenu" | "context_menu" => 0x5d,
+        "multiply" => 0x6a,
+        "add" => 0x6b,
+        "subtract" => 0x6d,
+        "decimal" => 0x6e,
+        "divide" => 0x6f,
+        "numlock" | "num_lock" => 0x90,
+        "scrolllock" | "scroll_lock" => 0x91,
+        "browser_back" => 0xa6,
+        "browser_forward" => 0xa7,
+        "browser_refresh" => 0xa8,
+        "browser_stop" => 0xa9,
+        "browser_search" => 0xaa,
+        "browser_favorites" => 0xab,
+        "browser_home" => 0xac,
+        "audio_mute" | "volume_mute" => 0xad,
+        "audio_vol_down" | "volume_down" => 0xae,
+        "audio_vol_up" | "volume_up" => 0xaf,
+        "audio_next" => 0xb0,
+        "audio_prev" | "audio_previous" => 0xb1,
+        "audio_stop" => 0xb2,
+        "audio_play" | "audio_pause" | "audio_play_pause" => 0xb3,
+        _ => return None,
+    };
+    Some((key, false))
+}
+
+fn utools_modifier_key(value: &str) -> Option<(u16, &'static str)> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "control" | "ctrl" => Some((0x11, "Ctrl")),
+        "shift" => Some((0x10, "Shift")),
+        "option" | "alt" => Some((0x12, "Alt")),
+        "command" | "super" | "meta" => Some((0x5b, "Meta")),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn utools_windows_key_is_extended(key: u16) -> bool {
+    matches!(
+        key,
+        0x21..=0x2e
+            | 0x5b
+            | 0x5c
+            | 0x6f
+            | 0x90
+            | 0xa3
+            | 0xa5
+            | 0xa6..=0xb3
+    )
+}
+
+fn point_is_on_physical_display(
+    x: i32,
+    y: i32,
+    bounds: &[crate::utools_screen::ScreenRect],
+) -> bool {
+    bounds.iter().any(|bounds| {
+        let right = i64::from(bounds.x) + i64::from(bounds.width);
+        let bottom = i64::from(bounds.y) + i64::from(bounds.height);
+        i64::from(x) >= i64::from(bounds.x)
+            && i64::from(x) < right
+            && i64::from(y) >= i64::from(bounds.y)
+            && i64::from(y) < bottom
+    })
+}
+
+fn validate_utools_simulation_action(
+    method: &str,
+    params: &Value,
+    physical_display_bounds: &[crate::utools_screen::ScreenRect],
+    current_cursor: Option<(i32, i32)>,
+) -> Result<UtoolsSimulationAction, String> {
+    if method == "compatibility.utools.simulate.keyboardTap" {
+        validate_exact_utools_simulation_params(params, &["key", "modifiers"])?;
+        let key_label = required_string(params, "key")?.trim();
+        if key_label.is_empty()
+            || key_label.chars().count() > 32
+            || key_label.chars().any(char::is_control)
+        {
+            return Err(
+                "uTools simulated key is empty, too long, or contains controls.".to_owned(),
+            );
+        }
+        let (key, implied_shift) = utools_virtual_key(key_label)
+            .ok_or_else(|| "uTools simulated key is not supported on Windows.".to_owned())?;
+        let raw_modifiers = params
+            .get("modifiers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "uTools simulated modifiers must be an array.".to_owned())?;
+        if raw_modifiers.len() > 4 {
+            return Err("uTools keyboard simulation accepts at most four modifiers.".to_owned());
+        }
+        let mut modifiers = Vec::new();
+        let mut modifier_labels = Vec::new();
+        if implied_shift {
+            modifiers.push(0x10);
+            modifier_labels.push("Shift".to_owned());
+        }
+        for modifier in raw_modifiers {
+            let modifier = modifier
+                .as_str()
+                .and_then(utools_modifier_key)
+                .ok_or_else(|| "uTools simulated keyboard modifier is invalid.".to_owned())?;
+            if !modifiers.contains(&modifier.0) {
+                modifiers.push(modifier.0);
+                modifier_labels.push(modifier.1.to_owned());
+            }
+        }
+        if modifiers.contains(&key) {
+            return Err("uTools simulated key must differ from its modifiers.".to_owned());
+        }
+        return Ok(UtoolsSimulationAction::KeyboardTap {
+            key,
+            key_label: key_label.to_owned(),
+            modifiers,
+            modifier_labels,
+        });
+    }
+
+    let is_move = method == "compatibility.utools.simulate.mouseMove";
+    let (button, double) = match method {
+        "compatibility.utools.simulate.mouseClick" => (UtoolsMouseButton::Left, false),
+        "compatibility.utools.simulate.mouseDoubleClick" => (UtoolsMouseButton::Left, true),
+        "compatibility.utools.simulate.mouseRightClick" => (UtoolsMouseButton::Right, false),
+        "compatibility.utools.simulate.mouseMove" => (UtoolsMouseButton::Left, false),
+        _ => return Err("Unsupported uTools simulation method.".to_owned()),
+    };
+    validate_exact_utools_simulation_params(params, &["x", "y"])?;
+    let object = params
+        .as_object()
+        .ok_or_else(|| "uTools simulation parameters must be an object.".to_owned())?;
+    let has_x = object.contains_key("x");
+    let has_y = object.contains_key("y");
+    if has_x != has_y || (is_move && !has_x) {
+        return Err(
+            "uTools mouse simulation requires both integer x and y coordinates.".to_owned(),
+        );
+    }
+    let (x, y) = if has_x {
+        let x = object
+            .get("x")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok());
+        let y = object
+            .get("y")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok());
+        x.zip(y)
+            .ok_or_else(|| "uTools mouse coordinates must be 32-bit integers.".to_owned())?
+    } else {
+        current_cursor
+            .ok_or_else(|| "Windows could not read the current pointer position.".to_owned())?
+    };
+    if !point_is_on_physical_display(x, y, physical_display_bounds) {
+        return Err("uTools mouse coordinates must fall on an active display.".to_owned());
+    }
+    if is_move {
+        Ok(UtoolsSimulationAction::MouseMove { x, y })
+    } else {
+        Ok(UtoolsSimulationAction::MouseClick {
+            x,
+            y,
+            button,
+            double,
+        })
+    }
+}
+
 fn hide_main_for_utools_input(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -9121,14 +9641,15 @@ mod tests {
         validate_utools_dialog_options, validate_utools_dynamic_feature,
         validate_utools_expend_height, validate_utools_input_text,
         validate_utools_redirect_request, validate_utools_shell_local_path,
-        validate_utools_window_request_params, CaptureFocusLease, CursorColorApproval,
-        DetachedPluginFrontendEventRequest, IssuedPluginSearchResults, LauncherFocusGate,
-        LauncherHotkeyToggleGate, LauncherInvocationSource, LauncherVisibilityAction,
-        LauncherVisibilitySnapshot, LauncherWorkArea, NativeDialogGuard, PendingPluginSearch,
-        PendingUtoolsMainPushSelection, PluginBatchRenamePreview, PluginCursorColor,
-        PluginHostRequest, PluginHostState, PluginLauncherContextFileRequest,
-        PluginLauncherContextImageRequest, PluginLauncherContextRequest, PluginLogAdmission,
-        TemporaryPathOpenKind, TemporaryPathOpenStore, LAUNCHER_CONTEXT_TTL,
+        validate_utools_simulation_action, validate_utools_window_request_params,
+        CaptureFocusLease, CursorColorApproval, DetachedPluginFrontendEventRequest,
+        IssuedPluginSearchResults, LauncherFocusGate, LauncherHotkeyToggleGate,
+        LauncherInvocationSource, LauncherVisibilityAction, LauncherVisibilitySnapshot,
+        LauncherWorkArea, NativeDialogGuard, PendingPluginSearch, PendingUtoolsMainPushSelection,
+        PluginBatchRenamePreview, PluginCursorColor, PluginHostRequest, PluginHostState,
+        PluginLauncherContextFileRequest, PluginLauncherContextImageRequest,
+        PluginLauncherContextRequest, PluginLogAdmission, TemporaryPathOpenKind,
+        TemporaryPathOpenStore, UtoolsMouseButton, UtoolsSimulationAction, LAUNCHER_CONTEXT_TTL,
         LAUNCHER_FALLBACK_HOTKEY, LAUNCHER_HOTKEY_TOGGLE_DEBOUNCE, LAUNCHER_INITIAL_BLUR_GRACE,
         LAUNCHER_PRIMARY_HOTKEY, MAX_CAPTURE_FOCUS_LEASES, MAX_PLUGIN_CLIPBOARD_HISTORY_ITEMS,
         MAX_PLUGIN_CLIPBOARD_TEXT_BYTES, MAX_PLUGIN_LOGS_PER_WINDOW,
@@ -9293,6 +9814,125 @@ mod tests {
         assert!(
             validate_utools_input_text(&json!({ "value": "x".repeat(17) }), 64, Some(16)).is_err()
         );
+    }
+
+    #[test]
+    fn utools_simulation_accepts_only_bounded_keys_and_active_display_points() {
+        let bounds = [crate::utools_screen::ScreenRect {
+            x: -1920,
+            y: 0,
+            width: 3840,
+            height: 1080,
+        }];
+        let keyboard = validate_utools_simulation_action(
+            "compatibility.utools.simulate.keyboardTap",
+            &json!({ "key": "a", "modifiers": ["ctrl", "shift", "control"] }),
+            &bounds,
+            Some((50, 60)),
+        )
+        .expect("bounded keyboard chord");
+        assert_eq!(
+            keyboard,
+            UtoolsSimulationAction::KeyboardTap {
+                key: u16::from(b'A'),
+                key_label: "a".to_owned(),
+                modifiers: vec![0x11, 0x10],
+                modifier_labels: vec!["Ctrl".to_owned(), "Shift".to_owned()],
+            }
+        );
+        let question = validate_utools_simulation_action(
+            "compatibility.utools.simulate.keyboardTap",
+            &json!({ "key": "?", "modifiers": [] }),
+            &bounds,
+            None,
+        )
+        .expect("shifted punctuation");
+        assert!(matches!(
+            question,
+            UtoolsSimulationAction::KeyboardTap {
+                key: 0xbf,
+                ref modifiers,
+                ..
+            } if modifiers == &[0x10]
+        ));
+        assert!(matches!(
+            validate_utools_simulation_action(
+                "compatibility.utools.simulate.keyboardTap",
+                &json!({ "key": "numpad_0", "modifiers": [] }),
+                &bounds,
+                None,
+            )
+            .expect("robot-style numpad alias"),
+            UtoolsSimulationAction::KeyboardTap { key: 0x60, .. }
+        ));
+        assert!(matches!(
+            validate_utools_simulation_action(
+                "compatibility.utools.simulate.keyboardTap",
+                &json!({ "key": "audio_play", "modifiers": [] }),
+                &bounds,
+                None,
+            )
+            .expect("Windows media key alias"),
+            UtoolsSimulationAction::KeyboardTap { key: 0xb3, .. }
+        ));
+        assert_eq!(
+            validate_utools_simulation_action(
+                "compatibility.utools.simulate.mouseMove",
+                &json!({ "x": -120, "y": 400 }),
+                &bounds,
+                None,
+            )
+            .expect("negative multi-monitor coordinate"),
+            UtoolsSimulationAction::MouseMove { x: -120, y: 400 }
+        );
+        assert_eq!(
+            validate_utools_simulation_action(
+                "compatibility.utools.simulate.mouseRightClick",
+                &json!({}),
+                &bounds,
+                Some((80, 90)),
+            )
+            .expect("captured current pointer"),
+            UtoolsSimulationAction::MouseClick {
+                x: 80,
+                y: 90,
+                button: UtoolsMouseButton::Right,
+                double: false,
+            }
+        );
+
+        for (method, params) in [
+            (
+                "compatibility.utools.simulate.keyboardTap",
+                json!({ "key": "unknown-key", "modifiers": [] }),
+            ),
+            (
+                "compatibility.utools.simulate.keyboardTap",
+                json!({ "key": "a", "modifiers": ["hyper"] }),
+            ),
+            (
+                "compatibility.utools.simulate.keyboardTap",
+                json!({ "key": "shift", "modifiers": ["shift"] }),
+            ),
+            (
+                "compatibility.utools.simulate.mouseMove",
+                json!({ "x": 10 }),
+            ),
+            (
+                "compatibility.utools.simulate.mouseClick",
+                json!({ "x": 5000, "y": 10 }),
+            ),
+            (
+                "compatibility.utools.simulate.mouseDoubleClick",
+                json!({ "x": 10.5, "y": 20 }),
+            ),
+        ] {
+            assert!(
+                validate_utools_simulation_action(method, &params, &bounds, Some((10, 20)))
+                    .is_err(),
+                "{method} should reject {params}"
+            );
+        }
     }
 
     #[test]

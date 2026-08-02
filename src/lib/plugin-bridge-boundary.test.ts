@@ -86,6 +86,14 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.openPath", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.showItemInFolder", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.shell.trashItem", { path: "C:\\Users\\Tester\\notes.txt" })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.keyboardTap", {
+      key: "a",
+      modifiers: ["ctrl", "shift"],
+    })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseMove", { x: -120, y: 80 })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseClick", {})).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseDoubleClick", { x: 100, y: 200 })).ok).toBe(true);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseRightClick", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.system.readCurrentFolderPath", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.system.readCurrentBrowserUrl", {})).ok).toBe(true);
     expect(validatePluginBridgeCall(call("compatibility.utools.window.setHeight", { height: 300 })).ok).toBe(true);
@@ -136,6 +144,20 @@ describe("plugin iframe Bridge boundary", () => {
     expect(validatePluginBridgeCall(call("log", {
       message: "A".repeat(PLUGIN_BRIDGE_MAX_JSON_BYTES),
     })).ok).toBe(false);
+  });
+
+  it("rejects malformed uTools keyboard and mouse simulation requests", () => {
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.keyboardTap", {
+      key: "enter",
+      modifiers: ["hyper"],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.keyboardTap", {
+      key: "a".repeat(33),
+      modifiers: [],
+    })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseMove", { x: 10 })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseClick", { x: 10, y: 1.5 })).ok).toBe(false);
+    expect(validatePluginBridgeCall(call("compatibility.utools.simulate.mouseDoubleClick", { extra: true })).ok).toBe(false);
   });
 
   it("reserves the large JSON envelope for shape-checked document writes", () => {

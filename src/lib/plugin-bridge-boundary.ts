@@ -64,6 +64,11 @@ const pluginHostMethods = new Set([
   "compatibility.utools.shell.openPath",
   "compatibility.utools.shell.showItemInFolder",
   "compatibility.utools.shell.trashItem",
+  "compatibility.utools.simulate.keyboardTap",
+  "compatibility.utools.simulate.mouseClick",
+  "compatibility.utools.simulate.mouseDoubleClick",
+  "compatibility.utools.simulate.mouseMove",
+  "compatibility.utools.simulate.mouseRightClick",
   "compatibility.utools.system.readCurrentBrowserUrl",
   "compatibility.utools.system.readCurrentFolderPath",
   "compatibility.utools.window.hideMain",
@@ -294,6 +299,7 @@ export function validatePluginBridgeCall(
   const isDbAllDocs = method === "compatibility.utools.db.allDocs";
   const isAttachmentWrite = method === "compatibility.utools.db.postAttachment";
   const isUtoolsRedirect = method === "compatibility.utools.window.redirect";
+  const isUtoolsSimulation = method.startsWith("compatibility.utools.simulate.");
   if (method === "compatibility.utools.screen.capture") {
     const params = isPlainRecord(request.params) ? request.params : null;
     if (!params || !hasOnlyKeys(params, new Set())) {
@@ -415,6 +421,57 @@ export function validatePluginBridgeCall(
         error: "uTools redirect requires one bounded label and text, PNG, or file payload.",
         responseId,
       };
+    }
+  }
+  if (isUtoolsSimulation) {
+    const params = isPlainRecord(request.params) ? request.params : null;
+    if (method === "compatibility.utools.simulate.keyboardTap") {
+      const key = params?.key;
+      const modifiers = params?.modifiers;
+      if (
+        !params
+        || !hasOnlyKeys(params, new Set(["key", "modifiers"]))
+        || typeof key !== "string"
+        || key.length === 0
+        || [...key].length > 32
+        || [...key].some((character) => character < " " || character === "\u007f")
+        || !Array.isArray(modifiers)
+        || modifiers.length > 4
+        || modifiers.some((modifier) => (
+          typeof modifier !== "string"
+          || !["control", "ctrl", "shift", "option", "alt", "command", "super", "meta"]
+            .includes(modifier.trim().toLowerCase())
+        ))
+      ) {
+        return {
+          ok: false,
+          error: "uTools keyboard simulation requires one bounded key and valid modifiers.",
+          responseId,
+        };
+      }
+    } else {
+      const hasX = params ? Object.prototype.hasOwnProperty.call(params, "x") : false;
+      const hasY = params ? Object.prototype.hasOwnProperty.call(params, "y") : false;
+      const requiresPoint = method === "compatibility.utools.simulate.mouseMove";
+      const validCoordinate = (value: unknown) => (
+        typeof value === "number"
+        && Number.isSafeInteger(value)
+        && value >= -2_147_483_648
+        && value <= 2_147_483_647
+      );
+      if (
+        !params
+        || !hasOnlyKeys(params, new Set(["x", "y"]))
+        || hasX !== hasY
+        || (requiresPoint && !hasX)
+        || (hasX && (!validCoordinate(params.x) || !validCoordinate(params.y)))
+      ) {
+        return {
+          ok: false,
+          error: "uTools mouse simulation requires either no point or two 32-bit integer coordinates.",
+          responseId,
+        };
+      }
     }
   }
   let maxJsonBytes = PLUGIN_BRIDGE_MAX_JSON_BYTES;

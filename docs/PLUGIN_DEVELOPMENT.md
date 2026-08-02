@@ -215,7 +215,9 @@ Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDispl
 
 `utools.getCopyedFiles()` 保留官方同步返回形状（包括兼容字段名 `isDiractory`）。它只对当前有效的可见插件 surface 开放；隐藏搜索 runtime 会收到拒绝。Windows 在读取前验证原生 `CF_HDROP` 源不超过 256 KiB，并在读取前后校验剪贴板序列号，随后只返回最多 32 个仍可解析、非重解析点的本地文件或文件夹；不读取文件内容，也不把路径写入历史或日志。剪贴板没有文件、正忙、在校验期间变化或无法证明边界时返回空数组。
 
-这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、键鼠模拟或其他应用窗口枚举；上述有界显示器元数据也不包含窗口、句柄或像素。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
+Windows 上的 `simulateKeyboardTap`、`simulateMouseMove`、`simulateMouseClick`、`simulateMouseDoubleClick` 与 `simulateMouseRightClick` 使用真实 `SendInput/SetCursorPos`，不返回模拟成功。它们只允许当前可见插件 surface 调用，每次执行前由宿主显示插件来源、按键组合或物理屏幕坐标并要求用户确认，与通知共用每插件每 10 秒最多 5 次的限流；隐藏 runtime、屏幕外坐标、非整数坐标、未知按键或修饰键会被拒绝。省略单击坐标时固定使用确认对话框出现前捕获的当前指针位置，避免确认按钮改变操作目标；部分键盘注入失败时宿主会补发按键释放事件，降低修饰键滞留风险。当前仅 Windows 10/11 x64 完成实现，其他平台明确报错。
+
+这不是 Electron/uTools preload 的复刻。iHub 明确不提供 `require`、`fs`、`child_process`、`remote`、任意 preload/BrowserWindow/命令行、未授权本机路径、未经逐次确认的键鼠模拟或其他应用窗口枚举；上述有界显示器元数据也不包含窗口、句柄或像素。依赖这些 API 的旧插件必须迁移到 iHub 的声明式权限、用户选择授权或清单锁定 native worker，不能通过兼容对象绕过。
 
 普通设置会以原子方式写入 iHub app-data 中、按插件 ID 隔离的 JSON 存储，并在重启后保留。`contributes.settings` 中声明 `secret: true` 的键绝不会写入该 JSON：它们只保存在当前 iHub 进程的内存中，重启、禁用、卸载或切换插件源后必须重新输入。这样不会把 API key 等凭据悄悄落盘；需要跨重启保留的凭据应暂时由插件自己的受控原生 worker 管理，直到 iHub 接入系统凭据库。`settings.set()` 的桥接响应包含 `{ saved: true, persistent: boolean }`，其中 secret 键的 `persistent` 为 `false`。
 
