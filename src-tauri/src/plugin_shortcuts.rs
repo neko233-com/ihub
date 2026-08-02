@@ -292,6 +292,7 @@ mod tests {
             name: id.to_owned(),
             version: "1.0.0".to_owned(),
             description: None,
+            compatibility: "ihub".to_owned(),
             icon_src: None,
             source: None,
             commit: None,

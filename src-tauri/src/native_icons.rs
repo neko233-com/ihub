@@ -2003,6 +2003,12 @@ mod tests {
     fn sta_service_extracts_a_real_shell_item_icon() {
         let shell_item = std::env::var_os("IHUB_NATIVE_ICON_TEST_PATH")
             .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("SystemRoot")
+                    .map(PathBuf::from)
+                    .map(|root| root.join("explorer.exe"))
+                    .filter(|path| path.is_file())
+            })
             .unwrap_or_else(|| std::env::current_exe().expect("current executable"));
         let service = NativeIconService::new();
         let pending = service

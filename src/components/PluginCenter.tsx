@@ -78,6 +78,7 @@ import type {
   PluginUninstallResult,
   PluginUpdateCheck as HostPluginUpdateCheck,
   PluginUpdateResult,
+  SelectedDirectoryGrant,
 } from "../lib/types";
 
 type PluginCenterFilter = "all" | "installed" | PluginCatalogCategory;
@@ -1036,13 +1037,13 @@ const pluginCenterStyles = `
   }
 `;
 
-interface GitHubImportSource {
+export interface GitHubImportSource {
   isPlausible: boolean;
   requestedRef?: string;
   hint: string;
 }
 
-function inspectGitHubImportSource(value: string): GitHubImportSource {
+export function inspectGitHubImportSource(value: string): GitHubImportSource {
   const normalized = value.trim();
   if (!normalized) {
     return {
@@ -1357,6 +1358,7 @@ export function PluginCenter({
   const [workspaceProjectsLoaded, setWorkspaceProjectsLoaded] = useState(false);
   const [workspaceProbeError, setWorkspaceProbeError] = useState<string | null>(null);
   const [linkingWorkspacePluginId, setLinkingWorkspacePluginId] = useState<string | null>(null);
+  const [isLinkingLocalPlugin, setIsLinkingLocalPlugin] = useState(false);
   const importSourceAnalysis = useMemo(
     () => inspectGitHubImportSource(importSource),
     [importSource],
@@ -1804,6 +1806,36 @@ export function PluginCenter({
     setIsImportOpen(true);
   };
 
+  const linkLocalPluginDirectory = async () => {
+    setIsActionMenuOpen(false);
+    if (!desktopRuntime) {
+      onToast("本地 iHub / uTools 插件目录只能在桌面版接入。");
+      return;
+    }
+    setIsLinkingLocalPlugin(true);
+    try {
+      const selection = await command<SelectedDirectoryGrant | null>("select_directory");
+      if (!selection) {
+        onToast("已取消接入本地插件。");
+        return;
+      }
+      const plugin = await command<PluginInfo>("link_plugin_from_local", {
+        directoryOpenId: selection.openId,
+      });
+      const nextPlugins = await command<PluginInfo[]>("list_plugins");
+      onPluginsChanged(nextPlugins);
+      setFilter("installed");
+      setSelectedInstalledId(plugin.id);
+      onToast(plugin.compatibility === "utools"
+        ? `已通过 uTools 兼容层接入 ${plugin.name}。`
+        : `已接入本地插件 ${plugin.name}。`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "本地插件接入失败。");
+    } finally {
+      setIsLinkingLocalPlugin(false);
+    }
+  };
+
   const openPluginProjectCreator = () => {
     setIsActionMenuOpen(false);
     const developerEntry = pluginCatalog.find((entry) => entry.builtinTool === "developer");
@@ -1839,7 +1871,7 @@ export function PluginCenter({
       ? `请求 ref：${sourceAnalysis.requestedRef}\n安装会锁定本次解析出的 commit。`
       : "未指定 ref：本次会解析远端 HEAD，并锁定本次解析出的 commit。建议生产发布使用 tag 或完整 commit。";
     const approved = window.confirm(
-      `iHub 将从 GitHub 下载并安装：\n\n${normalized}\n\n${refSummary}\n\n导入不会运行 pnpm/npm、构建脚本或插件 worker。插件前端和原生二进制不在沙箱中运行；请只导入你信任的发布者，并在继续前审阅源码、发行物和权限声明。`,
+      `iHub 将从 GitHub 下载并安装：\n\n${normalized}\n\n${refSummary}\n\n仓库中的 iHub manifest 或公共 uTools plugin.json 会被自动识别。导入不会运行 pnpm/npm、构建脚本或插件 worker。插件前端和原生二进制不在沙箱中运行；请只导入你信任的发布者，并在继续前审阅源码、发行物和权限声明。`,
     );
     if (!approved) {
       onToast("已取消 GitHub 插件导入。");
@@ -2294,7 +2326,17 @@ export function PluginCenter({
                           type="button"
                         >
                           <Download aria-hidden="true" size={11} />
-                          <span>从 GitHub 导入插件</span>
+                          <span>从 GitHub 导入 iHub / uTools 插件</span>
+                        </button>
+                        <button
+                          className="plugin-center__action-menu-item"
+                          disabled={isLinkingLocalPlugin}
+                          onClick={() => void linkLocalPluginDirectory()}
+                          role="menuitem"
+                          type="button"
+                        >
+                          {isLinkingLocalPlugin ? <LoaderCircle className="spin" size={11} /> : <FolderSearch aria-hidden="true" size={11} />}
+                          <span>{isLinkingLocalPlugin ? "正在接入本地插件" : "接入本地 iHub / uTools 插件"}</span>
                         </button>
                         <div className="plugin-center__action-menu-separator" role="separator" />
                         <button
@@ -2332,8 +2374,8 @@ export function PluginCenter({
                         }}
                         transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.14, ease: "easeOut" }}
                       >
-                        <label htmlFor="plugin-center-import">从 GitHub 导入插件</label>
-                        <p>支持 owner/repo@tag、github:owner/repo@tag 与完整仓库链接（可附 #ref）。导入只读取已提交的构建产物，不会安装依赖或执行项目脚本。</p>
+                        <label htmlFor="plugin-center-import">从 GitHub 导入 iHub / uTools 插件</label>
+                        <p>支持 owner/repo@tag、github:owner/repo@tag 与完整仓库链接（可附 #ref）。自动识别 iHub manifest 和公共 uTools plugin.json；只读取已提交的构建产物，不执行项目脚本。</p>
                         <div className="plugin-center__import-field">
                           <input
                             autoCapitalize="none"
@@ -2439,7 +2481,7 @@ export function PluginCenter({
                                       : item.installed.isDevelopmentLink
                                         ? "本地链接"
                                         : "已启用"
-                                }${sourceLockLabel(item.installed) ? ` · ${sourceLockLabel(item.installed)}` : ""}`
+                                }${item.installed.compatibility === "utools" ? " · uTools" : ""}${sourceLockLabel(item.installed) ? ` · ${sourceLockLabel(item.installed)}` : ""}`
                                 : "内置工具"}
                             </small>
                           </span>
@@ -2720,7 +2762,7 @@ export function PluginCenter({
                             <strong>{item.entry.name}</strong>
                             <p>{item.entry.description}</p>
                             <small title={[plugin?.localLinkError ? displayLocalPath(plugin.localLinkError) : null, statusTitle].filter(Boolean).join("\n\n") || undefined}>
-                              {platformNotice?.status ?? statusLabel(item.entry, plugin, workspaceProject, desktopRuntime, workspaceProjectsLoaded)}{item.entry.native && !installed ? " · 原生能力" : ""}{sourceLockLabel(plugin) ? ` · 锁定 ${sourceLockLabel(plugin)}` : ""}{automaticDiscovery ? " · 官方仅自动检查" : ""}{updateLabel ? ` · ${updateLabel}` : ""}
+                              {platformNotice?.status ?? statusLabel(item.entry, plugin, workspaceProject, desktopRuntime, workspaceProjectsLoaded)}{plugin?.compatibility === "utools" ? " · uTools 兼容" : ""}{item.entry.native && !installed ? " · 原生能力" : ""}{sourceLockLabel(plugin) ? ` · 锁定 ${sourceLockLabel(plugin)}` : ""}{automaticDiscovery ? " · 官方仅自动检查" : ""}{updateLabel ? ` · ${updateLabel}` : ""}
                               {plugin?.searchProviders?.length ? ` · 已声明 ${plugin.searchProviders.length} 个搜索提供器` : ""}
                               {shortcutStatus ? ` · ${shortcutStatus.label}` : ""}
                             </small>

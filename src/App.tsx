@@ -675,6 +675,11 @@ function pluginProviderResponseResults(
   }));
 }
 
+function utoolsMainPushProvider(plugin: PluginInfo): EligiblePluginSearchProvider | null {
+  const provider = plugin.searchProviders?.find((candidate) => candidate.id === UTOOLS_MAIN_PUSH_PROVIDER_ID);
+  return provider ? { plugin, provider, query: "" } : null;
+}
+
 const builtinTools: Array<{
   commandId: string;
   keywords?: string[];
@@ -1094,6 +1099,7 @@ export function App() {
   );
   const approvedNativePlugins = useRef(new Set<string>());
   const searchRequestRef = useRef(0);
+  const utoolsContextMainPushRequestRef = useRef(0);
   const homeIconRequestRef = useRef(0);
   const toolboxContextRequestRef = useRef(0);
   const launcherContextDispatchKeyRef = useRef<string | null>(null);
@@ -1136,10 +1142,13 @@ export function App() {
     useState<SpotlightNativeIconPendingBatch | null>(null);
   const [pluginSearchResults, setPluginSearchResults] = useState<SearchResult[]>([]);
   const [utoolsMatcherResults, setUtoolsMatcherResults] = useState<SearchResult[]>([]);
+  const [utoolsMainPushMatcherResults, setUtoolsMainPushMatcherResults] = useState<SearchResult[]>([]);
   const [utoolsContextMatcherResults, setUtoolsContextMatcherResults] = useState<SearchResult[]>([]);
   const [utoolsWindowMatcherResults, setUtoolsWindowMatcherResults] = useState<SearchResult[]>([]);
+  const [utoolsContextMainPushResults, setUtoolsContextMainPushResults] = useState<SearchResult[]>([]);
   const [registeredSearchProviderKeys, setRegisteredSearchProviderKeys] = useState<string[]>([]);
   const [requestedSearchRuntimePluginIds, setRequestedSearchRuntimePluginIds] = useState<string[]>([]);
+  const [requestedContextRuntimePluginIds, setRequestedContextRuntimePluginIds] = useState<string[]>([]);
   const [quickNotes, setQuickNotes] = useState(readLauncherQuickNotes);
   // Browser preview keeps this null forever: clipboard records only come from
   // the desktop command after the user explicitly enables history.
@@ -1320,14 +1329,17 @@ export function App() {
         || (
           Array.isArray(plugin.searchProviders)
           && plugin.searchProviders.length > 0
-          && requestedSearchRuntimePluginIds.includes(plugin.id)
+          && (
+            requestedSearchRuntimePluginIds.includes(plugin.id)
+            || requestedContextRuntimePluginIds.includes(plugin.id)
+          )
         )
       )
       // Exactly one iframe runtime owns a plugin at a time. The visible
       // surface takes over when a provider result or command opens it.
       && plugin.id !== activePlugin?.id,
     ),
-    [activePlugin?.id, plugins, requestedSearchRuntimePluginIds],
+    [activePlugin?.id, plugins, requestedContextRuntimePluginIds, requestedSearchRuntimePluginIds],
   );
 
   // Plugin lifecycle changes are persisted by the native host, then reflected
@@ -1432,10 +1444,11 @@ export function App() {
       utoolsMatcherResults,
       pluginCommandResults(plugins, query),
       pluginSearchResults,
+      utoolsMainPushMatcherResults,
       contentResults,
       searchResults,
     );
-  }, [contentResults, launcherUsage, pluginSearchResults, plugins, query, searchResults, utoolsMatcherResults]);
+  }, [contentResults, launcherUsage, pluginSearchResults, plugins, query, searchResults, utoolsMainPushMatcherResults, utoolsMatcherResults]);
   const spotlightSearchResults = useMemo<SpotlightLauncherItem[]>(
     () => results.map((result) => spotlightItemForSearchResult(
       result,
@@ -1471,10 +1484,11 @@ export function App() {
   const launcherContextActionItems = useMemo<SpotlightLauncherItem[]>(
     () => [
       ...launcherContextActions.map(spotlightItemForContextAction),
+      ...utoolsContextMainPushResults.map((result) => spotlightItemForSearchResult(result)),
       ...utoolsContextMatcherResults.map((result) => spotlightItemForSearchResult(result)),
       ...utoolsWindowMatcherResults.map((result) => spotlightItemForSearchResult(result)),
     ],
-    [launcherContextActions, utoolsContextMatcherResults, utoolsWindowMatcherResults],
+    [launcherContextActions, utoolsContextMainPushResults, utoolsContextMatcherResults, utoolsWindowMatcherResults],
   );
   const launcherContextActionById = useMemo<Map<string, LauncherContextAction>>(
     () => new Map(launcherContextActions.map((action) => [action.id, action] as const)),
@@ -1486,6 +1500,10 @@ export function App() {
         .map((result) => [result.id, result] as const),
     ),
     [utoolsContextMatcherResults, utoolsWindowMatcherResults],
+  );
+  const utoolsContextMainPushById = useMemo(
+    () => new Map(utoolsContextMainPushResults.map((result) => [result.id, result] as const)),
+    [utoolsContextMainPushResults],
   );
   const pluginCenterLauncherContextPreview = useMemo(
     () => pluginCenterLauncherContext
@@ -2051,6 +2069,7 @@ export function App() {
   }, [pastedImage]);
 
   useEffect(() => {
+    utoolsContextMainPushRequestRef.current += 1;
     if (!isDesktop()) {
       setUtoolsContextMatcherResults([]);
       return;
@@ -2063,13 +2082,17 @@ export function App() {
         : null;
     if (!action) {
       setUtoolsContextMatcherResults([]);
+      setUtoolsContextMainPushResults([]);
       return;
     }
     let disposed = false;
     setUtoolsContextMatcherResults([]);
+    setUtoolsContextMainPushResults([]);
     void command<UtoolsContextCommandMatch[]>("match_utools_context_commands", { action })
       .then((matches) => {
-        if (!disposed) setUtoolsContextMatcherResults(utoolsContextMatcherSearchResults(matches));
+        if (!disposed) {
+          setUtoolsContextMatcherResults(utoolsContextMatcherSearchResults(matches));
+        }
       })
       .catch(() => {
         if (!disposed) setUtoolsContextMatcherResults([]);
@@ -2080,15 +2103,20 @@ export function App() {
   }, [pastedFileResults, pastedImageDataUrl, plugins]);
 
   useEffect(() => {
+    utoolsContextMainPushRequestRef.current += 1;
     if (!isDesktop() || surface !== "launcher") {
       setUtoolsWindowMatcherResults([]);
+      setUtoolsContextMainPushResults([]);
       return;
     }
     let disposed = false;
     setUtoolsWindowMatcherResults([]);
+    setUtoolsContextMainPushResults([]);
     void command<UtoolsContextCommandMatch[]>("match_utools_window_commands")
       .then((matches) => {
-        if (!disposed) setUtoolsWindowMatcherResults(utoolsContextMatcherSearchResults(matches));
+        if (!disposed) {
+          setUtoolsWindowMatcherResults(utoolsContextMatcherSearchResults(matches));
+        }
       })
       .catch(() => {
         if (!disposed) setUtoolsWindowMatcherResults([]);
@@ -2097,6 +2125,18 @@ export function App() {
       disposed = true;
     };
   }, [launcherFocusSignal, plugins, surface]);
+
+  useEffect(() => {
+    const next = [...new Set(
+      [...utoolsContextMatcherResults, ...utoolsWindowMatcherResults]
+        .filter((result) => result.utoolsMainPush && result.pluginId)
+        .map((result) => result.pluginId as string),
+    )].slice(0, 12);
+    setRequestedContextRuntimePluginIds((current) =>
+      current.length === next.length && current.every((pluginId, index) => pluginId === next[index])
+        ? current
+        : next);
+  }, [utoolsContextMatcherResults, utoolsWindowMatcherResults]);
 
   const refreshStatus = useCallback(async () => {
     if (!isDesktop()) {
@@ -2445,6 +2485,10 @@ export function App() {
           const next = current.filter((pluginId) => pluginId !== payload.pluginId);
           return next.length === current.length ? current : next;
         });
+        setRequestedContextRuntimePluginIds((current) => {
+          const next = current.filter((pluginId) => pluginId !== payload.pluginId);
+          return next.length === current.length ? current : next;
+        });
       }
     };
     const receiveReadinessEvent = (payload: PluginSearchProviderReadinessEvent) => {
@@ -2534,7 +2578,19 @@ export function App() {
       const next = current.filter((pluginId) => pluginIds.has(pluginId));
       return next.length === current.length ? current : next;
     });
+    setRequestedContextRuntimePluginIds((current) => {
+      const next = current.filter((pluginId) => pluginIds.has(pluginId));
+      return next.length === current.length ? current : next;
+    });
     setPluginSearchResults((current) => {
+      const next = current.filter((result) => !result.pluginId || pluginIds.has(result.pluginId));
+      return next.length === current.length ? current : next;
+    });
+    setUtoolsMainPushMatcherResults((current) => {
+      const next = current.filter((result) => !result.pluginId || pluginIds.has(result.pluginId));
+      return next.length === current.length ? current : next;
+    });
+    setUtoolsContextMainPushResults((current) => {
       const next = current.filter((result) => !result.pluginId || pluginIds.has(result.pluginId));
       return next.length === current.length ? current : next;
     });
@@ -2666,6 +2722,54 @@ export function App() {
     setPluginSearchResults(nextResults);
   }, [plugins, registeredSearchProviders]);
 
+  const requestUtoolsMatcherMainPush = useCallback(async (
+    matches: UtoolsTextCommandMatch[],
+    requestId: number,
+  ) => {
+    const candidates = matches.flatMap((match) => {
+      if (!match.mainPush) return [];
+      const plugin = plugins.find((candidate) => candidate.id === match.pluginId && candidate.enabled !== false);
+      const provider = plugin ? utoolsMainPushProvider(plugin) : null;
+      if (!provider) return [];
+      return [{ match, provider }];
+    }).slice(0, 12);
+    const runtimeIds = [...new Set(candidates.map(({ provider }) => provider.plugin.id))];
+    if (runtimeIds.length > 0) {
+      setRequestedSearchRuntimePluginIds((current) =>
+        [...new Set([...current, ...runtimeIds])].slice(0, 12));
+    }
+    const registered = candidates.filter(({ provider }) =>
+      registeredSearchProviders.has(pluginSearchProviderKey(provider.plugin.id, provider.provider.id)));
+    if (registered.length === 0) {
+      if (requestId === searchRequestRef.current) setUtoolsMainPushMatcherResults([]);
+      return;
+    }
+    const responses = await Promise.allSettled(registered.map(({ match }) =>
+      command<PluginSearchResponse>("query_utools_main_push_action", {
+        request: {
+          pluginId: match.pluginId,
+          commandId: match.commandId,
+          matcherIndex: match.matcherIndex,
+          action: { matcherType: match.matcherType, payload: match.payload },
+          limit: MAX_LAUNCHER_RESULTS_PER_PROVIDER,
+        },
+      })));
+    if (requestId !== searchRequestRef.current) return;
+    const results = responses.flatMap((response, index) => {
+      if (response.status !== "fulfilled") return [];
+      const candidate = registered[index];
+      if (
+        response.value.pluginId !== candidate.provider.plugin.id
+        || response.value.providerId !== UTOOLS_MAIN_PUSH_PROVIDER_ID
+      ) return [];
+      return pluginProviderResponseResults(response.value, candidate.provider).map((result) => ({
+        ...result,
+        id: `${result.id}:matcher:${candidate.match.commandId}:${candidate.match.matcherIndex}`,
+      }));
+    });
+    setUtoolsMainPushMatcherResults(results.slice(0, 12));
+  }, [plugins, registeredSearchProviders]);
+
   const requestSearch = useCallback(async (nextQuery: string, requestId: number) => {
     const nextQuickNotes = readLauncherQuickNotes();
     if (!isDesktop()) {
@@ -2746,10 +2850,12 @@ export function App() {
       // A failed optional history read must not retain stale text in results.
       setClipboardHistory(null);
     }
-    setUtoolsMatcherResults(matcherResponse.status === "fulfilled"
-      ? utoolsTextMatcherSearchResults(matcherResponse.value)
-      : []);
-  }, [requestPluginSearch, showToast]);
+    const matcherMatches = matcherResponse.status === "fulfilled" ? matcherResponse.value : [];
+    setUtoolsMatcherResults(utoolsTextMatcherSearchResults(
+      matcherMatches.filter((match) => !match.mainPush),
+    ));
+    void requestUtoolsMatcherMainPush(matcherMatches, requestId);
+  }, [requestPluginSearch, requestUtoolsMatcherMainPush, showToast]);
 
   useEffect(() => {
     const requestId = searchRequestRef.current + 1;
@@ -2763,6 +2869,7 @@ export function App() {
       setSearchIconPendingBatch(null);
       setPluginSearchResults([]);
       setUtoolsMatcherResults([]);
+      setUtoolsMainPushMatcherResults([]);
       setRequestedSearchRuntimePluginIds((current) => (current.length === 0 ? current : []));
       if (!isDesktop()) {
         setClipboardHistory(null);
@@ -2773,6 +2880,7 @@ export function App() {
     // next keystroke while its bounded provider call is still in flight.
     setPluginSearchResults([]);
     setUtoolsMatcherResults([]);
+    setUtoolsMainPushMatcherResults([]);
     const timer = window.setTimeout(() => {
       void requestSearch(query, requestId);
     }, 55);
@@ -3554,6 +3662,58 @@ export function App() {
       return;
     }
 
+    if (result.utoolsMainPush) {
+      const provider = utoolsMainPushProvider(plugin);
+      if (!provider) {
+        showToast("该 uTools 主搜索推送入口已经变化；未共享任何内容。");
+        return;
+      }
+      const requestId = utoolsContextMainPushRequestRef.current + 1;
+      utoolsContextMainPushRequestRef.current = requestId;
+      setUtoolsContextMainPushResults([]);
+      setRequestedContextRuntimePluginIds((current) =>
+        [...new Set([...current, plugin.id])].slice(0, 12));
+      void (async () => {
+        const providerKey = pluginSearchProviderKey(plugin.id, provider.provider.id);
+        let ready = registeredSearchProviders.has(providerKey);
+        for (let attempt = 0; !ready && attempt < 25; attempt += 1) {
+          if (utoolsContextMainPushRequestRef.current !== requestId) return null;
+          await new Promise((resolve) => window.setTimeout(resolve, 40));
+          const snapshot = await command<RegisteredPluginSearchProvider[]>(
+            "list_registered_plugin_search_providers",
+          ).catch(() => []);
+          ready = snapshot.some((candidate) =>
+            pluginSearchProviderKey(candidate.pluginId, candidate.providerId) === providerKey);
+        }
+        if (!ready) throw new Error("插件的 onMainPush 运行时尚未就绪，请重试。");
+        return command<PluginSearchResponse>("query_utools_main_push_action", {
+          request: {
+            pluginId: plugin.id,
+            commandId: pluginCommand.id,
+            matcherIndex,
+            action: { matcherType, payload },
+            limit: MAX_LAUNCHER_RESULTS_PER_PROVIDER,
+          },
+        });
+      })().then((response) => {
+        if (!response) return;
+        if (utoolsContextMainPushRequestRef.current !== requestId) return;
+        const options = pluginProviderResponseResults(response, provider).map((option) => ({
+          ...option,
+          id: `${option.id}:context:${pluginCommand.id}:${matcherIndex}`,
+        }));
+        setUtoolsContextMainPushResults(options);
+        showToast(options.length > 0
+          ? `“${plugin.name}”返回 ${options.length} 个操作，请选择后按 Enter。`
+          : `“${plugin.name}”没有为当前内容返回可执行操作。`);
+      }).catch((error) => {
+        if (utoolsContextMainPushRequestRef.current === requestId) {
+          showToast(error instanceof Error ? error.message : "无法查询该 uTools 主搜索推送操作。");
+        }
+      });
+      return;
+    }
+
     invalidateLauncherContextHandoff();
     pendingUtoolsContextDispatchRef.current = {
       plugin,
@@ -4277,6 +4437,12 @@ export function App() {
   };
 
   const activateSpotlightItem = (item: SpotlightLauncherItem) => {
+    const utoolsContextMainPush = utoolsContextMainPushById.get(item.id);
+    if (utoolsContextMainPush) {
+      setUtoolsContextMainPushResults([]);
+      void activateResult(utoolsContextMainPush);
+      return;
+    }
     const utoolsContextMatcher = utoolsContextMatcherById.get(item.id);
     if (utoolsContextMatcher) {
       beginUtoolsContextMatcherDispatch(utoolsContextMatcher);

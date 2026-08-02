@@ -2845,6 +2845,49 @@ function clonedMainPushOption(value) {{
   if (option.icon !== undefined && (typeof option.icon !== "string" || Array.from(option.icon).length > 2048 || /[\u0000-\u001f\u007f]/.test(option.icon))) return null;
   return option;
 }}
+function clonedMainPushAction(value) {{
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).length !== 3
+    || typeof value.code !== "string" || !value.code.trim()
+    || Array.from(value.code).length > 160 || /[\u0000-\u001f\u007f]/.test(value.code)
+    || !["text", "regex", "over", "img", "file", "window"].includes(value.type)) return null;
+  const textMatch = ["text", "regex", "over"].includes(value.type)
+    && typeof value.payload === "string" && value.payload.length > 0
+    && new TextEncoder().encode(value.payload).byteLength <= 49152
+    && !value.payload.includes("\u0000");
+  const imageMatch = value.type === "img"
+    && typeof value.payload === "string"
+    && value.payload.startsWith("data:image/png;base64,iVBORw0KGgo")
+    && value.payload.length <= copyImageMaxDataUrlChars;
+  const fileMatch = value.type === "file"
+    && Array.isArray(value.payload)
+    && value.payload.length >= 1
+    && value.payload.length <= 16
+    && value.payload.every((file) => file && typeof file === "object" && !Array.isArray(file)
+      && Object.keys(file).length === 4
+      && typeof file.isFile === "boolean" && typeof file.isDirectory === "boolean"
+      && file.isFile !== file.isDirectory
+      && typeof file.name === "string" && file.name.length >= 1 && file.name.length <= 1024
+      && typeof file.path === "string" && file.path.length >= 1 && file.path.length <= 8192);
+  const window = value.type === "window" && value.payload && typeof value.payload === "object" && !Array.isArray(value.payload)
+    ? value.payload
+    : null;
+  const windowMatch = window
+    && Object.keys(window).length === 10
+    && Number.isSafeInteger(window.id) && window.id > 0
+    && Number.isInteger(window.pid) && window.pid > 0
+    && [window.x, window.y, window.width, window.height].every(Number.isInteger)
+    && window.width > 0 && window.height > 0
+    && typeof window.class === "string" && window.class.length <= 1024
+    && typeof window.title === "string" && window.title.length <= 16384
+    && typeof window.appPath === "string" && window.appPath.length >= 1 && window.appPath.length <= 8192
+    && typeof window.app === "string" && window.app.length >= 1 && window.app.length <= 255;
+  if (!textMatch && !imageMatch && !fileMatch && !windowMatch) return null;
+  try {{
+    const clone = JSON.parse(JSON.stringify(value));
+    return Object.freeze(clone);
+  }} catch {{ return null; }}
+}}
 function ensureMainPushProviderRegistration() {{
   if (typeof mainPushCallback !== "function" || typeof mainPushSelectCallback !== "function" || mainPushProviderState !== "idle") return;
   const available = config.commands.some((command) => command && command.mainPush === true)
@@ -2855,15 +2898,17 @@ function ensureMainPushProviderRegistration() {{
     .then(() => {{ mainPushProviderState = "registered"; }})
     .catch((error) => {{ mainPushProviderState = "idle"; console.error("iHub compatibility main-push registration failed", error); }});
 }}
-function completeMainPushSearch(message) {{
+async function completeMainPushSearch(message) {{
   const requestId = message.payload && message.payload.requestId;
   const query = message.payload && message.payload.query;
   const limit = message.payload && Number.isInteger(message.payload.limit) ? Math.max(1, Math.min(6, message.payload.limit)) : 3;
+  const explicitAction = clonedMainPushAction(message.payload && message.payload.action);
   if (typeof requestId !== "string" || typeof query !== "string" || typeof mainPushCallback !== "function") return;
   try {{
     const results = [];
-    for (const [actionIndex, action] of mainPushFeaturesForQuery(query).entries()) {{
-      const options = mainPushCallback(Object.freeze({{ ...action }}));
+    const actions = explicitAction ? [explicitAction] : mainPushFeaturesForQuery(query).map(clonedMainPushAction).filter(Boolean);
+    for (const [actionIndex, action] of actions.entries()) {{
+      const options = await Promise.resolve(mainPushCallback(action));
       if (!Array.isArray(options)) continue;
       for (const [optionIndex, candidate] of options.entries()) {{
         const option = clonedMainPushOption(candidate);
@@ -2873,7 +2918,9 @@ function completeMainPushSearch(message) {{
           title: option.text,
           ...(option.title ? {{ subtitle: option.title }} : {{}}),
           score: 100 - actionIndex - optionIndex / 100,
-          payload: {{ kind: "utoolsMainPush", action, option }}
+          payload: explicitAction
+            ? {{ kind: "utoolsMainPush", option }}
+            : {{ kind: "utoolsMainPush", action, option }}
         }});
         if (results.length >= limit) break;
       }}
@@ -2892,12 +2939,13 @@ function selectMainPushOption(message) {{
   if (!payload || payload.kind !== "utoolsMainPush" || typeof interactionId !== "string" || typeof mainPushSelectCallback !== "function") return;
   const action = payload.action;
   const option = clonedMainPushOption(payload.option);
-  if (!action || typeof action !== "object" || action.type !== "text" || typeof action.code !== "string" || typeof action.payload !== "string" || !option) return;
+  const projectedAction = clonedMainPushAction(action);
+  if (!projectedAction || !option) return;
   const trackedCalls = [];
   activeMainPushInteractionId = interactionId;
   activeMainPushInteractionCalls = trackedCalls;
   let show = false;
-  try {{ show = mainPushSelectCallback({{ code: action.code, type: "text", payload: action.payload, from: "main", option }}) === true; }}
+  try {{ show = mainPushSelectCallback({{ ...projectedAction, from: "main", option }}) === true; }}
   catch (error) {{ console.error("uTools compatibility main-push selection callback failed", error); }}
   finally {{ activeMainPushInteractionId = null; activeMainPushInteractionCalls = null; }}
   void Promise.allSettled(trackedCalls).then(() => call(
@@ -3162,7 +3210,7 @@ window.addEventListener("message", (event) => {{
     return;
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/search") {{
-    if (message.payload && message.payload.providerId === mainPushProviderId) completeMainPushSearch(message);
+    if (message.payload && message.payload.providerId === mainPushProviderId) void completeMainPushSearch(message);
     return;
   }}
   if (message.name === "ihub://plugin/" + config.pluginId + "/event/search.select") {{
@@ -3179,9 +3227,13 @@ window.addEventListener("message", (event) => {{
   const command = config.commands.find((candidate) => candidate.commandId === commandId)
     || Array.from(dynamicFeatures.values()).find((candidate) => candidate.commandId === commandId);
   if (!command) return;
-  const mainPushAction = message.payload && message.payload.utoolsMainPushAction;
-  if (mainPushAction && typeof mainPushAction === "object" && mainPushAction.code === command.code && mainPushAction.type === "text" && typeof mainPushAction.payload === "string") {{
-    invoke(enterCallbacks, mainPushAction);
+  const rawMainPushAction = message.payload && message.payload.utoolsMainPushAction;
+  const mainPushAction = rawMainPushAction && typeof rawMainPushAction === "object"
+    ? clonedMainPushAction({{ code: rawMainPushAction.code, type: rawMainPushAction.type, payload: rawMainPushAction.payload }})
+    : null;
+  const mainPushOption = clonedMainPushOption(rawMainPushAction && rawMainPushAction.option);
+  if (mainPushAction && mainPushOption && mainPushAction.code === command.code) {{
+    invoke(enterCallbacks, {{ ...mainPushAction, from: "main", option: mainPushOption }});
     return;
   }}
   const matchAction = message.payload && message.payload.utoolsMatchAction;
@@ -4387,6 +4439,10 @@ mod tests {
         assert!(script.contains("stopDesktopCaptureSlot()"));
         assert!(script.contains("onPluginDetach"));
         assert!(script.contains("onMainPush"));
+        assert!(script.contains("async function completeMainPushSearch"));
+        assert!(script.contains("await Promise.resolve(mainPushCallback(action))"));
+        assert!(script.contains("function clonedMainPushAction"));
+        assert!(script.contains("[\"text\", \"regex\", \"over\", \"img\", \"file\", \"window\"]"));
         assert!(script.contains("utoolsMatchAction"));
         assert!(script.contains("onDbPull"));
         assert!(script.contains("utools-main-push"));

@@ -31,6 +31,8 @@ export interface SearchResult {
   utoolsMatcherType?: "regex" | "over" | "img" | "files" | "window" | string;
   utoolsMatcherPayload?: string;
   utoolsMatcherIndex?: number;
+  /** The matched uTools feature must run onMainPush before opening a surface. */
+  utoolsMainPush?: boolean;
 }
 
 /** A host-owned pinned file/folder/application. Its ID is opaque: neither the
@@ -93,6 +95,8 @@ export interface PluginInfo {
   name: string;
   version: string;
   description?: string;
+  /** Manifest contract detected and validated by the native importer. */
+  compatibility?: "ihub" | "utools" | "unknown" | string;
   /** Host-validated PNG data URL; plugin package paths never reach browser code. */
   iconSrc?: string;
   source?: string;

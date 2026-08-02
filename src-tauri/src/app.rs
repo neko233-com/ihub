@@ -1442,6 +1442,10 @@ struct IssuedPluginSearchResults {
     plugin_id: String,
     provider_id: String,
     results: Vec<PluginSearchResult>,
+    /// Matcher main-push actions can contain a multi-megabyte PNG. Keep one
+    /// host-owned copy per query instead of repeating or exposing it in every
+    /// launcher result payload.
+    utools_action: Option<Value>,
     issued_at: Instant,
 }
 
@@ -2036,6 +2040,8 @@ pub struct UtoolsTextCommandMatch {
     command_id: String,
     label: String,
     matcher_type: String,
+    matcher_index: usize,
+    main_push: bool,
     payload: String,
 }
 
@@ -2089,13 +2095,21 @@ pub fn match_utools_text_commands(
     let mut matches = Vec::new();
     for plugin in plugins.into_iter().filter(|plugin| plugin.enabled) {
         for command in plugin.commands {
-            for matcher in command.utools_text_matchers {
+            for (matcher_index, matcher) in command.utools_text_matchers.into_iter().enumerate() {
                 if utools_text_matcher_accepts(&matcher, &query, character_count)? {
+                    let main_push = resolve_utools_main_push_feature_for_command(
+                        &state,
+                        &plugin.id,
+                        &command.id,
+                    )
+                    .is_ok();
                     matches.push(UtoolsTextCommandMatch {
                         plugin_id: plugin.id.clone(),
                         command_id: command.id.clone(),
                         label: matcher.label,
                         matcher_type: matcher.matcher_type,
+                        matcher_index,
+                        main_push,
                         payload: query.clone(),
                     });
                     if matches.len() >= 12 {
@@ -2123,6 +2137,7 @@ pub struct UtoolsContextCommandMatch {
     label: String,
     matcher_type: String,
     matcher_index: usize,
+    main_push: bool,
 }
 
 #[derive(Debug)]
@@ -2309,12 +2324,19 @@ pub fn match_utools_context_commands(
         for command in plugin.commands {
             for (matcher_index, matcher) in command.utools_text_matchers.iter().enumerate() {
                 if utools_context_matcher_accepts(matcher, &action, files.as_deref())? {
+                    let main_push = resolve_utools_main_push_feature_for_command(
+                        &state,
+                        &plugin.id,
+                        &command.id,
+                    )
+                    .is_ok();
                     matches.push(UtoolsContextCommandMatch {
                         plugin_id: plugin.id.clone(),
                         command_id: command.id.clone(),
                         label: matcher.label.clone(),
                         matcher_type: matcher.matcher_type.clone(),
                         matcher_index,
+                        main_push,
                     });
                     if matches.len() >= 12 {
                         return Ok(matches);
@@ -2344,12 +2366,19 @@ pub fn match_utools_window_commands(
         for command in plugin.commands {
             for (matcher_index, matcher) in command.utools_text_matchers.iter().enumerate() {
                 if utools_window_matcher_accepts(matcher, &window)? {
+                    let main_push = resolve_utools_main_push_feature_for_command(
+                        &state,
+                        &plugin.id,
+                        &command.id,
+                    )
+                    .is_ok();
                     matches.push(UtoolsContextCommandMatch {
                         plugin_id: plugin.id.clone(),
                         command_id: command.id.clone(),
                         label: matcher.label.clone(),
                         matcher_type: "window".to_owned(),
                         matcher_index,
+                        main_push,
                     });
                     if matches.len() >= 12 {
                         return Ok(matches);
@@ -9314,7 +9343,7 @@ fn resolve_issued_plugin_search_selection(
     if search.plugin_id != plugin_id || search.provider_id != provider_id {
         return Err("This plugin search result belongs to another provider.".to_owned());
     }
-    let payload = search
+    let mut payload = search
         .results
         .iter()
         .find(|result| result.id == result_id)
@@ -9322,6 +9351,19 @@ fn resolve_issued_plugin_search_selection(
         .ok_or_else(|| {
             "This plugin search result no longer exists in its issued response.".to_owned()
         })?;
+    if let Some(action) = search.utools_action.as_ref() {
+        let payload_object = payload
+            .as_object_mut()
+            .filter(|payload| {
+                payload.len() == 2
+                    && payload.get("kind").and_then(Value::as_str) == Some("utoolsMainPush")
+                    && payload.get("option").is_some_and(Value::is_object)
+            })
+            .ok_or_else(|| {
+                "This uTools matcher result lost its host-owned action binding.".to_owned()
+            })?;
+        payload_object.insert("action".to_owned(), action.clone());
+    }
     // Selection is one-shot. Removing the snapshot while the same mutex is
     // held prevents two concurrent launcher activations from delivering the
     // same plugin result twice.
@@ -9616,12 +9658,49 @@ pub async fn query_plugin_search(
     context: Option<Value>,
     state: State<'_, AppState>,
 ) -> Result<PluginSearchResponse, String> {
+    query_plugin_search_inner(
+        &app,
+        &state,
+        PluginSearchQuery {
+            plugin_id,
+            provider_id,
+            query,
+            limit,
+            context,
+            utools_action: None,
+        },
+    )
+    .await
+}
+
+struct PluginSearchQuery {
+    plugin_id: String,
+    provider_id: String,
+    query: String,
+    limit: Option<usize>,
+    context: Option<Value>,
+    utools_action: Option<Value>,
+}
+
+async fn query_plugin_search_inner(
+    app: &AppHandle,
+    state: &AppState,
+    request: PluginSearchQuery,
+) -> Result<PluginSearchResponse, String> {
+    let PluginSearchQuery {
+        plugin_id,
+        provider_id,
+        query,
+        limit,
+        context,
+        utools_action,
+    } = request;
     if !is_plugin_id(&plugin_id) || !is_plugin_id(&provider_id) {
         return Err("Invalid plugin or search provider ID.".to_owned());
     }
     state.plugins.ensure_plugin_enabled(&plugin_id)?;
     let query = query.trim().to_owned();
-    if query.is_empty() {
+    if query.is_empty() && utools_action.is_none() {
         return Ok(PluginSearchResponse {
             request_id: next_request_id(),
             plugin_id,
@@ -9641,12 +9720,13 @@ pub async fn query_plugin_search(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains_key(&host_key(&plugin_id, &provider_id))
     {
-        emit_plugin_search_providers_changed(&app, &plugin_id, Some(&provider_id), false);
+        emit_plugin_search_providers_changed(app, &plugin_id, Some(&provider_id), false);
         return Err(format!(
             "Plugin search provider '{plugin_id}/{provider_id}' is not registered."
         ));
     }
     let request_id = next_request_id();
+    let issued_utools_action = utools_action.clone();
     let max_results = limit.unwrap_or(3).clamp(1, MAX_PLUGIN_SEARCH_RESULTS);
     let (response_sender, response_receiver) = mpsc::sync_channel(1);
     {
@@ -9671,8 +9751,8 @@ pub async fn query_plugin_search(
 
     let event_name = format!("ihub://plugin/{plugin_id}/search");
     if let Err(error) = emit_plugin_event_to_owner(
-        &app,
-        &state,
+        app,
+        state,
         &plugin_id,
         &event_name,
         json!({
@@ -9681,6 +9761,7 @@ pub async fn query_plugin_search(
             "query": query,
             "limit": max_results,
             "context": context,
+            "action": utools_action,
         }),
     ) {
         state
@@ -9720,6 +9801,24 @@ pub async fn query_plugin_search(
         }
     };
 
+    if issued_utools_action.is_some()
+        && results.iter().any(|result| {
+            !result
+                .payload
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|payload| {
+                    payload.len() == 2
+                        && payload.get("kind").and_then(Value::as_str) == Some("utoolsMainPush")
+                        && payload.get("option").is_some_and(Value::is_object)
+                })
+        })
+    {
+        return Err(
+            "uTools matcher main-push result lost its host-owned action binding.".to_owned(),
+        );
+    }
+
     {
         let now = Instant::now();
         let mut issued = state
@@ -9734,6 +9833,7 @@ pub async fn query_plugin_search(
                 plugin_id: plugin_id.clone(),
                 provider_id: provider_id.clone(),
                 results: results.clone(),
+                utools_action: issued_utools_action,
                 issued_at: now,
             },
         );
@@ -9748,6 +9848,176 @@ pub async fn query_plugin_search(
         provider_id,
         results,
     })
+}
+
+fn resolve_utools_main_push_feature_for_command(
+    state: &AppState,
+    plugin_id: &str,
+    command_id: &str,
+) -> Result<(String, Vec<crate::models::UtoolsTextMatcherInfo>), String> {
+    state.plugins.ensure_plugin_enabled(plugin_id)?;
+    let bundle = state.plugins.frontend_asset_bundle(plugin_id)?;
+    let config = bundle
+        .utools_compat
+        .ok_or_else(|| "Main-push matching requires a verified uTools package.".to_owned())?;
+    if let Some(command) = config
+        .commands
+        .into_iter()
+        .find(|command| command.main_push && command.command_id == command_id)
+    {
+        return Ok((command.code, command.text_matchers));
+    }
+    let feature = utools_dynamic_features(&state.plugin_settings, plugin_id)
+        .into_iter()
+        .find(|feature| {
+            feature.main_push == Some(true)
+                && utools_dynamic_feature_matches_platform(feature)
+                && utools_dynamic_feature_command_id(&feature.code) == command_id
+        })
+        .ok_or_else(|| {
+            "The selected uTools command is not a current main-push feature.".to_owned()
+        })?;
+    let matchers = feature
+        .cmds
+        .iter()
+        .filter(|value| value.is_object())
+        .map(project_utools_matcher_value)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok((feature.code, matchers))
+}
+
+fn build_utools_main_push_matcher_action(
+    state: &AppState,
+    plugin_id: &str,
+    command_id: &str,
+    matcher_index: usize,
+    request: UtoolsContextMatchRequest,
+) -> Result<Value, String> {
+    let (code, matchers) =
+        resolve_utools_main_push_feature_for_command(state, plugin_id, command_id)?;
+    let matcher = matchers
+        .get(matcher_index)
+        .ok_or_else(|| "The selected uTools main-push matcher no longer exists.".to_owned())?;
+    if matcher.matcher_type != request.matcher_type {
+        return Err("The selected uTools main-push matcher type changed.".to_owned());
+    }
+
+    match request.matcher_type.as_str() {
+        "regex" | "over" => {
+            let payload = request
+                .payload
+                .as_str()
+                .filter(|payload| {
+                    !payload.is_empty()
+                        && payload.len() <= 48 * 1024
+                        && payload.chars().count() <= 10_000
+                        && !payload.contains('\0')
+                })
+                .ok_or_else(|| "uTools text main-push payload is invalid.".to_owned())?;
+            if !utools_text_matcher_accepts(matcher, payload, payload.chars().count())? {
+                return Err("The text no longer matches this uTools main-push command.".to_owned());
+            }
+            Ok(json!({ "code": code, "type": request.matcher_type, "payload": payload }))
+        }
+        "img" => {
+            if !utools_context_matcher_accepts(matcher, &request, None)? {
+                return Err("The image no longer matches this uTools main-push command.".to_owned());
+            }
+            Ok(json!({
+                "code": code,
+                "type": "img",
+                "payload": validate_utools_context_image(&request.payload)?,
+            }))
+        }
+        "files" => {
+            let files = prepare_utools_context_files(&request.payload)?;
+            if !utools_context_matcher_accepts(matcher, &request, Some(&files))? {
+                return Err("The files no longer match this uTools main-push command.".to_owned());
+            }
+            Ok(json!({
+                "code": code,
+                "type": "file",
+                "payload": files.iter().map(|file| json!({
+                    "isFile": file.prepared.kind() == LocalOpenKind::File,
+                    "isDirectory": file.prepared.kind() == LocalOpenKind::Folder,
+                    "name": file.name,
+                    "path": renderer_display_path(file.prepared.path()),
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        "window" => {
+            if !request.payload.is_null() {
+                return Err("uTools window main-push accepts no renderer payload.".to_owned());
+            }
+            let window =
+                crate::utools_foreground::read_window_payload(state.previous_foreground()?)?;
+            if !utools_window_matcher_accepts(matcher, &window)? {
+                return Err(
+                    "The preceding window no longer matches this uTools command.".to_owned(),
+                );
+            }
+            Ok(json!({ "code": code, "type": "window", "payload": window }))
+        }
+        _ => Err("Unsupported uTools main-push matcher type.".to_owned()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UtoolsMainPushActionQuery {
+    plugin_id: String,
+    command_id: String,
+    matcher_index: usize,
+    action: UtoolsContextMatchRequest,
+    limit: Option<usize>,
+}
+
+#[tauri::command]
+pub async fn query_utools_main_push_action(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    request: UtoolsMainPushActionQuery,
+    state: State<'_, AppState>,
+) -> Result<PluginSearchResponse, String> {
+    if window.label() != "main" {
+        return Err(
+            "Only the trusted main iHub surface can query uTools main-push matchers.".to_owned(),
+        );
+    }
+    let UtoolsMainPushActionQuery {
+        plugin_id,
+        command_id,
+        matcher_index,
+        action: matcher_action,
+        limit,
+    } = request;
+    let action = build_utools_main_push_matcher_action(
+        &state,
+        &plugin_id,
+        &command_id,
+        matcher_index,
+        matcher_action,
+    )?;
+    query_plugin_search_inner(
+        &app,
+        &state,
+        PluginSearchQuery {
+            plugin_id,
+            provider_id: UTOOLS_MAIN_PUSH_PROVIDER_ID.to_owned(),
+            query: String::new(),
+            limit,
+            context: Some(json!({
+                "source": "launcher",
+                "matcherCommandId": command_id,
+                "matcherIndex": matcher_index,
+            })),
+            utools_action: Some(action),
+        },
+    )
+    .await
 }
 
 fn normalize_utools_main_push_selection(value: &Value) -> Result<(String, Value, Value), String> {
@@ -9765,10 +10035,8 @@ fn normalize_utools_main_push_selection(value: &Value) -> Result<(String, Value,
         .get("action")
         .and_then(Value::as_object)
         .ok_or_else(|| "uTools main-push action must be an object.".to_owned())?;
-    if action.len() != 3 || action.get("type").and_then(Value::as_str) != Some("text") {
-        return Err(
-            "This iHub compatibility stage accepts only bounded text main-push actions.".to_owned(),
-        );
+    if action.len() != 3 {
+        return Err("uTools main-push action contains unexpected fields.".to_owned());
     }
     let code = action
         .get("code")
@@ -9779,15 +10047,135 @@ fn normalize_utools_main_push_selection(value: &Value) -> Result<(String, Value,
         })
         .ok_or_else(|| "uTools main-push action code is invalid.".to_owned())?
         .to_owned();
+    let action_type = action
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|action_type| {
+            matches!(
+                *action_type,
+                "text" | "regex" | "over" | "img" | "file" | "window"
+            )
+        })
+        .ok_or_else(|| "uTools main-push action type is invalid.".to_owned())?;
     let payload = action
         .get("payload")
-        .and_then(Value::as_str)
-        .filter(|payload| {
-            !payload.is_empty()
-                && payload.len() <= MAX_PLUGIN_SEARCH_QUERY_BYTES
-                && !payload.contains('\0')
-        })
-        .ok_or_else(|| "uTools main-push text payload is invalid.".to_owned())?;
+        .ok_or_else(|| "uTools main-push action payload is missing.".to_owned())?;
+    match action_type {
+        "text" | "regex" | "over" => {
+            let text = payload
+                .as_str()
+                .filter(|text| {
+                    !text.is_empty()
+                        && text.len() <= 48 * 1024
+                        && text.chars().count() <= 10_000
+                        && !text.contains('\0')
+                })
+                .ok_or_else(|| "uTools main-push text payload is invalid.".to_owned())?;
+            if text
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+            {
+                return Err(
+                    "uTools main-push text payload contains unsupported controls.".to_owned(),
+                );
+            }
+        }
+        "img" => {
+            let image = payload.as_str().ok_or_else(|| {
+                "uTools main-push image payload must be a PNG data URL.".to_owned()
+            })?;
+            let _ = decode_utools_clipboard_png_data_url(image)?;
+        }
+        "file" => {
+            let files = payload
+                .as_array()
+                .filter(|files| !files.is_empty() && files.len() <= MAX_UTOOLS_COPY_FILE_ITEMS)
+                .ok_or_else(|| "uTools main-push file payload is invalid.".to_owned())?;
+            let mut seen = HashSet::new();
+            for file in files {
+                let file = file
+                    .as_object()
+                    .filter(|file| file.len() == 4)
+                    .ok_or_else(|| "uTools main-push file item is invalid.".to_owned())?;
+                let is_file = file.get("isFile").and_then(Value::as_bool);
+                let is_directory = file.get("isDirectory").and_then(Value::as_bool);
+                if !matches!(
+                    (is_file, is_directory),
+                    (Some(true), Some(false)) | (Some(false), Some(true))
+                ) {
+                    return Err("uTools main-push file item kind is invalid.".to_owned());
+                }
+                let name = file
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name.chars().count() <= 1_024
+                            && !name.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| "uTools main-push file item name is invalid.".to_owned())?;
+                let path = file
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|path| {
+                        !path.is_empty()
+                            && path.chars().count() <= MAX_UTOOLS_COPY_FILE_PATH_CHARS
+                            && !path.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| "uTools main-push file item path is invalid.".to_owned())?;
+                if !Path::new(path).is_absolute()
+                    || !seen.insert(path)
+                    || Path::new(path).file_name().and_then(|value| value.to_str()) != Some(name)
+                {
+                    return Err("uTools main-push file item identity is invalid.".to_owned());
+                }
+            }
+        }
+        "window" => {
+            let window = payload
+                .as_object()
+                .filter(|window| window.len() == 10)
+                .ok_or_else(|| "uTools main-push window payload is invalid.".to_owned())?;
+            for field in ["id", "pid", "x", "y", "width", "height"] {
+                if window.get(field).and_then(Value::as_i64).is_none()
+                    && window.get(field).and_then(Value::as_u64).is_none()
+                {
+                    return Err(format!("uTools main-push window {field} is invalid."));
+                }
+            }
+            if window
+                .get("width")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                <= 0
+                || window
+                    .get("height")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    <= 0
+            {
+                return Err("uTools main-push window dimensions are invalid.".to_owned());
+            }
+            for (field, maximum) in [
+                ("class", 1_024_usize),
+                ("title", 16_384),
+                ("appPath", 8_192),
+                ("app", 255),
+            ] {
+                let text = window
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|text| {
+                        text.chars().count() <= maximum && !text.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| format!("uTools main-push window {field} is invalid."))?;
+                if matches!(field, "appPath" | "app") && text.is_empty() {
+                    return Err(format!("uTools main-push window {field} is empty."));
+                }
+            }
+        }
+        _ => unreachable!("main-push action type was validated above"),
+    }
     let option = object
         .get("option")
         .and_then(Value::as_object)
@@ -9812,8 +10200,8 @@ fn normalize_utools_main_push_selection(value: &Value) -> Result<(String, Value,
     }
     let mut enter_action = serde_json::Map::new();
     enter_action.insert("code".to_owned(), Value::String(code.clone()));
-    enter_action.insert("type".to_owned(), Value::String("text".to_owned()));
-    enter_action.insert("payload".to_owned(), Value::String(payload.to_owned()));
+    enter_action.insert("type".to_owned(), Value::String(action_type.to_owned()));
+    enter_action.insert("payload".to_owned(), payload.clone());
     enter_action.insert("from".to_owned(), Value::String("main".to_owned()));
     enter_action.insert("option".to_owned(), Value::Object(option.clone()));
     Ok((
@@ -11710,6 +12098,7 @@ pub fn run() {
             invoke_utools_tool,
             cancel_utools_tool,
             query_plugin_search,
+            query_utools_main_push_action,
             select_utools_main_push_result
         ])
         .run(tauri::generate_context!())
@@ -13392,6 +13781,7 @@ mod tests {
         MAX_PLUGIN_NOTIFICATIONS_PER_WINDOW, MAX_PLUGIN_NOTIFICATION_BODY_CHARS,
         MAX_PLUGIN_SEARCH_PAYLOAD_BYTES, MAX_UTOOLS_COPY_IMAGE_SOURCE_BYTES, PLUGIN_LOG_WINDOW,
         PLUGIN_NOTIFICATION_WINDOW, PLUGIN_SEARCH_SELECTION_TTL, TEMPORARY_PATH_OPEN_TTL,
+        UTOOLS_MAIN_PUSH_PROVIDER_ID,
     };
 
     #[test]
@@ -14337,7 +14727,7 @@ mod tests {
     }
 
     #[test]
-    fn utools_main_push_selection_accepts_only_bounded_text_options() {
+    fn utools_main_push_selection_preserves_bounded_matcher_actions_and_options() {
         let (code, action, option) = normalize_utools_main_push_selection(&json!({
             "kind": "utoolsMainPush",
             "action": { "code": "translate", "type": "text", "payload": "hello" },
@@ -14348,6 +14738,15 @@ mod tests {
         assert_eq!(action["from"], "main");
         assert_eq!(action["option"]["language"], "zh");
         assert_eq!(option["text"], "翻译 hello");
+
+        let (_, matcher_action, _) = normalize_utools_main_push_selection(&json!({
+            "kind": "utoolsMainPush",
+            "action": { "code": "url", "type": "regex", "payload": "https://example.com" },
+            "option": { "text": "打开链接" }
+        }))
+        .expect("a host-issued regex option should remain selectable");
+        assert_eq!(matcher_action["type"], "regex");
+        assert_eq!(matcher_action["payload"], "https://example.com");
 
         for invalid in [
             json!({
@@ -14519,6 +14918,7 @@ mod tests {
                         score: 42.0,
                         payload: Some(json!({ "reviewed": true, "path": "opaque-result" })),
                     }],
+                    utools_action: None,
                     issued_at,
                 },
             );
@@ -14593,6 +14993,7 @@ mod tests {
                         score: 1.0,
                         payload: None,
                     }],
+                    utools_action: None,
                     issued_at: now
                         .checked_sub(PLUGIN_SEARCH_SELECTION_TTL + Duration::from_millis(1))
                         .expect("test instant supports a short subtraction"),
@@ -14613,6 +15014,51 @@ mod tests {
             .lock()
             .expect("issued search lock")
             .contains_key("expired-search-request"));
+    }
+
+    #[test]
+    fn matcher_main_push_selection_injects_one_host_owned_action() {
+        let host = PluginHostState::default();
+        let now = Instant::now();
+        host.issued_search_results
+            .lock()
+            .expect("issued search lock")
+            .insert(
+                "matcher-main-push-request".to_owned(),
+                IssuedPluginSearchResults {
+                    plugin_id: "utools-owner".to_owned(),
+                    provider_id: UTOOLS_MAIN_PUSH_PROVIDER_ID.to_owned(),
+                    results: vec![PluginSearchResult {
+                        id: "option-1".to_owned(),
+                        title: "打开链接".to_owned(),
+                        subtitle: None,
+                        score: 100.0,
+                        payload: Some(json!({
+                            "kind": "utoolsMainPush",
+                            "option": { "text": "打开链接" },
+                        })),
+                    }],
+                    utools_action: Some(json!({
+                        "code": "open-url",
+                        "type": "regex",
+                        "payload": "https://example.com",
+                    })),
+                    issued_at: now,
+                },
+            );
+
+        let selected = resolve_issued_plugin_search_selection(
+            &host,
+            "utools-owner",
+            UTOOLS_MAIN_PUSH_PROVIDER_ID,
+            "matcher-main-push-request",
+            "option-1",
+            now,
+        )
+        .expect("the exact issued matcher option should resolve");
+        assert_eq!(selected["action"]["type"], "regex");
+        assert_eq!(selected["action"]["payload"], "https://example.com");
+        assert_eq!(selected["option"]["text"], "打开链接");
     }
 
     #[test]

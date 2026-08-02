@@ -237,10 +237,10 @@
       "source": {
         "type": "git",
         "url": "https://github.com/neko233-com/ihub-plugin-window-manager",
-        "defaultRef": "v1.0.2",
+        "defaultRef": "v1.0.3",
         "manifest": "plugin.json"
       },
-      "channels": { "stable": "v1.0.2" },
+      "channels": { "stable": "v1.0.3" },
       "supportedTargets": ["windows-x86_64", "windows-aarch64", "darwin-x86_64", "darwin-aarch64"],
       "capabilities": ["windowManagement"],
       "status": "available"

@@ -294,6 +294,10 @@ pub struct PluginInfo {
     pub name: String,
     pub version: String,
     pub description: Option<String>,
+    /// Host-detected manifest contract. `utools` means a public uTools
+    /// `plugin.json` was projected through the compatibility runtime rather
+    /// than treated as an iHub-native package.
+    pub compatibility: String,
     /// Host-decoded, normalized plugin logo. No package path or source bytes
     /// cross the IPC boundary.
     #[serde(skip_serializing_if = "Option::is_none")]

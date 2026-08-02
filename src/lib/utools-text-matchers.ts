@@ -5,6 +5,8 @@ export interface UtoolsTextCommandMatch {
   commandId: string;
   label: string;
   matcherType: "regex" | "over" | string;
+  matcherIndex: number;
+  mainPush: boolean;
   payload: string;
 }
 
@@ -20,6 +22,8 @@ export function utoolsTextMatcherSearchResults(
     pluginId: match.pluginId,
     commandId: match.commandId,
     utoolsMatcherType: match.matcherType,
+    utoolsMatcherIndex: match.matcherIndex,
     utoolsMatcherPayload: match.payload,
+    utoolsMainPush: match.mainPush,
   }));
 }

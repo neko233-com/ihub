@@ -2931,6 +2931,7 @@ impl PluginManager {
                 description: link.description.clone().or_else(|| {
                     Some("本地开发链接已失效；解除链接后可重新安装此插件。".to_owned())
                 }),
+                compatibility: "unknown".to_owned(),
                 icon_src: None,
                 source: Some(format!("local:{}", link.canonical_path)),
                 commit: None,
@@ -3094,11 +3095,18 @@ impl PluginManager {
             .collect::<Vec<_>>();
         let plugin_id = manifest.id.clone();
         let tool_count = manifest.utools_tools.len();
+        let compatibility = if manifest.compatibility.is_utools() {
+            "utools"
+        } else {
+            "ihub"
+        }
+        .to_owned();
         Ok(PluginInfo {
             id: plugin_id.clone(),
             name: manifest.name,
             version: manifest.version,
             description: manifest.description,
+            compatibility,
             icon_src,
             source: source.as_ref().map(|record| record.source.clone()),
             commit: source
@@ -6589,6 +6597,52 @@ mod tests {
         (source, remote_parent, expected_commit)
     }
 
+    fn tagged_bare_utools_repository() -> (PathBuf, PathBuf, String) {
+        let source = temporary_directory("utools-git-source");
+        let remote_parent = temporary_directory("utools-git-remote-parent");
+        let remote = remote_parent.join("plugin.git");
+        fs::create_dir_all(source.join("dist")).expect("uTools dist should be created");
+        fs::write(
+            source.join("dist/index.html"),
+            "<main>Imported uTools plugin</main>",
+        )
+        .expect("uTools frontend should be written");
+        fs::write(
+            source.join("plugin.json"),
+            r#"{
+  "name": "GitHub uTools demo",
+  "version": "1.2.3",
+  "main": "dist/index.html",
+  "features": [{
+    "code": "github-utools-demo",
+    "explain": "GitHub uTools demo",
+    "cmds": ["GitHub uTools demo"]
+  }]
+}"#,
+        )
+        .expect("uTools manifest should be written");
+        git_success(&source, &["init", "--quiet"]);
+        git_success(&source, &["config", "user.email", "tests@ihub.local"]);
+        git_success(&source, &["config", "user.name", "iHub tests"]);
+        git_success(&source, &["add", "."]);
+        git_success(&source, &["commit", "--quiet", "-m", "uTools plugin"]);
+        git_success(&source, &["tag", "-a", "v1.2.3", "-m", "release 1.2.3"]);
+        let expected_commit = git_success(&source, &["rev-parse", "v1.2.3^{commit}"]);
+
+        let clone = background_command("git")
+            .args(["clone", "--quiet", "--bare"])
+            .arg(&source)
+            .arg(&remote)
+            .output()
+            .expect("bare uTools Git clone should start");
+        assert!(
+            clone.status.success(),
+            "bare uTools Git clone failed: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        (source, remote_parent, expected_commit)
+    }
+
     fn bare_repository_with_plugin(plugin_id: &str, name: &str) -> (PathBuf, PathBuf) {
         let source = temporary_directory("collision-source");
         let remote_parent = temporary_directory("collision-remote-parent");
@@ -8153,6 +8207,46 @@ mod tests {
                 .map(|source_lock| source_lock.resolved_commit.as_str()),
             Some(expected_commit.as_str())
         );
+
+        let _ = fs::remove_dir_all(storage);
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(remote_parent);
+    }
+
+    #[test]
+    fn pinned_git_install_auto_detects_and_runs_a_public_utools_plugin() {
+        let storage = temporary_directory("utools-git-install-storage");
+        let (source, remote_parent, expected_commit) = tagged_bare_utools_repository();
+        let remote = remote_parent.join("plugin.git");
+        let manager = manager_at(storage.clone());
+
+        let installed = manager
+            .install_from_remote(GitSource {
+                remote: remote.to_string_lossy().into_owned(),
+                requested_ref: "v1.2.3".to_owned(),
+            })
+            .expect("a tagged public uTools repository should install");
+
+        assert!(installed.id.starts_with("utools-"));
+        assert_eq!(installed.name, "GitHub uTools demo");
+        assert_eq!(installed.compatibility, "utools");
+        assert_eq!(installed.command_count, 1);
+        assert_eq!(installed.frontend_entry.as_deref(), Some("dist/index.html"));
+        assert_eq!(installed.commit.as_deref(), Some(expected_commit.as_str()));
+        assert_eq!(
+            installed
+                .source_lock
+                .as_ref()
+                .map(|lock| lock.requested_ref.as_str()),
+            Some("v1.2.3")
+        );
+        assert!(manager
+            .uses_utools_compatibility(&installed.id)
+            .expect("the installed manifest contract should remain queryable"));
+        let bundle = manager
+            .frontend_asset_bundle(&installed.id)
+            .expect("the installed uTools frontend should receive a runtime bundle");
+        assert!(bundle.utools_compat.is_some());
 
         let _ = fs::remove_dir_all(storage);
         let _ = fs::remove_dir_all(source);

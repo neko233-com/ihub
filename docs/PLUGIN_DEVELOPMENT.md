@@ -20,6 +20,8 @@ iHub 插件是一个可发布的目录：前端使用 TypeScript（推荐 Vite�
 
 浏览器中的 `pnpm dev` 只验证页面自身，不等于在 iHub 中运行。开发期请使用上面的“链接本地插件”入口验证宿主 Bridge；它要求绝对目录、验证清单及包内相对路径，并拒绝把 iHub 托管插件目录再次链接为源码。GitHub 直装仍导入构建产物的 Git 快照，不会监听本地文件变更。
 
+插件中心右上角菜单现在提供两条统一入口：“从 GitHub 导入 iHub / uTools 插件”接受 `owner/repo@tag`、`github:owner/repo@tag` 或带 `#ref` 的规范 HTTPS GitHub 地址；“接入本地 iHub / uTools 插件”通过宿主文件夹选择器链接一个已构建目录。两条入口都会先尝试 iHub manifest，再自动识别没有 `id`、声明 `main`/`features` 的公共 uTools `plugin.json`。GitHub 导入会把 ref 解析并锁定到精确 commit、校验全部运行资产后原子安装；本地入口只保存开发链接，不复制或删除原目录。两种方式都不会执行仓库的依赖安装、构建脚本或 Git hook。
+
 链接并打开插件后，可从 iHub 绘制的标题栏点击“分离窗口”（或在该宿主表面激活时按 `Ctrl+D`）。桌面端创建的是 800×600、可调整大小的普通 Tauri 窗口，但插件仍在原来的 loopback iframe/Bridge 边界里；它不会得到 Electron、Node、任意 shell 或 Tauri API。关闭分离窗口会释放该 iframe lease。只检查布局与安全文案时，可在浏览器打开 `http://127.0.0.1:1420/?ihubDetachedPlugin=browser.preview&ihubDetachedPreview=1`；这个专用 QA 路由不会加载你的插件、创建窗口或签发 lease，不能代替桌面端 Bridge 验证。
 
 生成器故意**不**在 `.gitignore` 中忽略 `dist/`。GitHub 导入只读取所选 ref 已提交的文件，不会运行 `pnpm install`、`pnpm build`、CI 配置或 worker 构建脚本；可导入的发布提交必须包含实际的 `dist/` 输出、根目录 `plugin.json` 和每个清单已声明的 `bin/<target>/` 工件。
@@ -197,7 +199,7 @@ await bootstrapPlugin("ihub-plugin-my-feature", async (ihub) => {
 
 静态及动态 `feature.cmds` 的 `regex` 与 `over` 文本匹配指令会进入主启动器：导入或 `setFeature` 时严格校验 label、1–10,000 字符范围和 `/pattern/imsu` 表达式，并由 Rust 的线性时间正则引擎编译；查询时最多返回 12 个宿主生成的匹配结果，不在浏览器主线程执行第三方正则。选择结果后才把当前原始文本以官方 `type: "regex" | "over"`、`from: "main"` 形状交给对应 `onPluginEnter`。`img` 与 `files` 声明同样由宿主投影；图片被规范化并再次解码为不超过 4 MiB 的 PNG，文件数量、类型、扩展名或文件名正则则针对用户刚粘贴且重新验证过的最多 16 个本地对象匹配。`window` matcher 只读取启动器显示前由 native 捕获的精确 HWND/PID，并在选择时重新验证同一所有权后生成官方 `MatchWindow`。只有用户选择具体指令、对应可见 iframe lease 就绪后，宿主才登记该 lease 的精确文件身份授权或披露窗口元数据，并按官方 `type: "img"`、`type: "file"`（`MatchFile[]` payload）或 `type: "window"` 发送事件。静态匹配器声明进入更新安全差异，例行更新不能静默改变；动态匹配器则保存在插件私有设置命名空间并复用同一严格投影。
 
-`onMainPush(callback, onSelect)` 通过宿主固定的 `utools-main-push` 搜索提供器接入主启动器。只有静态或动态 feature 明确设置 `mainPush: true` 时才投影提供器；隐藏 iframe 在查询时仅接收最多 512 bytes 的当前文本，并只对匹配的直接文本指令同步调用 `callback({ code, type: "text", payload })`。每次最多接受 6 个可 JSON 序列化且小于 6 KiB 的 option，`text/title` 均限制为 320 个字符，包内 `icon` 不会绕过宿主 artwork 边界。选择时 Rust 只从 60 秒内的原生已签发搜索快照取回 action/option，再以一次性交互 ID 调用 `onSelect`；只有严格返回 `true` 才打开插件并触发 `onPluginEnter`，`false/undefined` 保持静默。官方示例中的同步粘贴动作可在这一短暂交互区间使用；令牌绑定精确 iframe 租约，并在完成或最长 5 分钟（为文件确认弹窗保留时间）后失效。正则、任意文本、图片、文件与窗口 matcher 尚未投影到该兼容搜索阶段，不能被伪装为已经支持。
+`onMainPush(callback, onSelect)` 通过宿主固定的 `utools-main-push` 搜索提供器接入主启动器。只有静态或动态 feature 明确设置 `mainPush: true` 时才投影提供器；直接文本指令以及 `regex`、`over`、`img`、`files`、`window` matcher 都会先由 Rust 按当前清单和实时上下文复核，再把官方形状的 `{ code, type, payload }` action 交给隐藏 iframe。文本 matcher 会随主搜索直接返回 option；图片、文件与窗口 matcher 先显示宿主匹配动作，用户明确选择后才向隐藏 runtime 披露这一次有界内容并在原位显示 option。callback 同时接受数组和 Promise；每次最多接受 6 个可 JSON 序列化且小于 6 KiB 的 option，`text/title` 均限制为 320 个字符，包内 `icon` 不会绕过宿主 artwork 边界。选择时 Rust 只从 60 秒内的原生已签发搜索快照取回原 action/option，再以一次性交互 ID 调用 `onSelect`；只有严格返回 `true` 才打开插件并以相同 action/option 触发 `onPluginEnter`，`false/undefined` 保持静默。官方示例中的同步粘贴动作可在这一短暂交互区间使用；令牌绑定精确 iframe 租约，并在完成或最长 5 分钟（为文件确认弹窗保留时间）后失效。
 
 `onDbPull(callback)` 会保存回调并只接受未来宿主云同步通道送达的文档数组。当前 iHub 没有跨设备 uTools 云同步，因此不会伪造 pull 事件；与此一致，`replicateStateFromCloud()` 仍如实返回 `null`。
 
@@ -205,7 +207,7 @@ Windows 上还实现了官方同步显示器族：`getPrimaryDisplay/getAllDispl
 
 `desktopCaptureSources(options)` 通过 Chromium/WebView2 的系统屏幕选择器兼容旧式录屏调用，而不是静默枚举所有窗口。它验证官方的 `types`、`thumbnailSize`（最大 512 × 512）与 `fetchWindowIcons` 形状，在同一用户手势内启动 `getDisplayMedia({ video: true, audio: true })`，并用活动 focus lease 防止系统选择器夺焦时隐藏启动器。用户只会得到自己选中的一个 source；其 ID 在当前页面内一次有效、60 秒过期，带有内存 PNG thumbnail 和 `NativeImage` 常用只读方法。随后以该 ID 调用旧式 `getUserMedia({ video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId }}})` 会消费已经授权的同一条 `MediaStream`，不会再次枚举或切换来源；未消费、页面退出、重新选择或超时都会停止 tracks。隐藏 runtime 不获得 `display-capture` Permissions Policy，取消系统选择器会按浏览器错误拒绝 Promise。该兼容层不会伪造所有窗口列表、窗口句柄、应用图标或未被用户选择的缩略图。
 
-`copyImage(value)` 当前接受 PNG Data URL 或 PNG `Uint8Array`，同步 `true` 仍只表示本地校验通过并已排队。压缩数据最多 4 MiB，宿主在写入剪贴板前重新验证 PNG 签名、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。字符串文件路径暂不接受，后续只能通过系统选择器签发的路径授权接入，不能直接开放任意本机路径。
+`copyImage(value)` 接受 PNG Data URL、PNG `Uint8Array`，以及同一当前 surface 由 `showOpenDialog` 明确选择并签发的一条图片路径；任意字符串路径会被拒绝。同步 `true` 仍只表示本地校验通过并已排队。内存 PNG 或所选源文件最多 4 MiB，宿主在写入剪贴板前重新验证对象身份、图片格式、8192 px 单边、1200 万像素和 48 MiB RGBA 上限；每个插件 frame 同时只允许一个大图片请求。
 
 `copyFile(value)` 接受一个路径或最多 16 个路径，且只允许当前可见活动 surface 调用。确认前只检查路径字符串的绝对形式、去重、控制字符和 8 KiB 总上限，不访问文件系统，因此拒绝确认不会成为文件存在性探针；原生警告框会逐项展示插件提交的原始目标。用户明确允许后，宿主才解析对象，并拒绝网络/设备命名空间、符号链接、缺失项和非普通文件/文件夹；通过校验的对象会保持身份防护直到写入系统剪贴板。该确认与通知、系统提示音共用每插件每 10 秒 5 次的可见提醒限流，避免插件连续弹窗。
 

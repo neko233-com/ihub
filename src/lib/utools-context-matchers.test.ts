@@ -10,6 +10,7 @@ describe("uTools context matcher launcher projection", () => {
       label: "压缩图片",
       matcherType: "img",
       matcherIndex: 3,
+      mainPush: false,
     }]);
     expect(result).toEqual(expect.objectContaining({
       id: "utools-context:utools-image-tools:utools-feature-2:3:0",
@@ -27,6 +28,7 @@ describe("uTools context matcher launcher projection", () => {
       label: "处理文件",
       matcherType: "files",
       matcherIndex: index,
+      mainPush: false,
     }));
     expect(utoolsContextMatcherSearchResults(matches)).toHaveLength(12);
   });
@@ -38,12 +40,14 @@ describe("uTools context matcher launcher projection", () => {
       label: "固定记事本",
       matcherType: "window",
       matcherIndex: 1,
+      mainPush: true,
     }]);
 
     expect(result).toEqual(expect.objectContaining({
       metadata: "窗口匹配 · uTools 插件",
       utoolsMatcherType: "window",
       utoolsMatcherIndex: 1,
+      utoolsMainPush: true,
     }));
     expect(result).not.toHaveProperty("utoolsMatcherPayload");
     expect(result).not.toHaveProperty("path");

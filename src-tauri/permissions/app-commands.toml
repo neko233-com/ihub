@@ -121,6 +121,7 @@ commands.allow = [
   "invoke_utools_tool",
   "cancel_utools_tool",
   "query_plugin_search",
+  "query_utools_main_push_action",
   "select_utools_main_push_result",
 ]
 

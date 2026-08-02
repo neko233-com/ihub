@@ -9,12 +9,16 @@ describe("uTools text matcher launcher projection", () => {
       commandId: "utools-feature-1",
       label: "打开网址",
       matcherType: "regex",
+      matcherIndex: 2,
+      mainPush: true,
       payload: "https://example.com",
     }])).toEqual([expect.objectContaining({
       id: "utools-matcher:utools-demo:utools-feature-1:0",
       name: "打开网址",
       utoolsMatcherType: "regex",
+      utoolsMatcherIndex: 2,
       utoolsMatcherPayload: "https://example.com",
+      utoolsMainPush: true,
     })]);
   });
 
@@ -24,6 +28,8 @@ describe("uTools text matcher launcher projection", () => {
       commandId: `command-${index}`,
       label: "匹配",
       matcherType: "over",
+      matcherIndex: index,
+      mainPush: false,
       payload: "text",
     }));
     expect(utoolsTextMatcherSearchResults(matches)).toHaveLength(12);

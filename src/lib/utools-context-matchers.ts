@@ -13,6 +13,7 @@ export interface UtoolsContextCommandMatch {
   label: string;
   matcherType: "img" | "files" | "window" | string;
   matcherIndex: number;
+  mainPush: boolean;
 }
 
 function blobDataUrl(blob: Blob): Promise<string> {
@@ -109,5 +110,6 @@ export function utoolsContextMatcherSearchResults(
     commandId: match.commandId,
     utoolsMatcherType: match.matcherType,
     utoolsMatcherIndex: match.matcherIndex,
+    utoolsMainPush: match.mainPush,
   }));
 }

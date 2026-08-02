@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "registry": "https://github.com/neko233-com/ihub/blob/main/plugins/registry.json",
   "lockState": "resolved",
-  "generatedAt": "2026-07-29T15:32:23.434Z",
+  "generatedAt": "2026-08-02T09:01:52.924Z",
   "packages": [
     {
       "id": "ihub-plugin-ocr",
@@ -557,14 +557,14 @@
       "id": "ihub-plugin-window-manager",
       "source": {
         "url": "https://github.com/neko233-com/ihub-plugin-window-manager",
-        "requestedRef": "v1.0.2"
+        "requestedRef": "v1.0.3"
       },
       "resolved": {
-        "commit": "ae13ec783ef1af037b1ba661c549efcde7f694a3",
-        "version": "1.0.2"
+        "commit": "5a7bf9e8f6212a302a5a645179ea4f7c78a25ddf",
+        "version": "1.0.3"
       },
       "integrity": {
-        "manifestSha256": "3161eeb33914b49f54b4d3a929bf8f56d0135fc5cc5a9273512a730f888ed7ae",
+        "manifestSha256": "c9b78464c33e3cd97727041861ccc8fc3f70d86562cf3860711dccbd13d8c062",
         "artifacts": [
           {
             "target": "web",

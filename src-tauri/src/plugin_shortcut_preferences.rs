@@ -306,6 +306,7 @@ mod tests {
             name: "Plugin".to_owned(),
             version: "1".to_owned(),
             description: None,
+            compatibility: "ihub".to_owned(),
             icon_src: None,
             source: None,
             commit: None,
